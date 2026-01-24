@@ -94,7 +94,7 @@ python scripts/evaluation.py \
   dataset.hf_name=BeIR/trec-covid
 ```
 
-## Build a doc index
+## Build a index
 
 ```
 python scripts/index.py \
@@ -115,5 +115,3 @@ docker run --gpus all -v "$PWD:/workspace" -it splade-repro bash
 - Paper-faithful vs normal: `training.regularization.paper_faithful=true|false`
 - SPLADE v1 vs v2: `training=splade_v1` or `training=splade_v2`
 - Distillation: `training.distill.enabled=true`
-
-# SPLADE
