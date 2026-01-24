@@ -1,13 +1,15 @@
-# splade-repro
+# SPLADE
 
-GenZ-style training + evaluation repo for SPLADE v1/v2 variants with BEIR support.
+Training + evaluation repo for SPLADE v1/v2 variants with BEIR support.
 
 ## Setup
+
 ```
 pip install -r requirements.txt
 ```
 
 ## Data layout
+
 ```
 data/
   msmarco/
@@ -26,7 +28,9 @@ data/
 ```
 
 ### Training JSONL format
+
 Each line must include a query, positives, and negatives.
+
 ```
 {
   "query_id": "q1",
@@ -35,16 +39,20 @@ Each line must include a query, positives, and negatives.
   "negatives": [{"doc_id":"d2","text":"...","teacher_scores": -1.1}]
 }
 ```
+
 Notes:
+
 - `positives` and `negatives` can be lists of strings or dicts with `text`.
 - If distillation is enabled, `teacher_scores` must be present (or provided via `teacher_scores.jsonl`).
 
 ## Train
+
 ```
 python scripts/train.py training=splade_v1 model=splade_v1_sum
 ```
 
 Use Hugging Face MS MARCO (sentence-transformers/msmarco):
+
 ```
 python scripts/train.py \
   dataset@train_dataset=msmarco_hf_train \
@@ -52,6 +60,7 @@ python scripts/train.py \
 ```
 
 Use MiniLM distillation score dataset for training (triplets with scores):
+
 ```
 python scripts/train.py \
   dataset@train_dataset=msmarco_minilm_scores \
@@ -59,6 +68,7 @@ python scripts/train.py \
 ```
 
 Enable BEIR sampled evaluation per epoch:
+
 ```
 python scripts/train.py \
   training.beir_eval.enabled=true \
@@ -67,6 +77,7 @@ python scripts/train.py \
 ```
 
 ## Evaluate (full BEIR / MS MARCO)
+
 ```
 python scripts/evaluation.py \
   testing.checkpoint_path=logs/checkpoints/last.ckpt \
@@ -74,6 +85,7 @@ python scripts/evaluation.py \
 ```
 
 Use Hugging Face BEIR dataset directly:
+
 ```
 python scripts/evaluation.py \
   testing.checkpoint_path=logs/checkpoints/last.ckpt \
@@ -83,6 +95,7 @@ python scripts/evaluation.py \
 ```
 
 ## Build a doc index
+
 ```
 python scripts/index.py \
   testing.checkpoint_path=logs/checkpoints/last.ckpt \
@@ -91,13 +104,16 @@ python scripts/index.py \
 ```
 
 ## Docker
+
 ```
 docker build -f docker/Dockerfile -t splade-repro .
 docker run --gpus all -v "$PWD:/workspace" -it splade-repro bash
 ```
 
 ## Config toggles
+
 - Paper-faithful vs normal: `training.regularization.paper_faithful=true|false`
 - SPLADE v1 vs v2: `training=splade_v1` or `training=splade_v2`
 - Distillation: `training.distill.enabled=true`
+
 # SPLADE
