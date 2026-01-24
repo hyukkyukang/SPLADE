@@ -1,0 +1,11 @@
+torch
+transformers
+lightning
+hydra-core
+omegaconf
+datasets
+tqdm
+numpy
+scipy
+numba
+faiss-cpu

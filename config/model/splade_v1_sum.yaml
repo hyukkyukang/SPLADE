@@ -1,0 +1,8 @@
+# @package model
+defaults:
+  - _base
+
+name: splade_v1_sum
+query_pooling: sum
+doc_pooling: max
+sparse_activation: log1p_relu

@@ -1,0 +1,6 @@
+# @package dataset
+defaults:
+  - _base
+
+name: beir_trec-covid
+beir_dataset: trec-covid

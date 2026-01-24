@@ -1,0 +1,18 @@
+name: splade
+huggingface_name: bert-base-uncased
+huggingface_model_class: AutoModelForMaskedLM
+
+# encoder settings
+dtype: float16
+attn_implementation: sdpa
+is_quantized: false
+
+# encoding options
+max_input_length: 256
+query_pooling: sum
+doc_pooling: max
+sparse_activation: log1p_relu
+normalize: false
+
+# retrieval index
+index_path: null

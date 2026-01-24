@@ -1,0 +1,15 @@
+# @package dataset
+defaults:
+  - _base
+
+name: msmarco_train
+type: msmarco
+split: train
+
+train_path: ${dataset.data_dir}/msmarco/train.jsonl
+teacher_scores_path: ${dataset.data_dir}/msmarco/teacher_scores.jsonl
+
+max_query_length: 32
+max_doc_length: 256
+num_negatives: 4
+num_positives: 1

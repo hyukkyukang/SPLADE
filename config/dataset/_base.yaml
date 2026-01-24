@@ -1,0 +1,32 @@
+# @package dataset
+name: base
+type: custom
+
+data_dir: ${root_dir_path}/data
+split: train
+
+train_path: null
+queries_path: null
+corpus_path: null
+qrels_path: null
+teacher_scores_path: null
+
+max_query_length: 32
+max_doc_length: 256
+num_negatives: 1
+num_positives: 1
+
+beir_dataset: null
+
+use_hf: false
+hf_name: null
+hf_subset: null
+hf_split: train
+hf_cache_dir: null
+hf_max_samples: null
+hf_text_name: null
+hf_teacher_name: null
+hf_teacher_subset: null
+hf_teacher_split: train
+hf_teacher_cache_dir: null
+hf_teacher_max_samples: null

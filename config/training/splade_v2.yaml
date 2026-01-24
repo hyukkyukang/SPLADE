@@ -1,0 +1,11 @@
+# @package training
+defaults:
+  - _base
+
+name: splade_v2
+
+regularization:
+  query_weight: 0.0001
+  doc_weight: 0.0001
+  type: flops
+  paper_faithful: true

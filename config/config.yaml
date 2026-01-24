@@ -1,0 +1,18 @@
+# Global configs
+seed: 10
+log_dir: "logs"
+root_dir_path: "."
+
+# Defaults
+defaults:
+  - _self_
+  - model: splade_v1_sum
+  - dataset: msmarco_train
+  - training: splade_v1
+  - testing: default
+  - hydra/logging: default
+
+hydra:
+  output_subdir: null
+  run:
+    dir: ${log_dir}

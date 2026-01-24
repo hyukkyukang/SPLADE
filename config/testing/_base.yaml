@@ -1,0 +1,16 @@
+# @package testing
+name: default
+
+batch_size: 32
+num_workers: 4
+
+precision: 16-mixed
+use_cpu: false
+strategy: ddp
+num_devices: null
+device_id: 0
+
+metrics: ["mrr@10", "ndcg@10", "recall@100"]
+save_run: false
+run_path: null
+checkpoint_path: null

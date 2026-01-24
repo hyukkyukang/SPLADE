@@ -1,0 +1,10 @@
+# @package training
+defaults:
+  - splade_v2
+
+distill:
+  enabled: true
+  weight: 1.0
+  loss: mse
+  teacher_score_key: teacher_scores
+  fail_on_missing: true

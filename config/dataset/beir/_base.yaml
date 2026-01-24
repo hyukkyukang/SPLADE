@@ -1,0 +1,18 @@
+# @package dataset
+defaults:
+  - /dataset/_base
+
+name: beir_base
+type: beir
+split: test
+
+beir_dataset: null
+data_dir: ${root_dir_path}/data/beir
+
+use_hf: true
+hf_name: BeIR/${dataset.beir_dataset}
+hf_split: ${dataset.split}
+
+queries_path: ${dataset.data_dir}/${dataset.beir_dataset}/queries.jsonl
+corpus_path: ${dataset.data_dir}/${dataset.beir_dataset}/corpus.jsonl
+qrels_path: ${dataset.data_dir}/${dataset.beir_dataset}/qrels/${dataset.split}.tsv

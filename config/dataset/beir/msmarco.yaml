@@ -1,0 +1,6 @@
+# @package dataset
+defaults:
+  - _base
+
+name: beir_msmarco
+beir_dataset: msmarco

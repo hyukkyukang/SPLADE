@@ -1,0 +1,20 @@
+# @package dataset
+defaults:
+  - _base
+
+name: msmarco_hf_train
+type: msmarco
+split: train
+
+use_hf: true
+hf_name: sentence-transformers/msmarco
+hf_subset: triplets
+hf_split: train
+hf_teacher_name: sentence-transformers/msmarco-scores-ms-marco-MiniLM-L6-v2
+hf_teacher_subset: pair
+hf_teacher_split: train
+
+max_query_length: 32
+max_doc_length: 256
+num_negatives: 1
+num_positives: 1

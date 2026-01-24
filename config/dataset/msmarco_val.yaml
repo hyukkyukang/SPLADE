@@ -1,0 +1,15 @@
+# @package dataset
+defaults:
+  - _base
+
+name: msmarco_val
+type: msmarco
+split: dev
+
+train_path: ${dataset.data_dir}/msmarco/val.jsonl
+queries_path: ${dataset.data_dir}/msmarco/queries.dev.jsonl
+corpus_path: ${dataset.data_dir}/msmarco/corpus.jsonl
+qrels_path: ${dataset.data_dir}/msmarco/qrels.dev.tsv
+
+max_query_length: 32
+max_doc_length: 256
