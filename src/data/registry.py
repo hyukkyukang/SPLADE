@@ -1,6 +1,6 @@
 from typing import Any, Callable
 
-from src.dataset.datasets.train_hf import (
+from src.data.datasets.train_hf import (
     HFMSMarcoTrainDataset,
     HFMSMarcoTrainIterableDataset,
 )

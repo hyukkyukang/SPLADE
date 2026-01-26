@@ -11,7 +11,8 @@ logs/
 outputs/
 checkpoints/
 indexes/
-data/
 *.log
 *.pt
 *.ckpt
+
+/data/

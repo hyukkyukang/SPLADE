@@ -1,21 +1,14 @@
 from __future__ import annotations
 
-import math
-from typing import Any
-
 import lightning as L
 import torch
-from torch import nn
 
-from src.metric.beir_evaluator import BEIREvaluator
 from src.model.losses import (
     distillation_loss,
     multi_positive_contrastive_loss,
     regularization_loss,
 )
 from src.model.splade import SpladeModel
-from src.tokenization.tokenizer import build_tokenizer
-from src.utils import is_rank_zero, log_if_rank_zero
 
 
 class SPLADETrainingModule(L.LightningModule):
@@ -23,7 +16,13 @@ class SPLADETrainingModule(L.LightningModule):
         super().__init__()
         self.cfg = cfg
 
-        dtype = torch.float16 if cfg.model.dtype == "float16" else None
+        dtype = None
+        if cfg.model.dtype == "float16":
+            dtype = torch.float16
+        elif cfg.model.dtype in {"bfloat16", "bf16"}:
+            dtype = torch.bfloat16
+        if cfg.training.use_cpu and dtype in {torch.float16, torch.bfloat16}:
+            dtype = torch.float32
         self.model = SpladeModel(
             model_name=cfg.model.huggingface_name,
             query_pooling=cfg.model.query_pooling,
@@ -38,9 +37,6 @@ class SPLADETrainingModule(L.LightningModule):
         self.distill_cfg = cfg.training.distill
         self.reg_cfg = cfg.training.regularization
         self.loss_cfg = cfg.training.loss
-        self.beir_cfg = cfg.training.beir_eval
-        self.beir_evaluator: BEIREvaluator | None = None
-        self._beir_tokenizer = None
 
     def forward(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         q = self.model.encode_queries(
@@ -198,37 +194,6 @@ class SPLADETrainingModule(L.LightningModule):
         step = max(int(self.global_step), 0)
         progress = min(step, schedule_steps) / float(schedule_steps)
         return progress * progress
-
-    def on_fit_start(self) -> None:
-        if self.beir_cfg.enabled:
-            self._beir_tokenizer = build_tokenizer(self.cfg.model.huggingface_name)
-            self.beir_evaluator = BEIREvaluator(
-                model=self.model,
-                tokenizer=self._beir_tokenizer,
-                max_query_length=self.cfg.train_dataset.max_query_length,
-                max_doc_length=self.cfg.train_dataset.max_doc_length,
-                batch_size=self.cfg.training.eval_batch_size,
-                device=self.device,
-            )
-
-    def on_validation_epoch_end(self) -> None:
-        if not self.beir_cfg.enabled or self.beir_evaluator is None:
-            return
-        if not is_rank_zero():
-            return
-        for dataset_name in self.beir_cfg.datasets:
-            metrics = self.beir_evaluator.evaluate_hf(
-                hf_name=f"BeIR/{dataset_name}",
-                split=self.beir_cfg.split,
-                metrics=self.beir_cfg.metrics,
-                top_k=100,
-                sample_size=self.beir_cfg.sample_size,
-                max_docs=self.beir_cfg.max_docs,
-                cache_dir=self.beir_cfg.hf_cache_dir,
-            )
-            for metric_name, value in metrics.items():
-                key = f"beir_{dataset_name}_{metric_name}"
-                self.log(key, value, on_epoch=True, prog_bar=False, sync_dist=False)
 
     @staticmethod
     def _compute_mrr(

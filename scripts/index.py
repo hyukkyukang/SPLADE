@@ -15,7 +15,7 @@ import torch
 from omegaconf import DictConfig
 
 from config.path import ABS_CONFIG_DIR
-from src.dataset.datasets.retrieval import RetrievalDataset
+from src.data.datasets.retrieval_hf import HFRetrievalDataset
 from src.model.retriever.sparse_retriever import SparseRetriever
 from src.model.splade import SpladeModel
 from src.tokenization.tokenizer import build_tokenizer
@@ -52,10 +52,18 @@ def main(cfg: DictConfig) -> None:
     model = _load_model(cfg).to(device)
     tokenizer = build_tokenizer(cfg.model.huggingface_name)
 
-    dataset = RetrievalDataset.from_hf(
-        hf_name=cfg.dataset.hf_name,
+    hf_name = cfg.dataset.hf_name or (
+        f"BeIR/{cfg.dataset.beir_dataset}" if cfg.dataset.beir_dataset else None
+    )
+    if hf_name is None:
+        raise ValueError("dataset.hf_name or dataset.beir_dataset must be set.")
+
+    dataset = HFRetrievalDataset.from_hf(
+        hf_name=hf_name,
         split=cfg.dataset.hf_split,
         cache_dir=cfg.dataset.hf_cache_dir,
+        tokenizer=tokenizer,
+        max_query_length=cfg.dataset.max_query_length,
     )
 
     retriever = SparseRetriever(

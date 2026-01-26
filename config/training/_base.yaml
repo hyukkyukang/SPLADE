@@ -47,7 +47,6 @@ beir_eval:
   datasets: []
   sample_size: 128
   max_docs: 50000
-  metrics: ["mrr@10"]
   split: test
   hf_cache_dir: null
 

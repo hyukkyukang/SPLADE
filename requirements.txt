@@ -1,6 +1,7 @@
 torch
 transformers
 lightning[extra]
+torchmetrics
 wandb
 python-dotenv
 hydra-core

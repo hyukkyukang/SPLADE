@@ -6,7 +6,7 @@ from typing import Iterable
 import torch
 from torch.utils.data import DataLoader
 
-from src.dataset.datasets.retrieval import CorpusDataset, Document, Query, QueryDataset
+from src.data.dataclass import CorpusDataset, Document, Query, QueryDataset
 
 
 class SparseRetriever:
@@ -72,6 +72,30 @@ class SparseRetriever:
                     tokens["attention_mask"].to(self.device),
                 )
                 reps.append(d_reps.cpu())
+        return ids, torch.cat(reps, dim=0)
+
+    def encode_queries(self, queries: list[Query]) -> tuple[list[str], torch.Tensor]:
+        """Public wrapper for query encoding."""
+        return self._encode_queries(queries)
+
+    def encode_corpus(self, docs: list[Document]) -> tuple[list[str], torch.Tensor]:
+        """Public wrapper for corpus encoding."""
+        return self._encode_corpus(docs)
+
+    def encode_queries_from_loader(
+        self, loader: DataLoader
+    ) -> tuple[list[str], torch.Tensor]:
+        ids: list[str] = []
+        reps: list[torch.Tensor] = []
+        self.model.eval()
+        with torch.no_grad():
+            for batch in loader:
+                ids.extend(batch["qids"])
+                q_reps = self.model.encode_queries(
+                    batch["query_input_ids"].to(self.device),
+                    batch["query_attention_mask"].to(self.device),
+                )
+                reps.append(q_reps.cpu())
         return ids, torch.cat(reps, dim=0)
 
     def retrieve(

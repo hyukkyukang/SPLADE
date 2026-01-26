@@ -17,7 +17,7 @@ from lightning.pytorch.strategies import DDPStrategy, DeepSpeedStrategy, FSDPStr
 from omegaconf import DictConfig, OmegaConf
 
 from config.path import ABS_CONFIG_DIR
-from src.dataset.train_datamodule import TrainDataModule
+from src.data.datamodule import TrainDataModule
 from src.model.pl_module_train import SPLADETrainingModule
 from src.utils import log_if_rank_zero, set_seed
 from src.utils.logging import (
@@ -110,7 +110,7 @@ def main(cfg: DictConfig) -> None:
     log_if_rank_zero(logger, f"Random seed set to: {cfg.seed}")
 
     model = SPLADETrainingModule(cfg=cfg)
-    data_module = TrainDataModule(cfg=cfg)
+    data_module: TrainDataModule = TrainDataModule(cfg=cfg)
 
     trainer_kwargs = (
         _get_cpu_trainer_kwargs(cfg)
