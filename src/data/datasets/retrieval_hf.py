@@ -9,7 +9,7 @@ from omegaconf import OmegaConf
 from src.data.dataclass import Document, Query
 from src.data.datasets.base import BaseRetrievalDataset
 from src.data.mixins import HuggingFaceDatasetMixin
-from src.data.types import RetrievalDataItem
+from src.data.dataclass import RetrievalDataItem
 from src.data.collators import RetrievalCollator
 
 

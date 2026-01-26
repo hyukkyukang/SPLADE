@@ -5,7 +5,7 @@ from typing import Sequence
 import torch
 from torch.nn.utils.rnn import pad_sequence
 
-from src.data.types import RerankingDataItem, RetrievalDataItem
+from src.data.dataclass import RerankingDataItem, RetrievalDataItem
 
 
 class RerankingCollator:

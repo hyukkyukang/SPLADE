@@ -6,12 +6,14 @@ from typing import Any, Dict, List
 import lightning as L
 import torch
 from omegaconf import DictConfig
+from transformers import PreTrainedTokenizerBase
 
 from src.data.dataclass import Query
 from src.metric.retrieval import RetrievalMetrics, resolve_k_list
-from src.model.retriever.sparse_retriever import SparseRetriever
-from src.model.splade import SpladeModel
-from src.tokenization.tokenizer import build_tokenizer
+from src.model.retriever.sparse.neural.splade import SPLADE
+from src.model.retriever.sparse.neural.splade_model import SpladeModel
+from src.utils.model_utils import build_splade_model, load_splade_checkpoint
+from src.utils.transformers import build_tokenizer
 
 logger = logging.getLogger("SPLADEEvaluationModule")
 
@@ -26,8 +28,11 @@ class SPLADEEvaluationModule(L.LightningModule):
         self.save_hyperparameters(cfg)
 
         self.model: SpladeModel = self._load_model()
-        self._tokenizer: Any = build_tokenizer(self.cfg.model.huggingface_name)
-        self._retriever: SparseRetriever | None = None
+        # Build tokenizer once for retriever setup.
+        self._tokenizer: PreTrainedTokenizerBase = build_tokenizer(
+            self.cfg.model.huggingface_name
+        )
+        self._retriever: SPLADE | None = None
 
         self._k_list: List[int] = resolve_k_list(self.cfg.testing.k_list)
         self._k_max: int = max(self._k_list)
@@ -39,37 +44,18 @@ class SPLADEEvaluationModule(L.LightningModule):
 
         self._doc_ids: List[str] | None = None
         self._doc_reps_t: torch.Tensor | None = None
+        self._local_query_offset: int = 0
 
     def _load_model(self) -> SpladeModel:
-        dtype: torch.dtype | None = None
-        if self.cfg.model.dtype == "float16":
-            dtype = torch.float16
-        elif self.cfg.model.dtype in {"bfloat16", "bf16"}:
-            dtype = torch.bfloat16
-        if self.cfg.testing.use_cpu and dtype in {torch.float16, torch.bfloat16}:
-            dtype = torch.float32
-
-        model: SpladeModel = SpladeModel(
-            model_name=self.cfg.model.huggingface_name,
-            query_pooling=self.cfg.model.query_pooling,
-            doc_pooling=self.cfg.model.doc_pooling,
-            sparse_activation=self.cfg.model.sparse_activation,
-            attn_implementation=self.cfg.model.attn_implementation,
-            dtype=dtype,
-            normalize=self.cfg.model.normalize,
+        model: SpladeModel = build_splade_model(
+            self.cfg, use_cpu=self.cfg.testing.use_cpu
         )
 
         checkpoint_path: str | None = getattr(self.cfg.testing, "checkpoint_path", None)
         if checkpoint_path:
-            checkpoint: dict[str, Any] = torch.load(
-                checkpoint_path, map_location="cpu"
-            )
-            state_dict: dict[str, Any] = checkpoint.get("state_dict", checkpoint)
-            filtered: dict[str, Any] = {}
-            for key, value in state_dict.items():
-                if key.startswith("model."):
-                    filtered[key.replace("model.", "", 1)] = value
-            missing, unexpected = model.load_state_dict(filtered, strict=False)
+            missing: list[str]
+            unexpected: list[str]
+            missing, unexpected = load_splade_checkpoint(model, checkpoint_path)
             logger.info(
                 "Loaded checkpoint. Missing: %d, unexpected: %d",
                 len(missing),
@@ -79,11 +65,12 @@ class SPLADEEvaluationModule(L.LightningModule):
         return model
 
     def on_test_start(self) -> None:
+        self._local_query_offset = 0
         self.metric_collection.reset()
         self.metric_collection.to(torch.device("cpu"))
 
         if self._retriever is None:
-            self._retriever = SparseRetriever(
+            self._retriever = SPLADE(
                 model=self.model,
                 tokenizer=self._tokenizer,
                 max_query_length=self.cfg.dataset.max_query_length,
@@ -92,11 +79,13 @@ class SPLADEEvaluationModule(L.LightningModule):
                 device=self.device,
             )
 
-        datamodule = self.trainer.datamodule
+        datamodule: Any = self.trainer.datamodule
         if datamodule is None:
             raise ValueError("Evaluation requires a DataModule with BEIRDataset.")
 
-        corpus_docs = datamodule.test_dataset.corpus
+        corpus_docs: list[Any] = datamodule.test_dataset.corpus
+        self._doc_ids: List[str]
+        doc_reps: torch.Tensor
         self._doc_ids, doc_reps = self._retriever.encode_corpus(corpus_docs)
         self._doc_reps_t = doc_reps.T
 
@@ -108,27 +97,28 @@ class SPLADEEvaluationModule(L.LightningModule):
     ) -> None:
         _ = dataloader_idx
         if self._retriever is None or self._doc_reps_t is None or self._doc_ids is None:
-            raise ValueError("Retriever and corpus must be initialized in on_test_start.")
+            raise ValueError(
+                "Retriever and corpus must be initialized in on_test_start."
+            )
 
         query_texts: List[str] = batch["query_text"]
         qids: List[str] = batch["qid"]
-        relevance_judgments_list: List[Dict[str, int]] = batch[
-            "relevance_judgments"
-        ]
+        relevance_judgments_list: List[Dict[str, int]] = batch["relevance_judgments"]
 
         queries: List[Query] = [
             Query(query_id=str(qid), text=str(text))
             for qid, text in zip(qids, query_texts)
         ]
+        query_ids: List[str]
+        query_reps: torch.Tensor
         query_ids, query_reps = self._retriever.encode_queries(queries)
         scores_batch: torch.Tensor = torch.matmul(query_reps, self._doc_reps_t)
 
         world_size: int = int(self.trainer.world_size)
         global_rank: int = int(self.trainer.global_rank)
-        batch_size: int = len(query_ids)
-        global_query_offset: int = (
-            batch_idx * world_size + global_rank
-        ) * batch_size
+        base_offset: int = self._local_query_offset
+        # Track per-rank progress to keep unique global indexes across batches.
+        self._local_query_offset += len(query_ids)
 
         for i, (scores, relevance_judgments) in enumerate(
             zip(scores_batch, relevance_judgments_list)
@@ -157,7 +147,7 @@ class SPLADEEvaluationModule(L.LightningModule):
             if not final_scores:
                 continue
 
-            global_query_idx: int = global_query_offset + i
+            global_query_idx: int = global_rank + world_size * (base_offset + i)
             score_tensor: torch.Tensor = torch.tensor(
                 final_scores, dtype=torch.float32, device=scores.device
             )
@@ -183,7 +173,5 @@ class SPLADEEvaluationModule(L.LightningModule):
 
         if self.trainer.is_global_zero:
             metrics: Dict[str, torch.Tensor] = self.metric_collection.compute()
-            self.log_dict(
-                metrics, sync_dist=False, prog_bar=True, rank_zero_only=True
-            )
+            self.log_dict(metrics, sync_dist=False, prog_bar=True, rank_zero_only=True)
         self.metric_collection.reset()

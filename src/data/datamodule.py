@@ -4,16 +4,20 @@ from functools import cached_property
 
 import lightning as L
 from torch.utils.data import DataLoader
+from transformers import PreTrainedTokenizerBase
 
 from src.data.registry import DATASET_REGISTRY
-from src.tokenization.tokenizer import build_tokenizer
+from src.utils.transformers import build_tokenizer
 
 
 class TrainDataModule(L.LightningDataModule):
     def __init__(self, cfg) -> None:
         super().__init__()
         self.cfg = cfg
-        self.tokenizer = build_tokenizer(cfg.model.huggingface_name)
+        # Build a shared tokenizer for dataset construction.
+        self.tokenizer: PreTrainedTokenizerBase = build_tokenizer(
+            cfg.model.huggingface_name
+        )
 
     @cached_property
     def train_dataset(self):

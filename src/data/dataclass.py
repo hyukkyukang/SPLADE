@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List
+from typing import Dict, List
 
+import torch
 from torch.utils.data import Dataset
 
 
@@ -20,6 +21,47 @@ class Document:
 
     doc_id: str
     text: str
+
+
+@dataclass(frozen=True)
+class DataTuple:
+    """Dataset item metadata for positive/negative pools."""
+
+    qid: str
+    pos_ids: List[str]
+    pos_scores: List[float]
+    neg_ids: List[str]
+
+
+@dataclass(frozen=True)
+class RerankingDataItem:
+    """Training item with query/document tensors and labels."""
+
+    data_idx: int
+    qid: str
+    pos_ids: List[str]
+    neg_ids: List[str]
+    query_text: str
+    doc_texts: List[str]
+    query_input_ids: torch.Tensor
+    query_attention_mask: torch.Tensor
+    doc_input_ids: torch.Tensor
+    doc_attention_mask: torch.Tensor
+    doc_mask: torch.Tensor
+    pos_mask: torch.Tensor
+    teacher_scores: torch.Tensor
+
+
+@dataclass(frozen=True)
+class RetrievalDataItem:
+    """Evaluation item with relevance judgments and query tensors."""
+
+    data_idx: int
+    qid: str
+    relevance_judgments: Dict[str, float]
+    query_text: str
+    query_input_ids: torch.Tensor
+    query_attention_mask: torch.Tensor
 
 
 class QueryDataset(Dataset[Query]):

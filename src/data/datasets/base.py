@@ -8,7 +8,7 @@ from datasets import Dataset
 from omegaconf import DictConfig
 from torch.utils.data import get_worker_info
 
-from src.data.types import DataTuple, RerankingDataItem, RetrievalDataItem
+from src.data.dataclass import DataTuple, RerankingDataItem, RetrievalDataItem
 
 
 class BaseDataset(abc.ABC):

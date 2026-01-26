@@ -7,15 +7,19 @@ from typing import Iterable
 
 import torch
 from datasets import load_dataset
+from omegaconf import DictConfig
 from torch.utils.data import IterableDataset, get_worker_info
+from transformers import PreTrainedTokenizerBase
 
 from src.data.collators import RerankingCollator
 from src.data.datasets.base import BaseDataset
 from src.data.mixins import HuggingFaceDatasetMixin
-from src.data.types import RerankingDataItem
+from src.data.dataclass import RerankingDataItem
 
 
 class _HFMSMarcoBase:
+    cfg: DictConfig
+    tokenizer: PreTrainedTokenizerBase
     query_map: dict[str, str]
     corpus_map: dict[str, str]
     num_positives: int
