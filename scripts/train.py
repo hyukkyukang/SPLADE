@@ -2,6 +2,7 @@ import warnings
 
 warnings.simplefilter(action="ignore", category=FutureWarning)
 
+
 import os
 from datetime import timedelta
 from typing import Any
@@ -9,9 +10,11 @@ from typing import Any
 import hydra
 import lightning as L
 import torch
+from dotenv import load_dotenv
 from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
+from lightning.pytorch.loggers import CSVLogger, WandbLogger
 from lightning.pytorch.strategies import DDPStrategy, DeepSpeedStrategy, FSDPStrategy
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 
 from config.path import ABS_CONFIG_DIR
 from src.dataset.train_datamodule import TrainDataModule
@@ -26,8 +29,8 @@ from src.utils.logging import (
     suppress_pytorch_lightning_tips,
 )
 
-
 logger = get_logger(__name__, __file__)
+load_dotenv()
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 torch.set_float32_matmul_precision("high")
 DDP_TIMEOUT_HOURS = 1
@@ -89,7 +92,11 @@ def _get_precision(cfg: DictConfig) -> str:
     precision = cfg.training.precision
     if cfg.training.use_cpu and precision == "16-mixed":
         return "bf16-mixed"
-    if not cfg.training.use_cpu and "bf16" in precision and not torch.cuda.is_bf16_supported():
+    if (
+        not cfg.training.use_cpu
+        and "bf16" in precision
+        and not torch.cuda.is_bf16_supported()
+    ):
         return "16-mixed"
     return precision
 
@@ -123,6 +130,20 @@ def main(cfg: DictConfig) -> None:
         save_last=True,
     )
 
+    wandb_cfg = cfg.training.wandb
+    wandb_logger = WandbLogger(
+        project=wandb_cfg.project,
+        entity=wandb_cfg.entity,
+        name=wandb_cfg.name,
+        group=wandb_cfg.group,
+        tags=list(wandb_cfg.tags) if wandb_cfg.tags is not None else None,
+        mode=wandb_cfg.mode,
+        log_model=wandb_cfg.log_model,
+        save_dir=wandb_cfg.save_dir,
+    )
+    wandb_logger.log_hyperparams(OmegaConf.to_container(cfg, resolve=True))
+    csv_logger = CSVLogger(save_dir=cfg.log_dir, name="lightning_logs")
+
     trainer = L.Trainer(
         deterministic=False,
         precision=precision,
@@ -132,6 +153,7 @@ def main(cfg: DictConfig) -> None:
         limit_val_batches=cfg.training.limit_val_batches,
         log_every_n_steps=cfg.training.log_every_n_steps,
         default_root_dir=cfg.log_dir,
+        logger=[wandb_logger, csv_logger],
         callbacks=[checkpoint_callback, LearningRateMonitor(logging_interval="step")],
         **trainer_kwargs,
     )

@@ -43,7 +43,9 @@ class SPLADETrainingModule(L.LightningModule):
         self._beir_tokenizer = None
 
     def forward(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-        q = self.model.encode_queries(batch["query_input_ids"], batch["query_attention_mask"])
+        q = self.model.encode_queries(
+            batch["query_input_ids"], batch["query_attention_mask"]
+        )
         d = self.model.encode_docs(batch["doc_input_ids"], batch["doc_attention_mask"])
         return {"q": q, "d": d}
 
@@ -79,6 +81,8 @@ class SPLADETrainingModule(L.LightningModule):
 
         metrics: dict[str, torch.Tensor] = {"loss": loss}
 
+        lambda_scale = self._lambda_schedule_multiplier()
+
         if self.distill_cfg.enabled:
             teacher_scores = batch["teacher_scores"]
             distill = distillation_loss(
@@ -94,7 +98,7 @@ class SPLADETrainingModule(L.LightningModule):
             q_reg = regularization_loss(
                 q_reps, self.reg_cfg.type, self.reg_cfg.paper_faithful
             )
-            loss = loss + self.reg_cfg.query_weight * q_reg
+            loss = loss + (self.reg_cfg.query_weight * lambda_scale) * q_reg
             metrics["q_reg"] = q_reg
 
         if self.reg_cfg.doc_weight > 0:
@@ -105,7 +109,7 @@ class SPLADETrainingModule(L.LightningModule):
                     self.reg_cfg.type,
                     self.reg_cfg.paper_faithful,
                 )
-                loss = loss + self.reg_cfg.doc_weight * doc_reg
+                loss = loss + (self.reg_cfg.doc_weight * lambda_scale) * doc_reg
                 metrics["d_reg"] = doc_reg
 
         metrics["loss"] = loss
@@ -115,11 +119,20 @@ class SPLADETrainingModule(L.LightningModule):
 
         return metrics
 
-    def training_step(self, batch: dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
+    def training_step(
+        self, batch: dict[str, torch.Tensor], batch_idx: int
+    ) -> torch.Tensor:
         metrics = self._training_step_shared(batch, stage="train")
-        self.log("train_loss", metrics["loss"], on_step=True, on_epoch=True, prog_bar=True)
+        self.log(
+            "train_loss", metrics["loss"], on_step=True, on_epoch=True, prog_bar=True
+        )
         if "distill_loss" in metrics:
-            self.log("train_distill_loss", metrics["distill_loss"], on_step=True, on_epoch=True)
+            self.log(
+                "train_distill_loss",
+                metrics["distill_loss"],
+                on_step=True,
+                on_epoch=True,
+            )
         if "q_reg" in metrics:
             self.log("train_q_reg", metrics["q_reg"], on_step=True, on_epoch=True)
         if "d_reg" in metrics:
@@ -175,6 +188,17 @@ class SPLADETrainingModule(L.LightningModule):
 
         return optimizer
 
+    def _lambda_schedule_multiplier(self) -> float:
+        schedule_steps = getattr(self.reg_cfg, "schedule_steps", 0)
+        if schedule_steps is None:
+            return 1.0
+        schedule_steps = int(schedule_steps)
+        if schedule_steps <= 0:
+            return 1.0
+        step = max(int(self.global_step), 0)
+        progress = min(step, schedule_steps) / float(schedule_steps)
+        return progress * progress
+
     def on_fit_start(self) -> None:
         if self.beir_cfg.enabled:
             self._beir_tokenizer = build_tokenizer(self.cfg.model.huggingface_name)
@@ -193,29 +217,15 @@ class SPLADETrainingModule(L.LightningModule):
         if not is_rank_zero():
             return
         for dataset_name in self.beir_cfg.datasets:
-            if self.beir_cfg.use_hf:
-                metrics = self.beir_evaluator.evaluate_hf(
-                    hf_name=f"BeIR/{dataset_name}",
-                    split=self.beir_cfg.split,
-                    metrics=self.beir_cfg.metrics,
-                    top_k=100,
-                    sample_size=self.beir_cfg.sample_size,
-                    max_docs=self.beir_cfg.max_docs,
-                    cache_dir=self.beir_cfg.hf_cache_dir,
-                )
-            else:
-                corpus_path = f"{self.beir_cfg.data_dir}/{dataset_name}/corpus.jsonl"
-                queries_path = f"{self.beir_cfg.data_dir}/{dataset_name}/queries.jsonl"
-                qrels_path = f"{self.beir_cfg.data_dir}/{dataset_name}/qrels/{self.beir_cfg.split}.tsv"
-                metrics = self.beir_evaluator.evaluate(
-                    corpus_path=corpus_path,
-                    queries_path=queries_path,
-                    qrels_path=qrels_path,
-                    metrics=self.beir_cfg.metrics,
-                    top_k=100,
-                    sample_size=self.beir_cfg.sample_size,
-                    max_docs=self.beir_cfg.max_docs,
-                )
+            metrics = self.beir_evaluator.evaluate_hf(
+                hf_name=f"BeIR/{dataset_name}",
+                split=self.beir_cfg.split,
+                metrics=self.beir_cfg.metrics,
+                top_k=100,
+                sample_size=self.beir_cfg.sample_size,
+                max_docs=self.beir_cfg.max_docs,
+                cache_dir=self.beir_cfg.hf_cache_dir,
+            )
             for metric_name, value in metrics.items():
                 key = f"beir_{dataset_name}_{metric_name}"
                 self.log(key, value, on_epoch=True, prog_bar=False, sync_dist=False)

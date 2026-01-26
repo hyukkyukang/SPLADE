@@ -11,9 +11,20 @@ defaults:
   - dataset@val_dataset: msmarco_hf_val
   - training: splade_v1
   - testing: default
-  - hydra/logging: default
+  # The following overrides are necessary to make the logging colorized.
+  - override hydra/job_logging: colorlog_custom
+
 
 hydra:
   output_subdir: null
   run:
     dir: ${log_dir}
+  job_logging:
+    handlers:
+      console:
+        class: logging.StreamHandler
+        formatter: colorlog
+        stream: ext://sys.stdout
+      file:
+        class: logging.FileHandler
+        filename: ${log_dir}/evaluate.log

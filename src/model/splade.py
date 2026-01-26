@@ -50,7 +50,7 @@ class SpladeEncoder(nn.Module):
         if attn_implementation is not None:
             kwargs["attn_implementation"] = attn_implementation
         if dtype is not None:
-            kwargs["torch_dtype"] = dtype
+            kwargs["dtype"] = dtype
         self.mlm = AutoModelForMaskedLM.from_pretrained(model_name, **kwargs)
         self.sparse_activation = sparse_activation
 

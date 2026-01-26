@@ -2,6 +2,11 @@ import warnings
 
 warnings.simplefilter(action="ignore", category=FutureWarning)
 
+# For Python 3.14 compatibility
+from src.utils.logging import patch_hydra_argparser_for_python314
+
+patch_hydra_argparser_for_python314()
+
 import os
 
 import hydra
@@ -14,13 +19,10 @@ from src.model.splade import SpladeModel
 from src.tokenization.tokenizer import build_tokenizer
 from src.utils.logging import (
     get_logger,
-    patch_hydra_argparser_for_python314,
     setup_tqdm_friendly_logging,
 )
 
-
 logger = get_logger(__name__, __file__)
-patch_hydra_argparser_for_python314()
 
 
 def _load_model(cfg: DictConfig) -> SpladeModel:
@@ -43,7 +45,9 @@ def _load_model(cfg: DictConfig) -> SpladeModel:
             if key.startswith("model."):
                 filtered[key.replace("model.", "", 1)] = value
         missing, unexpected = model.load_state_dict(filtered, strict=False)
-        logger.info(f"Loaded checkpoint. Missing: {len(missing)}, unexpected: {len(unexpected)}")
+        logger.info(
+            f"Loaded checkpoint. Missing: {len(missing)}, unexpected: {len(unexpected)}"
+        )
     return model
 
 
@@ -64,22 +68,13 @@ def main(cfg: DictConfig) -> None:
         device=device,
     )
 
-    if cfg.dataset.use_hf and cfg.dataset.hf_name:
-        metrics = evaluator.evaluate_hf(
-            hf_name=cfg.dataset.hf_name,
-            split=cfg.dataset.hf_split,
-            metrics=cfg.testing.metrics,
-            top_k=100,
-            cache_dir=cfg.dataset.hf_cache_dir,
-        )
-    else:
-        metrics = evaluator.evaluate(
-            corpus_path=cfg.dataset.corpus_path,
-            queries_path=cfg.dataset.queries_path,
-            qrels_path=cfg.dataset.qrels_path,
-            metrics=cfg.testing.metrics,
-            top_k=100,
-        )
+    metrics = evaluator.evaluate_hf(
+        hf_name=cfg.dataset.hf_name,
+        split=cfg.dataset.hf_split,
+        metrics=cfg.testing.metrics,
+        top_k=100,
+        cache_dir=cfg.dataset.hf_cache_dir,
+    )
 
     for name, value in metrics.items():
         logger.info(f"{cfg.dataset.name} {name}: {value:.4f}")

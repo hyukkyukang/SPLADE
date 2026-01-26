@@ -10,9 +10,16 @@ use_hf: true
 hf_name: sentence-transformers/msmarco
 hf_subset: triplets
 hf_split: train
+hf_text_name: null
+hf_cache_dir: null
+hf_max_samples: null
+hf_streaming: false
+hf_shuffle_buffer_size: 10000
 hf_teacher_name: sentence-transformers/msmarco-scores-ms-marco-MiniLM-L6-v2
 hf_teacher_subset: pair
 hf_teacher_split: train
+hf_teacher_cache_dir: null
+hf_teacher_max_samples: null
 
 max_query_length: 32
 max_doc_length: 256

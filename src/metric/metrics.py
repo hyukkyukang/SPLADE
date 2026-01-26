@@ -4,7 +4,9 @@ import math
 from typing import Iterable
 
 
-def mrr_at_k(qrels: dict[str, dict[str, int]], results: dict[str, list[str]], k: int) -> float:
+def mrr_at_k(
+    qrels: dict[str, dict[str, int]], results: dict[str, list[str]], k: int
+) -> float:
     total = 0.0
     count = 0
     for qid, ranking in results.items():

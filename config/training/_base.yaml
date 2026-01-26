@@ -48,7 +48,15 @@ beir_eval:
   sample_size: 128
   max_docs: 50000
   metrics: ["mrr@10"]
-  data_dir: ${root_dir_path}/data/beir
   split: test
-  use_hf: true
   hf_cache_dir: null
+
+wandb:
+  project: ${oc.env:WANDB_PROJECT,splade}
+  entity: ${oc.env:WANDB_ENTITY,null}
+  name: ${oc.env:WANDB_NAME,null}
+  group: ${oc.env:WANDB_GROUP,null}
+  tags: []
+  mode: ${oc.env:WANDB_MODE,online}
+  log_model: false
+  save_dir: ${log_dir}

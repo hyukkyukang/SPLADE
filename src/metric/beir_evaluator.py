@@ -28,29 +28,6 @@ class BEIREvaluator:
             device=device,
         )
 
-    def evaluate(
-        self,
-        corpus_path: str,
-        queries_path: str,
-        qrels_path: str,
-        metrics: list[str],
-        top_k: int = 100,
-        sample_size: int | None = None,
-        max_docs: int | None = None,
-    ) -> dict[str, float]:
-        dataset = RetrievalDataset(
-            corpus_path=corpus_path,
-            queries_path=queries_path,
-            qrels_path=qrels_path,
-        )
-        return self._evaluate_dataset(
-            dataset=dataset,
-            metrics=metrics,
-            top_k=top_k,
-            sample_size=sample_size,
-            max_docs=max_docs,
-        )
-
     def evaluate_hf(
         self,
         hf_name: str,
@@ -61,7 +38,9 @@ class BEIREvaluator:
         max_docs: int | None = None,
         cache_dir: str | None = None,
     ) -> dict[str, float]:
-        dataset = RetrievalDataset.from_hf(hf_name=hf_name, split=split, cache_dir=cache_dir)
+        dataset = RetrievalDataset.from_hf(
+            hf_name=hf_name, split=split, cache_dir=cache_dir
+        )
         return self._evaluate_dataset(
             dataset=dataset,
             metrics=metrics,

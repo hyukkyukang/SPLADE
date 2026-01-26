@@ -1,7 +1,7 @@
 services:
-    LSR:
-        image: hyukkyukang/lsr:latest
-        container_name: LSR
+    SPLADE:
+        image: hyukkyukang/splade:latest
+        container_name: SPLADE
 
         shm_size: 24gb
         ulimits:
@@ -15,12 +15,13 @@ services:
             - TZ=Asia/Seoul
             - UID=${UID}
             - GID=${GID}
+            - NVIDIA_VISIBLE_DEVICES=4,5,6,7
 
         volumes:
             - /etc/timezone:/etc/timezone:ro
-            - ./:/home/user/LSR
-            - /mnt:/mnt
-        working_dir: /home/user/LSR
+            - /home/hyukkyukang/SPLADE:/home/user/SPLADE
+            - /mnt/ex-disk-1/hkkang:/mnt/hkkang
+        working_dir: /home/user/SPLADE
         command: |
             bash -c '
               set -e
@@ -41,3 +42,4 @@ services:
                 reservations:
                     devices:
                         - capabilities: [gpu]
+                          device_ids: ["4", "5", "6", "7"]

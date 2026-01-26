@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+from functools import cached_property
+
 import lightning as L
 from torch.utils.data import DataLoader
 
-from src.dataset.collators import TrainCollator
-from src.dataset.datasets.train import TrainDataset
-from src.dataset.datasets.train_hf import HFMSMarcoTrainDataset
+from src.dataset.registry import DATASET_REGISTRY
 from src.tokenization.tokenizer import build_tokenizer
 
 
@@ -15,90 +15,61 @@ class TrainDataModule(L.LightningDataModule):
         self.cfg = cfg
         self.tokenizer = build_tokenizer(cfg.model.huggingface_name)
 
+    @cached_property
+    def train_dataset(self):
+        require_teacher_scores = bool(
+            self.cfg.training.distill.enabled
+            and self.cfg.training.distill.fail_on_missing
+        )
+        return self._build_dataset(
+            self.cfg.train_dataset, require_teacher_scores=require_teacher_scores
+        )
+
+    @cached_property
+    def val_dataset(self):
+        return self._build_dataset(self.cfg.val_dataset, require_teacher_scores=False)
+
+    def prepare_data(self) -> None:
+        self.train_dataset.prepare_data()
+        self.val_dataset.prepare_data()
+
     def setup(self, stage: str | None = None) -> None:
-        train_cfg = self.cfg.train_dataset
-        val_cfg = self.cfg.val_dataset
+        self.train_dataset.setup()
+        self.val_dataset.setup()
 
-        require_teacher = self.cfg.training.distill.enabled and self.cfg.training.distill.fail_on_missing
-        teacher_key = self.cfg.training.distill.teacher_score_key
-        self.train_dataset = self._build_dataset(
-            train_cfg,
-            require_teacher=require_teacher,
-            teacher_key=teacher_key,
-            fallback_path=train_cfg.train_path,
-        )
-
-        self.val_dataset = self._build_dataset(
-            val_cfg,
-            require_teacher=False,
-            teacher_key=teacher_key,
-            fallback_path=val_cfg.train_path
-            if hasattr(val_cfg, "train_path") and val_cfg.train_path
-            else train_cfg.train_path,
-        )
-
-        self.train_collator = TrainCollator(
-            tokenizer=self.tokenizer,
-            max_query_length=train_cfg.max_query_length,
-            max_doc_length=train_cfg.max_doc_length,
-            require_teacher_scores=require_teacher,
-        )
-        self.val_collator = TrainCollator(
-            tokenizer=self.tokenizer,
-            max_query_length=val_cfg.max_query_length
-            if hasattr(val_cfg, "max_query_length")
-            else train_cfg.max_query_length,
-            max_doc_length=val_cfg.max_doc_length
-            if hasattr(val_cfg, "max_doc_length")
-            else train_cfg.max_doc_length,
-            require_teacher_scores=False,
-        )
-
-    def _build_dataset(self, cfg, require_teacher: bool, teacher_key: str, fallback_path: str):
-        if getattr(cfg, "use_hf", False):
-            return HFMSMarcoTrainDataset(
-                hf_name=cfg.hf_name,
-                hf_subset=cfg.hf_subset,
-                hf_split=cfg.hf_split,
-                num_positives=cfg.num_positives,
-                num_negatives=cfg.num_negatives,
-                require_teacher_scores=require_teacher,
-                teacher_score_key=teacher_key,
-                hf_text_name=cfg.hf_text_name,
-                hf_teacher_name=cfg.hf_teacher_name,
-                hf_teacher_subset=cfg.hf_teacher_subset,
-                hf_teacher_split=cfg.hf_teacher_split,
-                hf_cache_dir=cfg.hf_cache_dir,
-                hf_max_samples=cfg.hf_max_samples,
-                hf_teacher_cache_dir=cfg.hf_teacher_cache_dir,
-                hf_teacher_max_samples=cfg.hf_teacher_max_samples,
+    def _build_dataset(self, cfg, require_teacher_scores: bool | None):
+        if not getattr(cfg, "use_hf", False):
+            raise ValueError(
+                "Local dataset files are no longer supported. "
+                "Please use HuggingFace datasets with dataset.use_hf=true."
             )
-        return TrainDataset(
-            train_path=fallback_path,
-            num_positives=cfg.num_positives,
-            num_negatives=cfg.num_negatives,
-            require_teacher_scores=require_teacher,
-            teacher_score_key=teacher_key,
-            teacher_scores_path=cfg.teacher_scores_path
-            if hasattr(cfg, "teacher_scores_path")
-            else None,
+        load_teacher_scores = bool(self.cfg.training.distill.enabled)
+        dataset_builder = DATASET_REGISTRY[cfg.name]
+        return dataset_builder(
+            cfg=cfg,
+            global_cfg=self.cfg,
+            tokenizer=self.tokenizer,
+            load_teacher_scores=load_teacher_scores,
+            require_teacher_scores=require_teacher_scores,
         )
 
     def train_dataloader(self) -> DataLoader:
+        dataset = self.train_dataset
         return DataLoader(
-            self.train_dataset,
+            dataset,
             batch_size=self.cfg.training.batch_size,
-            shuffle=True,
+            shuffle=not getattr(dataset, "is_streaming", False),
             num_workers=self.cfg.training.num_workers,
-            collate_fn=self.train_collator,
+            collate_fn=dataset.collator,
             drop_last=True,
         )
 
     def val_dataloader(self) -> DataLoader:
+        dataset = self.val_dataset
         return DataLoader(
-            self.val_dataset,
+            dataset,
             batch_size=self.cfg.training.eval_batch_size,
             shuffle=False,
             num_workers=self.cfg.training.num_workers,
-            collate_fn=self.val_collator,
+            collate_fn=dataset.collator,
         )

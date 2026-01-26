@@ -9,3 +9,4 @@ regularization:
   doc_weight: 0.0001
   type: l1
   paper_faithful: true
+  schedule_steps: 50000

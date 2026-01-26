@@ -8,42 +8,10 @@ Training + evaluation repo for SPLADE v1/v2 variants with BEIR support.
 pip install -r requirements.txt
 ```
 
-## Data layout
+## Datasets (Hugging Face Hub)
 
-```
-data/
-  msmarco/
-    train.jsonl
-    val.jsonl
-    corpus.jsonl
-    queries.dev.jsonl
-    qrels.dev.tsv
-    teacher_scores.jsonl   # optional
-  beir/
-    trec-covid/
-      corpus.jsonl
-      queries.jsonl
-      qrels/
-        test.tsv
-```
-
-### Training JSONL format
-
-Each line must include a query, positives, and negatives.
-
-```
-{
-  "query_id": "q1",
-  "query": "what is splade",
-  "positives": [{"doc_id":"d1","text":"...","teacher_scores": 2.3}],
-  "negatives": [{"doc_id":"d2","text":"...","teacher_scores": -1.1}]
-}
-```
-
-Notes:
-
-- `positives` and `negatives` can be lists of strings or dicts with `text`.
-- If distillation is enabled, `teacher_scores` must be present (or provided via `teacher_scores.jsonl`).
+This repo is configured to use Hugging Face Hub datasets for training, evaluation, and indexing.
+All dataset selection happens via config (e.g., `dataset.hf_name`, `dataset.hf_subset`, `dataset.hf_split`).
 
 ## Train
 
@@ -84,15 +52,7 @@ python scripts/evaluation.py \
   dataset=beir/trec-covid
 ```
 
-Use Hugging Face BEIR dataset directly:
-
-```
-python scripts/evaluation.py \
-  testing.checkpoint_path=logs/checkpoints/last.ckpt \
-  dataset=beir/trec-covid \
-  dataset.use_hf=true \
-  dataset.hf_name=BeIR/trec-covid
-```
+Datasets are loaded from the Hub by default, so no local file paths are required.
 
 ## Build a index
 

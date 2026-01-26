@@ -1,11 +1,11 @@
-from .train import TrainDataset, TrainSample
-from .train_hf import HFMSMarcoTrainDataset
+from .train import TrainSample
+from .train_hf import HFMSMarcoTrainDataset, HFMSMarcoTrainIterableDataset
 from .retrieval import RetrievalDataset, CorpusDataset, QueryDataset
 
 __all__ = [
-    "TrainDataset",
     "TrainSample",
     "HFMSMarcoTrainDataset",
+    "HFMSMarcoTrainIterableDataset",
     "RetrievalDataset",
     "CorpusDataset",
     "QueryDataset",

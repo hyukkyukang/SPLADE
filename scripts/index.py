@@ -2,6 +2,11 @@ import warnings
 
 warnings.simplefilter(action="ignore", category=FutureWarning)
 
+# For Python 3.14 compatibility
+from src.utils.logging import patch_hydra_argparser_for_python314
+
+patch_hydra_argparser_for_python314()
+
 import json
 from pathlib import Path
 
@@ -14,11 +19,9 @@ from src.dataset.datasets.retrieval import RetrievalDataset
 from src.model.retriever.sparse_retriever import SparseRetriever
 from src.model.splade import SpladeModel
 from src.tokenization.tokenizer import build_tokenizer
-from src.utils.logging import get_logger, patch_hydra_argparser_for_python314
-
+from src.utils.logging import get_logger
 
 logger = get_logger(__name__, __file__)
-patch_hydra_argparser_for_python314()
 
 
 def _load_model(cfg: DictConfig) -> SpladeModel:
@@ -49,18 +52,11 @@ def main(cfg: DictConfig) -> None:
     model = _load_model(cfg).to(device)
     tokenizer = build_tokenizer(cfg.model.huggingface_name)
 
-    if cfg.dataset.use_hf and cfg.dataset.hf_name:
-        dataset = RetrievalDataset.from_hf(
-            hf_name=cfg.dataset.hf_name,
-            split=cfg.dataset.hf_split,
-            cache_dir=cfg.dataset.hf_cache_dir,
-        )
-    else:
-        dataset = RetrievalDataset(
-            corpus_path=cfg.dataset.corpus_path,
-            queries_path=cfg.dataset.queries_path,
-            qrels_path=cfg.dataset.qrels_path,
-        )
+    dataset = RetrievalDataset.from_hf(
+        hf_name=cfg.dataset.hf_name,
+        split=cfg.dataset.hf_split,
+        cache_dir=cfg.dataset.hf_cache_dir,
+    )
 
     retriever = SparseRetriever(
         model=model,

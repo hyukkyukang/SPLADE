@@ -1,11 +1,31 @@
 torch
 transformers
-lightning
+lightning[extra]
+wandb
+python-dotenv
 hydra-core
-omegaconf
-datasets
+hydra-colorlog
+# Keep datasets/pyarrow on versions with cp314 wheels.
+datasets>=2.14.4
+pyarrow>=23.0.0
 tqdm
 numpy
 scipy
 numba
 faiss-cpu
+setuptools
+h5py
+
+# For testing
+unittest-xml-reporting
+pytest
+pytest-cov
+
+# For analysis
+matplotlib
+seaborn
+pandas
+
+# # This is required to download LoTTE dataset
+inscriptis==2.6.0 # This is required to support ir-datasets in Python 3.14.
+ir-datasets

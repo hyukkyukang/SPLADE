@@ -11,6 +11,13 @@ hf_name: sentence-transformers/msmarco-scores-ms-marco-MiniLM-L6-v2
 hf_subset: triplet
 hf_split: train
 hf_text_name: sentence-transformers/msmarco
+hf_cache_dir: null
+hf_max_samples: null
+hf_teacher_name: null
+hf_teacher_subset: null
+hf_teacher_split: train
+hf_teacher_cache_dir: null
+hf_teacher_max_samples: null
 
 max_query_length: 32
 max_doc_length: 256

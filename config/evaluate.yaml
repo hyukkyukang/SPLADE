@@ -9,7 +9,7 @@ defaults:
   - model: splade_v1_sum
   - dataset: beir/msmarco
   - testing: default
-  - hydra/logging: default
+  - override hydra/job_logging: colorlog_custom
 
 hydra:
   output_subdir: null
