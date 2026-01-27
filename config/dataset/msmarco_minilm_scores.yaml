@@ -21,7 +21,7 @@ hf_teacher_max_samples: null
 use_integer_ids: true
 integer_id_cache_dir: null
 
-max_query_length: 32
+max_query_length: 256
 max_doc_length: 256
 num_negatives: 1
 num_positives: 1

@@ -3,7 +3,7 @@ huggingface_name: bert-base-uncased
 huggingface_model_class: AutoModelForMaskedLM
 
 # encoder settings
-dtype: float16
+dtype: float32
 attn_implementation: sdpa
 is_quantized: false
 

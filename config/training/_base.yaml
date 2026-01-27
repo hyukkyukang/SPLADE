@@ -1,15 +1,15 @@
 # @package training
 name: splade
 
-max_steps: 200000
-batch_size: 8
+max_steps: 150000
+batch_size: 31
 eval_batch_size: 16
 num_workers: 4
 grad_accumulation: 1
 
 lr: 2e-5
 weight_decay: 0.01
-warmup_steps: 10000
+warmup_steps: 6000
 scheduler: linear
 max_grad_norm: 1.0
 
