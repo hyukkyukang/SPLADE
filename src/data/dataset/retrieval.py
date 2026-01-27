@@ -7,13 +7,13 @@ from datasets import load_dataset
 from omegaconf import OmegaConf
 
 from src.data.dataclass import Document, Query
-from src.data.datasets.base import BaseRetrievalDataset
+from src.data.dataset.base import BaseRetrievalDataset
 from src.data.mixins import HuggingFaceDatasetMixin
 from src.data.dataclass import RetrievalDataItem
 from src.data.collators import RetrievalCollator
 
 
-class HFRetrievalDataset(HuggingFaceDatasetMixin, BaseRetrievalDataset):
+class RetrievalDataset(HuggingFaceDatasetMixin, BaseRetrievalDataset):
     def __init__(self, cfg, global_cfg, tokenizer) -> None:
         super().__init__(cfg=cfg, global_cfg=global_cfg, tokenizer=tokenizer)
         self.hf_name = cfg.hf_name
@@ -36,7 +36,7 @@ class HFRetrievalDataset(HuggingFaceDatasetMixin, BaseRetrievalDataset):
         cache_dir: str | None,
         tokenizer,
         max_query_length: int,
-    ) -> "HFRetrievalDataset":
+    ) -> "RetrievalDataset":
         cfg = OmegaConf.create(
             {
                 "name": "hf_retrieval",

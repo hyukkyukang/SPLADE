@@ -9,8 +9,8 @@ from lightning.pytorch.loggers import CSVLogger, WandbLogger
 from omegaconf import DictConfig, OmegaConf
 
 from config.path import ABS_CONFIG_DIR
-from src.data.datamodule import TrainDataModule
-from src.model.pl_module_train import SPLADETrainingModule
+from src.data.module.train import TrainDataModule
+from src.model.module.train import SPLADETrainingModule
 from src.utils import log_if_rank_zero, set_seed
 from src.utils.logging import (
     get_logger,

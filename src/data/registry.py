@@ -1,8 +1,8 @@
 from typing import Any, Callable
 
-from src.data.datasets.train_hf import (
-    HFMSMarcoTrainDataset,
-    HFMSMarcoTrainIterableDataset,
+from src.data.dataset.train import (
+    MSMarcoTrainDataset,
+    MSMarcoTrainIterableDataset,
 )
 from src.utils.registry import Registry
 
@@ -17,9 +17,9 @@ def _build_hf_msmarco_dataset(
     require_teacher_scores: bool | None = None,
 ):
     dataset_cls: Callable[..., Any] = (
-        HFMSMarcoTrainIterableDataset
+        MSMarcoTrainIterableDataset
         if getattr(cfg, "hf_streaming", False)
-        else HFMSMarcoTrainDataset
+        else MSMarcoTrainDataset
     )
     return dataset_cls(
         cfg=cfg,

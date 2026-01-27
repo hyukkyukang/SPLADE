@@ -8,7 +8,7 @@ from omegaconf import DictConfig
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
-from src.data.datasets.beir import BEIRDataset
+from src.data.dataset.beir import BEIRDataset
 
 
 class EvalDataModule(L.LightningDataModule):

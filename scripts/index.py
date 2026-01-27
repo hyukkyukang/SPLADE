@@ -8,7 +8,7 @@ from omegaconf import DictConfig
 from transformers import PreTrainedTokenizerBase
 
 from config.path import ABS_CONFIG_DIR
-from src.data.datasets.retrieval_hf import HFRetrievalDataset
+from src.data.dataset.retrieval import RetrievalDataset
 from src.model.retriever.sparse.neural.splade import SPLADE
 from src.model.retriever.sparse.neural.splade_model import SpladeModel
 from src.utils.model_utils import build_splade_model, load_splade_checkpoint
@@ -56,7 +56,7 @@ def main(cfg: DictConfig) -> None:
     if hf_name is None:
         raise ValueError("dataset.hf_name or dataset.beir_dataset must be set.")
 
-    dataset: HFRetrievalDataset = HFRetrievalDataset.from_hf(
+    dataset: RetrievalDataset = RetrievalDataset.from_hf(
         hf_name=hf_name,
         split=cfg.dataset.hf_split,
         cache_dir=cfg.dataset.hf_cache_dir,

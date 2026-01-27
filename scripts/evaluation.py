@@ -7,8 +7,8 @@ import lightning as L
 from omegaconf import DictConfig
 
 from config.path import ABS_CONFIG_DIR
-from src.data.eval_datamodule import EvalDataModule
-from src.model.pl_module_eval import SPLADEEvaluationModule
+from src.data.module.eval import EvalDataModule
+from src.model.module.eval import SPLADEEvaluationModule
 from src.utils import log_if_rank_zero, set_seed
 from src.utils.logging import (
     get_logger,

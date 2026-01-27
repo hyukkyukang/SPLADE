@@ -12,12 +12,12 @@ from torch.utils.data import IterableDataset, get_worker_info
 from transformers import PreTrainedTokenizerBase
 
 from src.data.collators import RerankingCollator
-from src.data.datasets.base import BaseDataset
+from src.data.dataset.base import BaseDataset
 from src.data.mixins import HuggingFaceDatasetMixin
 from src.data.dataclass import RerankingDataItem
 
 
-class _HFMSMarcoBase:
+class _MSMarcoBase:
     cfg: DictConfig
     tokenizer: PreTrainedTokenizerBase
     query_map: dict[str, str]
@@ -205,7 +205,7 @@ class _HFMSMarcoBase:
         return float(score)
 
 
-class HFMSMarcoTrainDataset(HuggingFaceDatasetMixin, BaseDataset, _HFMSMarcoBase):
+class MSMarcoTrainDataset(HuggingFaceDatasetMixin, BaseDataset, _MSMarcoBase):
     is_streaming = False
 
     def __init__(
@@ -527,8 +527,8 @@ class HFMSMarcoTrainDataset(HuggingFaceDatasetMixin, BaseDataset, _HFMSMarcoBase
         return self._row_to_item(row, index)
 
 
-class HFMSMarcoTrainIterableDataset(
-    IterableDataset, HuggingFaceDatasetMixin, BaseDataset, _HFMSMarcoBase
+class MSMarcoTrainIterableDataset(
+    IterableDataset, HuggingFaceDatasetMixin, BaseDataset, _MSMarcoBase
 ):
     # pylint: disable=abstract-method
     is_streaming = True
