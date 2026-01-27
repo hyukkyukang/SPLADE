@@ -1,7 +1,10 @@
+import hashlib
 import logging
+import os
 from typing import Any, Dict, List, Union
 
 import pyarrow as pa
+from datasets import config as datasets_config
 from torch.nn.utils.rnn import pad_sequence
 
 logger = logging.getLogger("DatasetUtils")
@@ -58,3 +61,50 @@ def id_to_idx(
         )
         ids_list = list(ids)
     return dict(zip(ids_list, range(len(ids_list))))
+
+
+def build_integer_id_cache_key(
+    hf_name: str,
+    hf_subset: str,
+    hf_split: str,
+    query_id_column: str,
+    corpus_id_column: str,
+    hf_max_samples: int | None,
+) -> str:
+    """
+    Build a deterministic cache key for integer-id preprocessing artifacts.
+    """
+    max_samples_value: str = "none" if hf_max_samples is None else str(hf_max_samples)
+    raw_key: str = "|".join(
+        [
+            hf_name,
+            hf_subset,
+            hf_split,
+            query_id_column,
+            corpus_id_column,
+            max_samples_value,
+        ]
+    )
+    # Hash to keep the on-disk path short and stable.
+    digest: str = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()[:16]
+    return f"integer_ids_{digest}"
+
+
+def resolve_integer_id_cache_dir(
+    hf_cache_dir: str | None, integer_id_cache_dir: str | None
+) -> str:
+    """
+    Resolve the base directory for integer-id preprocessing artifacts.
+    """
+    # Prefer the explicit override, then the dataset cache, then HF defaults.
+    base_cache_dir_value: str | os.PathLike[str] = (
+        integer_id_cache_dir
+        if integer_id_cache_dir is not None
+        else (
+            hf_cache_dir
+            if hf_cache_dir is not None
+            else datasets_config.HF_DATASETS_CACHE
+        )
+    )
+    base_cache_dir: str = os.fspath(base_cache_dir_value)
+    return base_cache_dir

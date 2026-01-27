@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import itertools
 import logging
+import os
 import random
+import time
 from functools import cached_property
 from numbers import Number
 from typing import Any, Iterable, Iterator
 
 import pyarrow as pa
 import torch
-from datasets import load_dataset
+from datasets import Dataset, IterableDataset, load_dataset, load_from_disk
 from omegaconf import DictConfig
 from torch.utils.data import get_worker_info
 from transformers import PreTrainedTokenizerBase
@@ -16,7 +19,12 @@ from transformers import PreTrainedTokenizerBase
 from src.data.collators import RerankingCollator
 from src.data.dataset.base import BaseDataset
 from src.data.dataclass import RerankingDataItem
-from src.data.utils import id_to_idx, resolve_dataset_column
+from src.data.utils import (
+    build_integer_id_cache_key,
+    id_to_idx,
+    resolve_dataset_column,
+    resolve_integer_id_cache_dir,
+)
 
 logger: logging.Logger = logging.getLogger("MSMARCO")
 
@@ -48,6 +56,15 @@ class MSMARCO(BaseDataset):
         self.hf_teacher_max_samples: int | None = getattr(
             cfg, "hf_teacher_max_samples", None
         )
+        self.use_integer_ids: bool = bool(getattr(cfg, "use_integer_ids", False))
+        self.integer_id_cache_dir: str | None = getattr(
+            cfg, "integer_id_cache_dir", None
+        )
+        self.query_idx_column: str = "query_idx"
+        self.pos_idx_column: str = "positive_idx"
+        self.neg_idx_column: str = "negative_idx"
+        self.doc_idxs_column: str = "doc_idxs"
+        self._integer_id_cache_path: str | None = None
 
         self.num_positives: int = int(cfg.num_positives)
         self.num_negatives: int = int(cfg.num_negatives)
@@ -95,7 +112,12 @@ class MSMARCO(BaseDataset):
 
     def __getitem__(self, index: int) -> RerankingDataItem:
         self._assert_setup()
-        row: dict[str, Any] = self._get_stream_row(index)
+        row: dict[str, Any]
+        if isinstance(self.dataset, IterableDataset):
+            row = self._get_stream_row(index)
+        else:
+            # Map-style datasets allow direct indexing (faster than streaming).
+            row = self.dataset[index]
         return self._row_to_item(row, index)
 
     @property
@@ -199,6 +221,12 @@ class MSMARCO(BaseDataset):
         """
         Create a mapping from query IDs to their indices in the query dataset.
         """
+        query_rows: int = len(self.query_dataset)
+        logger.info(
+            "Building query id index map: column=%s rows=%s (first run may take a while).",
+            self.query_id_column,
+            query_rows,
+        )
         # Use resolve_dataset_column() for fast PyArrow access that respects filtering.
         # Note: Direct .data.column() returns the underlying PyArrow table which may
         # contain all original rows for filtered datasets, causing index mismatches.
@@ -219,6 +247,12 @@ class MSMARCO(BaseDataset):
         """
         Create a mapping from document IDs to their indices in the corpus dataset.
         """
+        corpus_rows: int = len(self.corpus_dataset)
+        logger.info(
+            "Building corpus id index map: column=%s rows=%s (first run may take a while).",
+            self.corpus_id_column,
+            corpus_rows,
+        )
         # Use resolve_dataset_column() for fast PyArrow access that respects filtering.
         # Note: Direct .data.column() returns the underlying PyArrow table which may
         # contain all original rows for filtered datasets, causing index mismatches.
@@ -233,6 +267,93 @@ class MSMARCO(BaseDataset):
             enable_tqdm,
         )
         return corpus_id_to_idx_map
+
+    def _resolve_integer_id_cache_path(self) -> str | None:
+        if not self.use_integer_ids:
+            return None
+        if self._integer_id_cache_path is not None:
+            return self._integer_id_cache_path
+        cache_key: str = build_integer_id_cache_key(
+            hf_name=self.hf_name,
+            hf_subset=self.hf_subset,
+            hf_split=self.hf_split,
+            query_id_column=self.query_id_column,
+            corpus_id_column=self.corpus_id_column,
+            hf_max_samples=self.hf_max_samples,
+        )
+        cache_dir: str = resolve_integer_id_cache_dir(
+            hf_cache_dir=self.hf_cache_dir,
+            integer_id_cache_dir=self.integer_id_cache_dir,
+        )
+        # Keep integer-id artifacts grouped under a dedicated subdirectory.
+        cache_path: str = os.path.join(cache_dir, "splade_integer_ids", cache_key)
+        self._integer_id_cache_path = cache_path
+        return cache_path
+
+    def _ensure_integer_id_cache(self) -> None:
+        if not self.use_integer_ids:
+            return
+        cache_path: str | None = self._resolve_integer_id_cache_path()
+        if cache_path is None:
+            return
+        try:
+            import torch.distributed as dist
+
+            is_dist_ready: bool = bool(dist.is_available() and dist.is_initialized())
+            if is_dist_ready:
+                rank: int = int(dist.get_rank())
+                if rank == 0 and not os.path.isdir(cache_path):
+                    self.prepare_integer_id_cache()
+                self._wait_for_integer_id_cache(cache_path)
+            else:
+                if not os.path.isdir(cache_path):
+                    self.prepare_integer_id_cache()
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.warning(
+                "Integer-id cache synchronization failed: %s. "
+                "Falling back to streaming dataset load.",
+                exc,
+            )
+
+    def _build_id_to_idx_map(
+        self, dataset: Dataset, id_column: str, mapping_label: str
+    ) -> dict[str, int]:
+        row_count: int = int(len(dataset))
+        logger.info(
+            "Building %s id index map: column=%s rows=%s (one-time cost).",
+            mapping_label,
+            id_column,
+            row_count,
+        )
+        column: pa.Array | pa.ChunkedArray = resolve_dataset_column(dataset, id_column)
+        mapping_desc: str = f"Mapping {mapping_label} ids"
+        enable_tqdm: bool = False
+        id_to_idx_map: dict[str, int] = id_to_idx(column, mapping_desc, enable_tqdm)
+        return id_to_idx_map
+
+    def _wait_for_integer_id_cache(
+        self, cache_path: str, timeout_seconds: int = 7200, poll_seconds: int = 5
+    ) -> bool:
+        if os.path.isdir(cache_path):
+            return True
+        logger.info("Waiting for integer-id cache to appear: %s", cache_path)
+        waited_seconds: int = 0
+        while waited_seconds < timeout_seconds:
+            time.sleep(poll_seconds)
+            waited_seconds += poll_seconds
+            if os.path.isdir(cache_path):
+                return True
+            if waited_seconds % 60 == 0:
+                logger.info(
+                    "Still waiting for integer-id cache (%s seconds)...",
+                    waited_seconds,
+                )
+        logger.warning(
+            "Timed out waiting for integer-id cache after %s seconds: %s",
+            waited_seconds,
+            cache_path,
+        )
+        return False
 
     def _assert_setup(self) -> None:
         if self.dataset is None:
@@ -315,9 +436,27 @@ class MSMARCO(BaseDataset):
             return "" if default is None else default
         return str(text_value)
 
+    def _get_query_text_by_idx(self, query_idx: int, default: str | None = None) -> str:
+        if query_idx < 0:
+            return "" if default is None else default
+        row: dict[str, Any] = self.query_dataset[int(query_idx)]
+        text_value: Any = row.get(self.query_text_column)
+        if text_value is None:
+            return "" if default is None else default
+        return str(text_value)
+
     def _get_doc_text(self, doc_id: str, default: str = "") -> str:
         doc_idx: int = self.corpus_id_to_idx[doc_id]
         row: dict[str, Any] = self.corpus_dataset[doc_idx]
+        text_value: Any = row.get(self.corpus_text_column)
+        if text_value is None:
+            return default
+        return str(text_value)
+
+    def _get_doc_text_by_idx(self, doc_idx: int, default: str = "") -> str:
+        if doc_idx < 0:
+            return default
+        row: dict[str, Any] = self.corpus_dataset[int(doc_idx)]
         text_value: Any = row.get(self.corpus_text_column)
         if text_value is None:
             return default
@@ -348,6 +487,64 @@ class MSMARCO(BaseDataset):
             neg_ids = [None]
             qid = str(row.get("query_id") or row.get("qid") or index)
             score_values = row.get("score") or row.get("scores")
+        elif (
+            self.use_integer_ids
+            and self.query_idx_column in row
+            and self.pos_idx_column in row
+            and self.neg_idx_column in row
+        ):
+            qid = str(row.get("query_id") or row.get("qid") or index)
+            query_idx: int = int(row[self.query_idx_column])
+            pos_idx: int = int(row[self.pos_idx_column])
+            neg_idx: int = int(row[self.neg_idx_column])
+            query_text = self._get_query_text_by_idx(query_idx)
+            pos_id_value: Any = row.get("positive_id")
+            neg_id_value: Any = row.get("negative_id")
+            pos_ids = [pos_id_value]
+            neg_ids = [neg_id_value]
+            pos_texts = [self._get_doc_text_by_idx(pos_idx)]
+            neg_texts = [self._get_doc_text_by_idx(neg_idx)]
+            score_values = row.get("score") or row.get("scores")
+        elif (
+            self.use_integer_ids
+            and self.query_idx_column in row
+            and self.doc_idxs_column in row
+            and "doc_ids" in row
+            and "labels" in row
+        ):
+            qid = str(row.get("query_id") or row.get("qid") or index)
+            query_idx: int = int(row[self.query_idx_column])
+            query_text = self._get_query_text_by_idx(query_idx, default="")
+            row_doc_ids: list[str] = [str(doc_id) for doc_id in row["doc_ids"]]
+            row_doc_idxs: list[int] = [
+                int(doc_idx) for doc_idx in row[self.doc_idxs_column]
+            ]
+            labels: list[float] = list(row["labels"])
+            pos_pairs: list[tuple[str, int]] = []
+            neg_pairs: list[tuple[str, int]] = []
+            for doc_id, doc_idx, label in zip(row_doc_ids, row_doc_idxs, labels):
+                if label > 0:
+                    pos_pairs.append((doc_id, doc_idx))
+                else:
+                    neg_pairs.append((doc_id, doc_idx))
+            pos_pairs = self._sample_pairs(pos_pairs, self.num_positives)
+            neg_pairs = self._sample_pairs(neg_pairs, self.num_negatives)
+            pos_ids = [doc_id for doc_id, _ in pos_pairs]
+            neg_ids = [doc_id for doc_id, _ in neg_pairs]
+            pos_texts = [self._get_doc_text_by_idx(doc_idx) for _, doc_idx in pos_pairs]
+            neg_texts = [self._get_doc_text_by_idx(doc_idx) for _, doc_idx in neg_pairs]
+            score_values = row.get("score") or row.get("scores")
+            if isinstance(score_values, (list, tuple)) and len(score_values) == len(
+                row_doc_ids
+            ):
+                score_map: dict[str, float] = {
+                    doc_id: float(score)
+                    for doc_id, score in zip(row_doc_ids, score_values)
+                }
+                score_values = [
+                    score_map.get(doc_id, float("nan"))
+                    for doc_id in (pos_ids + neg_ids)
+                ]
         elif "query_id" in row and "positive_id" in row:
             qid = str(row["query_id"])
             query_text = self._get_query_text(qid)
@@ -475,6 +672,15 @@ class MSMARCO(BaseDataset):
             return items
         return random.sample(items, count)
 
+    def _sample_pairs(
+        self, items: list[tuple[str, int]], count: int
+    ) -> list[tuple[str, int]]:
+        if count <= 0:
+            return []
+        if len(items) <= count:
+            return items
+        return random.sample(items, count)
+
     def _get_teacher_score(self, qid: str, doc_id: str | None) -> float:
         if doc_id is None:
             return float("nan")
@@ -540,9 +746,13 @@ class MSMARCO(BaseDataset):
 
     def _prepare_stream(self, dataset: Any) -> Any:
         if self.shuffle_buffer_size > 0:
-            dataset = dataset.shuffle(
-                buffer_size=self.shuffle_buffer_size, seed=self.seed
-            )
+            if isinstance(dataset, IterableDataset):
+                dataset = dataset.shuffle(
+                    buffer_size=self.shuffle_buffer_size, seed=self.seed
+                )
+            else:
+                # Map-style datasets do not accept buffer_size in shuffle.
+                dataset = dataset.shuffle(seed=self.seed)
         return self._shard_for_workers(dataset)
 
     def _get_shard_context(self) -> tuple[int, int]:
@@ -576,6 +786,12 @@ class MSMARCO(BaseDataset):
     def _resolve_length(self, hf_max_samples: int | None) -> int | None:
         if hf_max_samples is not None:
             return int(hf_max_samples)
+        if self.dataset is not None:
+            try:
+                return int(len(self.dataset))
+            except TypeError:
+                # Iterable datasets do not implement __len__.
+                pass
         try:
             split_info: Any = self.dataset.info.splits.get(self.hf_split)
             if split_info and split_info.num_examples:
@@ -583,6 +799,129 @@ class MSMARCO(BaseDataset):
         except Exception:  # pylint: disable=broad-except
             return None
         return None
+
+    def prepare_integer_id_cache(self) -> None:
+        if not self.use_integer_ids:
+            return
+        cache_path: str | None = self._resolve_integer_id_cache_path()
+        if cache_path is None:
+            logger.info("Integer-id preprocessing skipped: cache path unavailable.")
+            return
+        if os.path.isdir(cache_path):
+            logger.info("Integer-id cache hit: %s", cache_path)
+            return
+
+        logger.info(
+            "Preparing integer-id cache for dataset: name=%s subset=%s split=%s",
+            self.hf_name,
+            self.hf_subset,
+            self.hf_split,
+        )
+        if self.hf_max_samples is not None:
+            max_samples: int = int(self.hf_max_samples)
+            streaming_dataset: IterableDataset = load_dataset(
+                self.hf_name,
+                self.hf_subset,
+                split=self.hf_split,
+                cache_dir=self.hf_cache_dir,
+                streaming=True,
+            )
+            column_names: list[str] = list(streaming_dataset.column_names)
+            rows: list[dict[str, Any]] = list(
+                itertools.islice(streaming_dataset, max_samples)
+            )
+            dataset: Dataset = Dataset.from_list(rows)
+        else:
+            dataset: Dataset = load_dataset(
+                self.hf_name,
+                self.hf_subset,
+                split=self.hf_split,
+                cache_dir=self.hf_cache_dir,
+                streaming=False,
+            )
+            column_names: list[str] = list(dataset.column_names)
+
+        has_inline_triplets: bool = self._has_inline_triplets(column_names)
+        if has_inline_triplets:
+            logger.info(
+                "Integer-id preprocessing skipped: inline triplets detected in %s.",
+                column_names,
+            )
+            return
+        if "query_id" not in column_names:
+            logger.info(
+                "Integer-id preprocessing skipped: missing query_id column in %s.",
+                column_names,
+            )
+            return
+
+        query_id_to_idx: dict[str, int] = self._build_id_to_idx_map(
+            self.query_dataset, self.query_id_column, "query"
+        )
+        corpus_id_to_idx: dict[str, int] = self._build_id_to_idx_map(
+            self.corpus_dataset, self.corpus_id_column, "corpus"
+        )
+
+        def _lookup_idx(mapping: dict[str, int], raw_id: Any) -> int:
+            if raw_id is None:
+                return -1
+            return int(mapping.get(str(raw_id), -1))
+
+        def _map_triplet_batch(batch: dict[str, list[Any]]) -> dict[str, list[int]]:
+            query_ids: list[Any] = batch["query_id"]
+            pos_ids: list[Any] = batch["positive_id"]
+            neg_ids: list[Any] = batch["negative_id"]
+            query_indices: list[int] = []
+            pos_indices: list[int] = []
+            neg_indices: list[int] = []
+            for idx in range(len(query_ids)):
+                query_indices.append(_lookup_idx(query_id_to_idx, query_ids[idx]))
+                pos_indices.append(_lookup_idx(corpus_id_to_idx, pos_ids[idx]))
+                neg_indices.append(_lookup_idx(corpus_id_to_idx, neg_ids[idx]))
+            return {
+                self.query_idx_column: query_indices,
+                self.pos_idx_column: pos_indices,
+                self.neg_idx_column: neg_indices,
+            }
+
+        def _map_list_batch(batch: dict[str, list[Any]]) -> dict[str, list[Any]]:
+            query_ids: list[Any] = batch["query_id"]
+            doc_ids_batch: list[Any] = batch["doc_ids"]
+            query_indices: list[int] = []
+            doc_indices: list[list[int]] = []
+            for idx in range(len(query_ids)):
+                query_indices.append(_lookup_idx(query_id_to_idx, query_ids[idx]))
+                row_doc_ids: list[Any] = list(doc_ids_batch[idx] or [])
+                row_doc_indices: list[int] = [
+                    _lookup_idx(corpus_id_to_idx, doc_id) for doc_id in row_doc_ids
+                ]
+                doc_indices.append(row_doc_indices)
+            return {
+                self.query_idx_column: query_indices,
+                self.doc_idxs_column: doc_indices,
+            }
+
+        map_fn: Any
+        if "positive_id" in column_names and "negative_id" in column_names:
+            map_fn = _map_triplet_batch
+        elif "doc_ids" in column_names:
+            map_fn = _map_list_batch
+        else:
+            logger.info(
+                "Integer-id preprocessing skipped: unsupported columns %s.",
+                column_names,
+            )
+            return
+
+        desc: str = "Preprocessing integer IDs"
+        processed_dataset: Dataset = dataset.map(
+            map_fn,
+            batched=True,
+            desc=desc,
+        )
+        parent_dir: str = os.path.dirname(cache_path)
+        os.makedirs(parent_dir, exist_ok=True)
+        processed_dataset.save_to_disk(cache_path)
 
     def prepare_data(self) -> None:
         logger.info(
@@ -636,22 +975,35 @@ class MSMARCO(BaseDataset):
         self._stream_dataset = None
         self._stream_iterator = None
         self._stream_next_index = 0
-        logger.info(
-            "Loading HF training dataset (streaming): name=%s subset=%s split=%s streaming=%s",
-            self.hf_name,
-            self.hf_subset,
-            self.hf_split,
-            True,
+        self._ensure_integer_id_cache()
+        cache_path: str | None = self._resolve_integer_id_cache_path()
+        use_cached_dataset: bool = bool(
+            self.use_integer_ids and cache_path and os.path.isdir(cache_path)
         )
-        self.dataset = load_dataset(
-            self.hf_name,
-            self.hf_subset,
-            split=self.hf_split,
-            cache_dir=self.hf_cache_dir,
-            streaming=True,
-        )
-        if self.hf_max_samples is not None:
-            self.dataset = self.dataset.take(self.hf_max_samples)
+        if use_cached_dataset:
+            logger.info("Loading integer-id cached dataset: %s", cache_path)
+            self.dataset = load_from_disk(cache_path)
+        else:
+            if self.use_integer_ids:
+                logger.info(
+                    "Integer-id cache miss. Falling back to streaming dataset load."
+                )
+            logger.info(
+                "Loading HF training dataset (streaming): name=%s subset=%s split=%s streaming=%s",
+                self.hf_name,
+                self.hf_subset,
+                self.hf_split,
+                True,
+            )
+            self.dataset = load_dataset(
+                self.hf_name,
+                self.hf_subset,
+                split=self.hf_split,
+                cache_dir=self.hf_cache_dir,
+                streaming=True,
+            )
+            if self.hf_max_samples is not None:
+                self.dataset = self.dataset.take(self.hf_max_samples)
 
         self._length = self._resolve_length(self.hf_max_samples)
 

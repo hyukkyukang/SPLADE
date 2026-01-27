@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from functools import cached_property
+from typing import Any
 
 import lightning as L
 from torch.utils.data import DataLoader
@@ -40,7 +41,20 @@ class TrainDataModule(L.LightningDataModule):
         )
 
     def prepare_data(self) -> None:
-        self.train_dataset.prepare_data()
+        train_dataset: Any = self.train_dataset
+        prepare_integer_ids: Any = getattr(
+            train_dataset, "prepare_integer_id_cache", None
+        )
+        if callable(prepare_integer_ids):
+            # Precompute integer IDs once on the main process.
+            prepare_integer_ids()
+        val_dataset: Any = self.val_dataset
+        prepare_val_integer_ids: Any = getattr(
+            val_dataset, "prepare_integer_id_cache", None
+        )
+        if callable(prepare_val_integer_ids):
+            prepare_val_integer_ids()
+        train_dataset.prepare_data()
         self.val_dataset.prepare_data()
 
     def setup(self, stage: str | None = None) -> None:

@@ -15,12 +15,10 @@ services:
             - TZ=Asia/Seoul
             - UID=${UID}
             - GID=${GID}
-            - NVIDIA_VISIBLE_DEVICES=4,5,6,7
 
         volumes:
             - /etc/timezone:/etc/timezone:ro
-            - /home/hyukkyukang/SPLADE:/home/user/SPLADE
-            - /mnt/ex-disk-1/hkkang:/mnt/hkkang
+            - /home/hkkang/SPLADE:/home/user/SPLADE
         working_dir: /home/user/SPLADE
         command: |
             bash -c '
@@ -42,4 +40,3 @@ services:
                 reservations:
                     devices:
                         - capabilities: [gpu]
-                          device_ids: ["4", "5", "6", "7"]
