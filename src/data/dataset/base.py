@@ -2,9 +2,7 @@ from __future__ import annotations
 
 import abc
 import os
-from typing import Any, Dict, Optional
-
-from datasets import Dataset
+from typing import Any, Optional
 from omegaconf import DictConfig
 from torch.utils.data import get_worker_info
 
@@ -20,11 +18,20 @@ class BaseDataset(abc.ABC):
         global_cfg: DictConfig,
         tokenizer,
     ) -> None:
-        self.cfg = cfg
-        self.global_cfg = global_cfg
-        self.tokenizer = tokenizer
-        self.name = str(self.cfg.name)
+        self.cfg: DictConfig = cfg
+        self.global_cfg: DictConfig = global_cfg
+        self.tokenizer: Any = tokenizer
+        self.name: str = str(self.cfg.name)
         self.data_instances: Optional[list[DataTuple]] = None
+
+    def __len__(self) -> int:
+        return len(self.data_instances or [])
+
+    @abc.abstractmethod
+    def __getitem__(
+        self, idx: int
+    ) -> RerankingDataItem | RetrievalDataItem | dict[str, Any]:
+        raise NotImplementedError
 
     @property
     def rank_id(self) -> int:
@@ -32,8 +39,8 @@ class BaseDataset(abc.ABC):
 
     @property
     def worker_id(self) -> int:
-        worker_info = get_worker_info()
-        return worker_info.id if worker_info is not None else 0
+        worker_info: Any | None = get_worker_info()
+        return int(worker_info.id) if worker_info is not None else 0
 
     @property
     @abc.abstractmethod
@@ -47,72 +54,3 @@ class BaseDataset(abc.ABC):
     @abc.abstractmethod
     def setup(self) -> None:
         raise NotImplementedError
-
-    def __len__(self) -> int:
-        return len(self.data_instances or [])
-
-    @abc.abstractmethod
-    def __getitem__(self, idx: int) -> RerankingDataItem | RetrievalDataItem:
-        raise NotImplementedError
-
-
-class BaseRetrievalDataset(BaseDataset, abc.ABC):
-    """Base dataset interface for retrieval evaluation datasets."""
-
-    @property
-    @abc.abstractmethod
-    def query_dataset(self) -> Dataset:
-        raise NotImplementedError
-
-    @property
-    @abc.abstractmethod
-    def corpus_dataset(self) -> Dataset:
-        raise NotImplementedError
-
-    @property
-    @abc.abstractmethod
-    def qrels_dict(self) -> Dict[str, Dict[str, float]]:
-        raise NotImplementedError
-
-    @property
-    @abc.abstractmethod
-    def corpus_text_column(self) -> str:
-        raise NotImplementedError
-
-    @property
-    @abc.abstractmethod
-    def query_id_column(self) -> str:
-        raise NotImplementedError
-
-    @property
-    @abc.abstractmethod
-    def corpus_id_column(self) -> str:
-        raise NotImplementedError
-
-    @property
-    @abc.abstractmethod
-    def qrel_query_column(self) -> str:
-        raise NotImplementedError
-
-    @property
-    @abc.abstractmethod
-    def qrel_doc_column(self) -> str:
-        raise NotImplementedError
-
-    @property
-    @abc.abstractmethod
-    def qrel_score_column(self) -> str:
-        raise NotImplementedError
-
-    @property
-    @abc.abstractmethod
-    def all_qids(self) -> set[str]:
-        raise NotImplementedError
-
-    @property
-    @abc.abstractmethod
-    def all_doc_ids(self) -> set[str]:
-        raise NotImplementedError
-
-    def get_relevance_judgments(self, qid: str) -> Dict[str, float]:
-        return self.qrels_dict.get(qid, {})

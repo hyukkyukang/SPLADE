@@ -198,7 +198,11 @@ class SPLADETrainingModule(L.LightningModule):
         scores: torch.Tensor, pos_mask: torch.Tensor, doc_mask: torch.Tensor, k: int
     ) -> dict[str, torch.Tensor]:
         # Mask padded documents before ranking.
-        masked_scores: torch.Tensor = scores.masked_fill(~doc_mask, -1e9)
+        # Compute in fp32 to avoid fp16 overflow on large negative masks.
+        scores_fp32: torch.Tensor = scores.float()
+        masked_scores: torch.Tensor = scores_fp32.masked_fill(
+            ~doc_mask, torch.finfo(scores_fp32.dtype).min
+        )
         topk_indices: torch.Tensor = torch.topk(
             masked_scores, k=min(k, scores.size(1)), dim=1
         ).indices
@@ -211,7 +215,7 @@ class SPLADETrainingModule(L.LightningModule):
         rank: torch.Tensor = first_positive + 1
         mrr_values: torch.Tensor = torch.where(
             has_positive,
-            1.0 / rank.to(dtype=scores.dtype),
-            torch.zeros_like(rank, dtype=scores.dtype),
+            1.0 / rank.to(dtype=masked_scores.dtype),
+            torch.zeros_like(rank, dtype=masked_scores.dtype),
         )
         return {"mrr10": mrr_values.mean()}

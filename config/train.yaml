@@ -14,7 +14,6 @@ defaults:
   # The following overrides are necessary to make the logging colorized.
   - override hydra/job_logging: colorlog_custom
 
-
 hydra:
   output_subdir: null
   run:
@@ -27,4 +26,4 @@ hydra:
         stream: ext://sys.stdout
       file:
         class: logging.FileHandler
-        filename: ${log_dir}/evaluate.log
+        filename: ${log_dir}/train.log

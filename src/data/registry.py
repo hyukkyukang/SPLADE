@@ -1,9 +1,6 @@
 from typing import Any, Callable
 
-from src.data.dataset.train import (
-    MSMarcoTrainDataset,
-    MSMarcoTrainIterableDataset,
-)
+from src.data.dataset.msmarco import MSMARCO
 from src.utils.registry import Registry
 
 DATASET_REGISTRY = Registry("DATASET")
@@ -16,12 +13,7 @@ def _build_hf_msmarco_dataset(
     load_teacher_scores: bool | None = None,
     require_teacher_scores: bool | None = None,
 ):
-    dataset_cls: Callable[..., Any] = (
-        MSMarcoTrainIterableDataset
-        if getattr(cfg, "hf_streaming", False)
-        else MSMarcoTrainDataset
-    )
-    return dataset_cls(
+    return MSMARCO(
         cfg=cfg,
         global_cfg=global_cfg,
         tokenizer=tokenizer,

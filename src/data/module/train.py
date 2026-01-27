@@ -76,8 +76,7 @@ class TrainDataModule(L.LightningDataModule):
         shuffle: bool,
         drop_last: bool = False,
     ) -> DataLoader:
-        is_streaming = bool(getattr(dataset, "is_streaming", False))
-        num_workers = 0 if is_streaming else self.cfg.training.num_workers
+        num_workers = 0
         return DataLoader(
             dataset,
             batch_size=batch_size,
@@ -92,7 +91,7 @@ class TrainDataModule(L.LightningDataModule):
         return self._make_dataloader(
             dataset=dataset,
             batch_size=self.cfg.training.batch_size,
-            shuffle=not getattr(dataset, "is_streaming", False),
+            shuffle=False,
             drop_last=True,
         )
 
