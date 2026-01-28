@@ -5,6 +5,28 @@ import sys
 from typing import Any, Optional
 
 import torch
+from pytorch_lightning.utilities import rank_zero_only
+
+
+@rank_zero_only
+def log_if_rank_zero(logger: logging.Logger, message: str, level: str = "info") -> None:
+    """Helper function to log only on rank 0 process.
+
+    Uses PyTorch Lightning's @rank_zero_only decorator to ensure logging
+    only happens on the main process during distributed training.
+    If not distributed, logs the message as well.
+
+    Args:
+        logger: Logger instance to use for logging.
+        message: The message to log.
+        level: Log level to use ('info', 'debug', 'warning', 'error'). Defaults to 'info'.
+
+    Example:
+        >>> logger = logging.getLogger(__name__)
+        >>> log_if_rank_zero(logger, "Training started")
+        >>> log_if_rank_zero(logger, "Missing config", level="warning")
+    """
+    getattr(logger, level)(message)
 
 
 def get_logger(name: str, file_path: Optional[str] = None) -> logging.Logger:
@@ -165,12 +187,18 @@ def patch_hydra_argparser_for_python314() -> None:
         # Also patch in hydra.main if it's already imported
         if "hydra.main" in sys.modules:
             sys.modules["hydra.main"].get_args_parser = _patched_get_args_parser
-            _logger.debug("hydra.main.get_args_parser patched")
+            log_if_rank_zero(
+                _logger, "hydra.main.get_args_parser patched", level="debug"
+            )
 
-        _logger.debug("hydra._internal.utils.get_args_parser patched")
+        log_if_rank_zero(
+            _logger, "hydra._internal.utils.get_args_parser patched", level="debug"
+        )
 
     except ImportError:
-        _logger.debug("hydra._internal.utils not found, patch not applied")
+        log_if_rank_zero(
+            _logger, "hydra._internal.utils not found, patch not applied", level="debug"
+        )
 
 
 def suppress_httpx_logging() -> None:

@@ -18,6 +18,7 @@ hf_subset: null
 hf_split: train
 hf_cache_dir: null
 hf_max_samples: null
+hf_skip_samples: 0
 hf_text_name: null
 hf_data_files: null
 hf_teacher_name: null

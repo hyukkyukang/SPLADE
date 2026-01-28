@@ -14,7 +14,7 @@ from src.model.retriever.sparse.neural.splade_model import SpladeModel
 from src.utils.model_utils import build_splade_model, load_splade_checkpoint
 from src.utils.script_setup import configure_script_environment
 from src.utils.transformers import build_tokenizer
-from src.utils.logging import get_logger
+from src.utils.logging import get_logger, log_if_rank_zero
 
 logger: logging.Logger = get_logger(__name__, __file__)
 
@@ -35,10 +35,9 @@ def _load_model(cfg: DictConfig) -> SpladeModel:
         missing: list[str]
         unexpected: list[str]
         missing, unexpected = load_splade_checkpoint(model, checkpoint_path)
-        logger.info(
-            "Loaded checkpoint. Missing: %d, unexpected: %d",
-            len(missing),
-            len(unexpected),
+        log_if_rank_zero(
+            logger,
+            f"Loaded checkpoint. Missing: {len(missing)}, unexpected: {len(unexpected)}",
         )
     return model
 
@@ -83,7 +82,7 @@ def main(cfg: DictConfig) -> None:
     with (index_path / "doc_ids.json").open("w", encoding="utf-8") as f:
         json.dump(doc_ids, f)
 
-    logger.info(f"Saved index to {index_path}")
+    log_if_rank_zero(logger, f"Saved index to {index_path}")
 
 
 if __name__ == "__main__":

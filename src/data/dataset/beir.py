@@ -9,6 +9,7 @@ from transformers import PreTrainedTokenizerBase
 
 from src.data.dataclass import Document
 from src.data.dataset.base import BaseDataset
+from src.utils.logging import log_if_rank_zero
 
 logger: logging.Logger = logging.getLogger("BEIRDataset")
 
@@ -100,7 +101,9 @@ class BEIRDataset(BaseDataset):
             self._query_ids.append(qid)
             self._query_texts[qid] = text
 
-        logger.info("Loaded %d queries from %s", len(self._query_ids), self._hf_name)
+        log_if_rank_zero(
+            logger, f"Loaded {len(self._query_ids)} queries from {self._hf_name}"
+        )
 
     def _load_qrels(self) -> None:
         cache_dir: str | None = getattr(self.cfg, "hf_cache_dir", None)
@@ -121,7 +124,7 @@ class BEIRDataset(BaseDataset):
             qrels_dict.setdefault(qid, {})[doc_id] = score
 
         self._qrels_dict = qrels_dict
-        logger.info("Loaded qrels for %d queries", len(self._qrels_dict))
+        log_if_rank_zero(logger, f"Loaded qrels for {len(self._qrels_dict)} queries")
 
     def _load_corpus(self) -> list[Document]:
         cache_dir: str | None = getattr(self.cfg, "hf_cache_dir", None)
@@ -135,7 +138,9 @@ class BEIRDataset(BaseDataset):
             text: str = self._build_doc_text(record)
             corpus_docs.append(Document(doc_id=doc_id, text=text))
 
-        logger.info("Loaded %d documents from %s", len(corpus_docs), self._hf_name)
+        log_if_rank_zero(
+            logger, f"Loaded {len(corpus_docs)} documents from {self._hf_name}"
+        )
         return corpus_docs
 
     def _build_doc_text(self, record: dict[str, Any]) -> str:

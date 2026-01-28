@@ -1,6 +1,9 @@
+import logging
 import os
 
 import torch
+
+from src.utils.logging import log_if_rank_zero as log_if_rank_zero_from_logging
 
 
 def is_rank_zero() -> bool:
@@ -11,9 +14,9 @@ def is_rank_zero() -> bool:
     return torch.distributed.get_rank() == 0
 
 
-def log_if_rank_zero(logger, message: str) -> None:
-    if is_rank_zero():
-        logger.info(message)
+def log_if_rank_zero(logger: logging.Logger, message: str, level: str = "info") -> None:
+    """Proxy to src.utils.logging.log_if_rank_zero for backwards compatibility."""
+    log_if_rank_zero_from_logging(logger=logger, message=message, level=level)
 
 
 def get_world_size() -> int:

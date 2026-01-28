@@ -12,6 +12,7 @@ from src.data.dataclass import Query
 from src.metric.retrieval import RetrievalMetrics, resolve_k_list
 from src.model.retriever.sparse.neural.splade import SPLADE
 from src.model.retriever.sparse.neural.splade_model import SpladeModel
+from src.utils.logging import log_if_rank_zero
 from src.utils.model_utils import build_splade_model, load_splade_checkpoint
 from src.utils.transformers import build_tokenizer
 
@@ -56,10 +57,9 @@ class SPLADEEvaluationModule(L.LightningModule):
             missing: list[str]
             unexpected: list[str]
             missing, unexpected = load_splade_checkpoint(model, checkpoint_path)
-            logger.info(
-                "Loaded checkpoint. Missing: %d, unexpected: %d",
-                len(missing),
-                len(unexpected),
+            log_if_rank_zero(
+                logger,
+                f"Loaded checkpoint. Missing: {len(missing)}, unexpected: {len(unexpected)}",
             )
 
         return model
@@ -168,7 +168,9 @@ class SPLADEEvaluationModule(L.LightningModule):
             all_gather_fn=self.all_gather if self.trainer.world_size > 1 else None,
         )
         if not has_data:
-            logger.warning("No predictions accumulated during testing.")
+            log_if_rank_zero(
+                logger, "No predictions accumulated during testing.", level="warning"
+            )
             return
 
         if self.trainer.is_global_zero:

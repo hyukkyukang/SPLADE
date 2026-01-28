@@ -13,6 +13,7 @@ hf_split: train
 hf_text_name: sentence-transformers/msmarco
 hf_cache_dir: null
 hf_max_samples: null
+hf_skip_samples: ${training.val_sample_size}
 hf_teacher_name: null
 hf_teacher_subset: null
 hf_teacher_split: train

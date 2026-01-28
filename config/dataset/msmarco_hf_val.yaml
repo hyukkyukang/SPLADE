@@ -10,7 +10,8 @@ use_hf: true
 hf_name: sentence-transformers/msmarco
 hf_subset: triplets
 hf_split: train
-hf_max_samples: 1000
+hf_max_samples: ${training.val_sample_size}
+hf_skip_samples: 0
 hf_text_name: null
 hf_cache_dir: null
 hf_streaming: false

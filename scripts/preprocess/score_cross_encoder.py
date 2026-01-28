@@ -13,7 +13,7 @@ from transformers import AutoModelForSequenceClassification, AutoTokenizer
 from config.path import ABS_CONFIG_DIR
 from src.data.utils import id_to_idx, resolve_dataset_column
 from src.utils import set_seed
-from src.utils.logging import get_logger
+from src.utils.logging import get_logger, log_if_rank_zero
 from src.utils.script_setup import configure_script_environment
 
 logger: logging.Logger = get_logger("scripts.preprocess.score_cross_encoder", __file__)
@@ -287,7 +287,7 @@ def main(cfg: DictConfig) -> None:
             row_count += 1
 
     _write_jsonl(output_path, _scored_rows())
-    logger.info("Saved scored dataset to %s", output_path)
+    log_if_rank_zero(logger, f"Saved scored dataset to {output_path}")
 
 
 if __name__ == "__main__":

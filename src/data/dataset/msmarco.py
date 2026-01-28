@@ -25,6 +25,7 @@ from src.data.utils import (
     resolve_dataset_column,
     resolve_integer_id_cache_dir,
 )
+from src.utils.logging import log_if_rank_zero
 
 logger: logging.Logger = logging.getLogger("MSMARCO")
 
@@ -92,6 +93,10 @@ class MSMARCO(BaseDataset):
         )
         self.hf_cache_dir: str | None = getattr(cfg, "hf_cache_dir", None)
         self.hf_max_samples: int | None = getattr(cfg, "hf_max_samples", None)
+        skip_samples_value: int = int(getattr(cfg, "hf_skip_samples", 0) or 0)
+        if skip_samples_value < 0:
+            raise ValueError("hf_skip_samples must be >= 0.")
+        self.hf_skip_samples: int = skip_samples_value
         self.hf_teacher_name: str | None = _normalize_optional_str(
             getattr(cfg, "hf_teacher_name", None)
         )
@@ -193,10 +198,10 @@ class MSMARCO(BaseDataset):
     def query_dataset(self) -> Any:
         text_name: str = self.hf_text_name or self.hf_name
         try:
-            logger.info(
-                "Loading HF queries dataset: name=%s subset=queries split=train streaming=%s",
-                text_name,
-                False,
+            log_if_rank_zero(
+                logger,
+                f"Loading HF queries dataset: name={text_name} subset=queries split=train "
+                "streaming=False",
             )
             return _load_hf_dataset(
                 text_name,
@@ -207,12 +212,10 @@ class MSMARCO(BaseDataset):
                 data_files=None,
             )
         except Exception:  # pylint: disable=broad-except
-            logger.info(
-                "Loading HF queries dataset fallback: name=%s subset=%s split=%s streaming=%s",
-                self.hf_name,
-                self.hf_subset,
-                self.hf_split,
-                False,
+            log_if_rank_zero(
+                logger,
+                f"Loading HF queries dataset fallback: name={self.hf_name} "
+                f"subset={self.hf_subset} split={self.hf_split} streaming=False",
             )
             return _load_hf_dataset(
                 self.hf_name,
@@ -227,10 +230,10 @@ class MSMARCO(BaseDataset):
     def corpus_dataset(self) -> Any:
         text_name: str = self.hf_text_name or self.hf_name
         try:
-            logger.info(
-                "Loading HF corpus dataset: name=%s subset=corpus split=train streaming=%s",
-                text_name,
-                False,
+            log_if_rank_zero(
+                logger,
+                f"Loading HF corpus dataset: name={text_name} subset=corpus split=train "
+                "streaming=False",
             )
             return _load_hf_dataset(
                 text_name,
@@ -241,12 +244,10 @@ class MSMARCO(BaseDataset):
                 data_files=None,
             )
         except Exception:  # pylint: disable=broad-except
-            logger.info(
-                "Loading HF corpus dataset fallback: name=%s subset=%s split=%s streaming=%s",
-                self.hf_name,
-                self.hf_subset,
-                self.hf_split,
-                False,
+            log_if_rank_zero(
+                logger,
+                f"Loading HF corpus dataset fallback: name={self.hf_name} "
+                f"subset={self.hf_subset} split={self.hf_split} streaming=False",
             )
             return _load_hf_dataset(
                 self.hf_name,
@@ -286,10 +287,10 @@ class MSMARCO(BaseDataset):
         Create a mapping from query IDs to their indices in the query dataset.
         """
         query_rows: int = len(self.query_dataset)
-        logger.info(
-            "Building query id index map: column=%s rows=%s (first run may take a while).",
-            self.query_id_column,
-            query_rows,
+        log_if_rank_zero(
+            logger,
+            f"Building query id index map: column={self.query_id_column} rows={query_rows} "
+            "(first run may take a while).",
         )
         # Use resolve_dataset_column() for fast PyArrow access that respects filtering.
         # Note: Direct .data.column() returns the underlying PyArrow table which may
@@ -312,10 +313,10 @@ class MSMARCO(BaseDataset):
         Create a mapping from document IDs to their indices in the corpus dataset.
         """
         corpus_rows: int = len(self.corpus_dataset)
-        logger.info(
-            "Building corpus id index map: column=%s rows=%s (first run may take a while).",
-            self.corpus_id_column,
-            corpus_rows,
+        log_if_rank_zero(
+            logger,
+            f"Building corpus id index map: column={self.corpus_id_column} rows={corpus_rows} "
+            "(first run may take a while).",
         )
         # Use resolve_dataset_column() for fast PyArrow access that respects filtering.
         # Note: Direct .data.column() returns the underlying PyArrow table which may
@@ -341,6 +342,7 @@ class MSMARCO(BaseDataset):
             hf_name=self.hf_name,
             hf_subset=self.hf_subset or "",
             hf_split=self.hf_split,
+            hf_skip_samples=self.hf_skip_samples,
             query_id_column=self.query_id_column,
             corpus_id_column=self.corpus_id_column,
             hf_max_samples=self.hf_max_samples,
@@ -373,21 +375,21 @@ class MSMARCO(BaseDataset):
                 if not os.path.isdir(cache_path):
                     self.prepare_integer_id_cache()
         except Exception as exc:  # pylint: disable=broad-except
-            logger.warning(
-                "Integer-id cache synchronization failed: %s. "
+            log_if_rank_zero(
+                logger,
+                f"Integer-id cache synchronization failed: {exc}. "
                 "Falling back to streaming dataset load.",
-                exc,
+                level="warning",
             )
 
     def _build_id_to_idx_map(
         self, dataset: Dataset, id_column: str, mapping_label: str
     ) -> dict[str, int]:
         row_count: int = int(len(dataset))
-        logger.info(
-            "Building %s id index map: column=%s rows=%s (one-time cost).",
-            mapping_label,
-            id_column,
-            row_count,
+        log_if_rank_zero(
+            logger,
+            f"Building {mapping_label} id index map: column={id_column} rows={row_count} "
+            "(one-time cost).",
         )
         column: pa.Array | pa.ChunkedArray = resolve_dataset_column(dataset, id_column)
         mapping_desc: str = f"Mapping {mapping_label} ids"
@@ -400,7 +402,9 @@ class MSMARCO(BaseDataset):
     ) -> bool:
         if os.path.isdir(cache_path):
             return True
-        logger.info("Waiting for integer-id cache to appear: %s", cache_path)
+        log_if_rank_zero(
+            logger, f"Waiting for integer-id cache to appear: {cache_path}"
+        )
         waited_seconds: int = 0
         while waited_seconds < timeout_seconds:
             time.sleep(poll_seconds)
@@ -408,14 +412,15 @@ class MSMARCO(BaseDataset):
             if os.path.isdir(cache_path):
                 return True
             if waited_seconds % 60 == 0:
-                logger.info(
-                    "Still waiting for integer-id cache (%s seconds)...",
-                    waited_seconds,
+                log_if_rank_zero(
+                    logger,
+                    f"Still waiting for integer-id cache ({waited_seconds} seconds)...",
                 )
-        logger.warning(
-            "Timed out waiting for integer-id cache after %s seconds: %s",
-            waited_seconds,
-            cache_path,
+        log_if_rank_zero(
+            logger,
+            f"Timed out waiting for integer-id cache after {waited_seconds} seconds: "
+            f"{cache_path}",
+            level="warning",
         )
         return False
 
@@ -769,12 +774,10 @@ class MSMARCO(BaseDataset):
     ) -> dict[tuple[str, str], float]:
         if hf_name is None or subset is None:
             return {}
-        logger.info(
-            "Loading HF teacher scores dataset: name=%s subset=%s split=%s streaming=%s",
-            hf_name,
-            subset,
-            split,
-            False,
+        log_if_rank_zero(
+            logger,
+            f"Loading HF teacher scores dataset: name={hf_name} subset={subset} "
+            f"split={split} streaming=False",
         )
         teacher_ds: Any = _load_hf_dataset(
             hf_name,
@@ -858,7 +861,28 @@ class MSMARCO(BaseDataset):
             num_shards=total_shards, index=shard_index, contiguous=True
         )
 
-    def _resolve_length(self, hf_max_samples: int | None) -> int | None:
+    def _apply_hf_sample_window(self, dataset: Any) -> Any:
+        skip_samples: int = int(self.hf_skip_samples)
+        max_samples: int | None = self.hf_max_samples
+        if skip_samples <= 0 and max_samples is None:
+            return dataset
+        if isinstance(dataset, IterableDataset):
+            if skip_samples > 0:
+                dataset = dataset.skip(skip_samples)
+            if max_samples is not None:
+                dataset = dataset.take(int(max_samples))
+            return dataset
+        dataset_length: int = int(len(dataset))
+        start_index: int = min(skip_samples, dataset_length)
+        end_index: int = dataset_length
+        if max_samples is not None:
+            end_index = min(start_index + int(max_samples), dataset_length)
+        indices: range = range(start_index, end_index)
+        return dataset.select(indices)
+
+    def _resolve_length(
+        self, hf_max_samples: int | None, hf_skip_samples: int
+    ) -> int | None:
         if hf_max_samples is not None:
             return int(hf_max_samples)
         if self.dataset is not None:
@@ -870,7 +894,8 @@ class MSMARCO(BaseDataset):
         try:
             split_info: Any = self.dataset.info.splits.get(self.hf_split)
             if split_info and split_info.num_examples:
-                return int(split_info.num_examples)
+                remaining: int = int(split_info.num_examples) - int(hf_skip_samples)
+                return max(0, remaining)
         except Exception:  # pylint: disable=broad-except
             return None
         return None
@@ -880,20 +905,22 @@ class MSMARCO(BaseDataset):
             return
         cache_path: str | None = self._resolve_integer_id_cache_path()
         if cache_path is None:
-            logger.info("Integer-id preprocessing skipped: cache path unavailable.")
+            log_if_rank_zero(
+                logger, "Integer-id preprocessing skipped: cache path unavailable."
+            )
             return
         if os.path.isdir(cache_path):
-            logger.info("Integer-id cache hit: %s", cache_path)
+            log_if_rank_zero(logger, f"Integer-id cache hit: {cache_path}")
             return
 
-        logger.info(
-            "Preparing integer-id cache for dataset: name=%s subset=%s split=%s",
-            self.hf_name,
-            self.hf_subset,
-            self.hf_split,
+        log_if_rank_zero(
+            logger,
+            f"Preparing integer-id cache for dataset: name={self.hf_name} "
+            f"subset={self.hf_subset} split={self.hf_split}",
         )
         if self.hf_max_samples is not None:
             max_samples: int = int(self.hf_max_samples)
+            skip_samples: int = int(self.hf_skip_samples)
             streaming_dataset: IterableDataset = _load_hf_dataset(
                 self.hf_name,
                 self.hf_subset,
@@ -903,8 +930,10 @@ class MSMARCO(BaseDataset):
                 data_files=self.hf_data_files,
             )
             column_names: list[str] = list(streaming_dataset.column_names)
+            start_index: int = skip_samples
+            stop_index: int = start_index + max_samples
             rows: list[dict[str, Any]] = list(
-                itertools.islice(streaming_dataset, max_samples)
+                itertools.islice(streaming_dataset, start_index, stop_index)
             )
             dataset: Dataset = Dataset.from_list(rows)
         else:
@@ -916,19 +945,22 @@ class MSMARCO(BaseDataset):
                 streaming=False,
                 data_files=self.hf_data_files,
             )
+            dataset = self._apply_hf_sample_window(dataset)
             column_names: list[str] = list(dataset.column_names)
 
         has_inline_triplets: bool = self._has_inline_triplets(column_names)
         if has_inline_triplets:
-            logger.info(
-                "Integer-id preprocessing skipped: inline triplets detected in %s.",
-                column_names,
+            log_if_rank_zero(
+                logger,
+                "Integer-id preprocessing skipped: inline triplets detected in "
+                f"{column_names}.",
             )
             return
         if "query_id" not in column_names:
-            logger.info(
-                "Integer-id preprocessing skipped: missing query_id column in %s.",
-                column_names,
+            log_if_rank_zero(
+                logger,
+                "Integer-id preprocessing skipped: missing query_id column in "
+                f"{column_names}.",
             )
             return
 
@@ -984,9 +1016,10 @@ class MSMARCO(BaseDataset):
         elif "doc_ids" in column_names:
             map_fn = _map_list_batch
         else:
-            logger.info(
-                "Integer-id preprocessing skipped: unsupported columns %s.",
-                column_names,
+            log_if_rank_zero(
+                logger,
+                "Integer-id preprocessing skipped: unsupported columns "
+                f"{column_names}.",
             )
             return
 
@@ -1001,12 +1034,10 @@ class MSMARCO(BaseDataset):
         processed_dataset.save_to_disk(cache_path)
 
     def prepare_data(self) -> None:
-        logger.info(
-            "Loading HF training dataset (streaming): name=%s subset=%s split=%s streaming=%s",
-            self.hf_name,
-            self.hf_subset,
-            self.hf_split,
-            True,
+        log_if_rank_zero(
+            logger,
+            f"Loading HF training dataset (streaming): name={self.hf_name} "
+            f"subset={self.hf_subset} split={self.hf_split} streaming=True",
         )
         dataset: Any = _load_hf_dataset(
             self.hf_name,
@@ -1019,10 +1050,10 @@ class MSMARCO(BaseDataset):
         has_text_triplets: bool = self._has_inline_triplets(dataset.column_names)
         if not has_text_triplets:
             text_name: str = self.hf_text_name or self.hf_name
-            logger.info(
-                "Loading HF queries dataset: name=%s subset=queries split=train streaming=%s",
-                text_name,
-                False,
+            log_if_rank_zero(
+                logger,
+                f"Loading HF queries dataset: name={text_name} subset=queries split=train "
+                "streaming=False",
             )
             _load_hf_dataset(
                 text_name,
@@ -1032,10 +1063,10 @@ class MSMARCO(BaseDataset):
                 streaming=False,
                 data_files=None,
             )
-            logger.info(
-                "Loading HF corpus dataset: name=%s subset=corpus split=train streaming=%s",
-                text_name,
-                False,
+            log_if_rank_zero(
+                logger,
+                f"Loading HF corpus dataset: name={text_name} subset=corpus split=train "
+                "streaming=False",
             )
             _load_hf_dataset(
                 text_name,
@@ -1061,19 +1092,18 @@ class MSMARCO(BaseDataset):
             self.use_integer_ids and cache_path and os.path.isdir(cache_path)
         )
         if use_cached_dataset:
-            logger.info("Loading integer-id cached dataset: %s", cache_path)
+            log_if_rank_zero(logger, f"Loading integer-id cached dataset: {cache_path}")
             self.dataset = load_from_disk(cache_path)
         else:
             if self.use_integer_ids:
-                logger.info(
-                    "Integer-id cache miss. Falling back to streaming dataset load."
+                log_if_rank_zero(
+                    logger,
+                    "Integer-id cache miss. Falling back to streaming dataset load.",
                 )
-            logger.info(
-                "Loading HF training dataset (streaming): name=%s subset=%s split=%s streaming=%s",
-                self.hf_name,
-                self.hf_subset,
-                self.hf_split,
-                True,
+            log_if_rank_zero(
+                logger,
+                f"Loading HF training dataset (streaming): name={self.hf_name} "
+                f"subset={self.hf_subset} split={self.hf_split} streaming=True",
             )
             self.dataset = _load_hf_dataset(
                 self.hf_name,
@@ -1083,10 +1113,12 @@ class MSMARCO(BaseDataset):
                 streaming=True,
                 data_files=self.hf_data_files,
             )
-            if self.hf_max_samples is not None:
-                self.dataset = self.dataset.take(self.hf_max_samples)
+            self.dataset = self._apply_hf_sample_window(self.dataset)
 
-        self._length = self._resolve_length(self.hf_max_samples)
+        self._length = self._resolve_length(
+            self.hf_max_samples,
+            self.hf_skip_samples,
+        )
 
         has_inline_scores: bool = any(
             key in self.dataset.column_names for key in ("score", "scores")

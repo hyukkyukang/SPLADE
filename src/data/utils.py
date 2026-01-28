@@ -7,6 +7,8 @@ import pyarrow as pa
 from datasets import config as datasets_config
 from torch.nn.utils.rnn import pad_sequence
 
+from src.utils.logging import log_if_rank_zero
+
 logger = logging.getLogger("DatasetUtils")
 
 
@@ -56,8 +58,11 @@ def id_to_idx(
     if isinstance(ids, (pa.Array, pa.ChunkedArray)):
         ids_list = ids.to_pylist()
     else:
-        logger.warning(
-            "Using list() for slow element-by-element iteration... (Consider using PyArrow arrays for faster conversion)."
+        log_if_rank_zero(
+            logger,
+            "Using list() for slow element-by-element iteration... "
+            "(Consider using PyArrow arrays for faster conversion).",
+            level="warning",
         )
         ids_list = list(ids)
     return dict(zip(ids_list, range(len(ids_list))))
@@ -67,6 +72,7 @@ def build_integer_id_cache_key(
     hf_name: str,
     hf_subset: str,
     hf_split: str,
+    hf_skip_samples: int,
     query_id_column: str,
     corpus_id_column: str,
     hf_max_samples: int | None,
@@ -74,12 +80,14 @@ def build_integer_id_cache_key(
     """
     Build a deterministic cache key for integer-id preprocessing artifacts.
     """
+    skip_samples_value: str = str(hf_skip_samples)
     max_samples_value: str = "none" if hf_max_samples is None else str(hf_max_samples)
     raw_key: str = "|".join(
         [
             hf_name,
             hf_subset,
             hf_split,
+            skip_samples_value,
             query_id_column,
             corpus_id_column,
             max_samples_value,

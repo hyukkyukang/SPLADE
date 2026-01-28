@@ -65,7 +65,10 @@ def main(cfg: DictConfig) -> None:
     if results:
         metrics: dict[str, float] = results[0]
         for name, value in metrics.items():
-            logger.info("%s %s: %.4f", str(cfg.dataset.name), name, value)
+            log_if_rank_zero(
+                logger,
+                f"{str(cfg.dataset.name)} {name}: {value:.4f}",
+            )
 
 
 if __name__ == "__main__":

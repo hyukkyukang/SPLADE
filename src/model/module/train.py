@@ -9,6 +9,7 @@ from omegaconf import DictConfig
 
 from src.model.losses import LossComputer
 from src.model.retriever.sparse.neural.splade_model import SpladeModel
+from src.utils.logging import log_if_rank_zero
 from src.utils.model_utils import build_splade_model
 
 logger: logging.Logger = logging.getLogger("SPLADETrainingModule")
@@ -35,9 +36,11 @@ class SPLADETrainingModule(L.LightningModule):
         compile_enabled: bool = bool(getattr(cfg.training, "torch_compile", False))
         compile_available: bool = hasattr(torch, "compile")
         if compile_enabled and not compile_available:
-            logger.warning(
+            log_if_rank_zero(
+                logger,
                 "torch.compile is not available in this PyTorch build; continuing "
-                "without compilation."
+                "without compilation.",
+                level="warning",
             )
         if compile_enabled and compile_available:
             encoder_module: torch.nn.Module | None = getattr(

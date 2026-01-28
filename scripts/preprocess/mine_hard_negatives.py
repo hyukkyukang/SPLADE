@@ -18,7 +18,7 @@ from src.data.dataset.retrieval import RetrievalDataset
 from src.data.dataclass import Document, Query
 from src.model.retriever.sparse.neural.splade_model import SpladeDocModel, SpladeModel
 from src.utils import set_seed
-from src.utils.logging import get_logger
+from src.utils.logging import get_logger, log_if_rank_zero
 from src.utils.model_utils import build_splade_model, load_splade_checkpoint
 from src.utils.script_setup import configure_script_environment
 from src.utils.transformers import build_tokenizer
@@ -125,9 +125,15 @@ def _build_faiss_index(
             resources: Any = gpu_resources_cls()
             index = index_cpu_to_gpu(resources, gpu_device, index)
         except Exception as exc:  # pylint: disable=broad-except
-            logger.warning("FAISS GPU unavailable, falling back to CPU: %s", exc)
+            log_if_rank_zero(
+                logger,
+                f"FAISS GPU unavailable, falling back to CPU: {exc}",
+                level="warning",
+            )
     elif use_gpu:
-        logger.warning("FAISS GPU support not detected; using CPU index.")
+        log_if_rank_zero(
+            logger, "FAISS GPU support not detected; using CPU index.", level="warning"
+        )
     return index
 
 
@@ -271,10 +277,10 @@ def main(cfg: DictConfig) -> None:
     missing_keys, unexpected_keys = load_splade_checkpoint(
         model, settings.checkpoint_path
     )
-    logger.info(
-        "Loaded checkpoint. Missing: %d, unexpected: %d",
-        len(missing_keys),
-        len(unexpected_keys),
+    log_if_rank_zero(
+        logger,
+        f"Loaded checkpoint. Missing: {len(missing_keys)}, unexpected: "
+        f"{len(unexpected_keys)}",
     )
 
     positives_by_qid: dict[str, set[str]]
@@ -340,7 +346,7 @@ def main(cfg: DictConfig) -> None:
 
     doc_ids: list[str] = []
     next_doc_id: int = 0
-    logger.info("Encoding corpus and building FAISS index.")
+    log_if_rank_zero(logger, "Encoding corpus and building FAISS index.")
     for batch_ids, batch_texts in _iter_batches(corpus_iter, settings.doc_batch_size):
         batch_vectors: np.ndarray = _encode_text_batch(
             model=model,
@@ -359,7 +365,9 @@ def main(cfg: DictConfig) -> None:
         doc_ids.extend(batch_ids)
         next_doc_id += batch_size
 
-    logger.info("Mining hard negatives for %d queries.", len(positives_by_qid))
+    log_if_rank_zero(
+        logger, f"Mining hard negatives for {len(positives_by_qid)} queries."
+    )
     output_path: Path = Path(settings.output_dir) / f"{settings.output_basename}.jsonl"
 
     def _record_iterator() -> Iterator[dict[str, Any]]:
@@ -421,7 +429,7 @@ def main(cfg: DictConfig) -> None:
                     }
 
     _write_triplet_rows(output_path, _record_iterator())
-    logger.info("Saved mined negatives to %s", output_path)
+    log_if_rank_zero(logger, f"Saved mined negatives to {output_path}")
 
 
 if __name__ == "__main__":

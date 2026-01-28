@@ -4,7 +4,10 @@ from functools import cached_property
 from typing import Any
 
 import lightning as L
+import torch
+from datasets import IterableDataset
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 from transformers import PreTrainedTokenizerBase
 
 from src.data.registry import DATASET_REGISTRY
@@ -83,6 +86,19 @@ class TrainDataModule(L.LightningDataModule):
             require_teacher_scores=require_teacher_scores,
         )
 
+    def _build_sampler(
+        self,
+        dataset: Any,
+        shuffle: bool,
+        drop_last: bool,
+    ) -> DistributedSampler | None:
+        if not (torch.distributed.is_available() and torch.distributed.is_initialized()):
+            return None
+        inner_dataset: Any = getattr(dataset, "dataset", None)
+        if isinstance(inner_dataset, IterableDataset):
+            return None
+        return DistributedSampler(dataset, shuffle=shuffle, drop_last=drop_last)
+
     def _make_dataloader(
         self,
         dataset: Any,
@@ -97,17 +113,25 @@ class TrainDataModule(L.LightningDataModule):
         if num_workers > 0:
             # Use a small prefetch to overlap CPU preprocessing and GPU work.
             prefetch_factor = self.cfg.training.prefetch_factor
+        sampler: DistributedSampler | None = self._build_sampler(
+            dataset=dataset,
+            shuffle=shuffle,
+            drop_last=drop_last,
+        )
+        use_shuffle: bool = shuffle and sampler is None
 
         dataloader_kwargs: dict[str, Any] = {
             "dataset": dataset,
             "batch_size": batch_size,
-            "shuffle": shuffle,
+            "shuffle": use_shuffle,
             "num_workers": num_workers,
             "collate_fn": dataset.collator,
             "drop_last": drop_last,
             "pin_memory": pin_memory,
             "persistent_workers": persistent_workers,
         }
+        if sampler is not None:
+            dataloader_kwargs["sampler"] = sampler
         if prefetch_factor is not None:
             dataloader_kwargs["prefetch_factor"] = prefetch_factor
         return DataLoader(**dataloader_kwargs)
