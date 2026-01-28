@@ -46,7 +46,11 @@ class RerankingCollator:
                 raise ValueError(
                     "max_padding requires max_query_length, max_doc_length, and max_docs."
                 )
-            if max_query_length_opt <= 0 or max_doc_length_opt <= 0 or max_docs_opt <= 0:
+            if (
+                max_query_length_opt <= 0
+                or max_doc_length_opt <= 0
+                or max_docs_opt <= 0
+            ):
                 raise ValueError("Fixed padding sizes must be positive integers.")
             max_query_length: int = int(max_query_length_opt)
             max_doc_length: int = int(max_doc_length_opt)
@@ -70,14 +74,20 @@ class RerankingCollator:
             doc_attention_mask: torch.Tensor = torch.zeros(
                 (batch_size, max_docs, max_doc_length), dtype=torch.long
             )
-            doc_mask: torch.Tensor = torch.zeros((batch_size, max_docs), dtype=torch.bool)
-            pos_mask: torch.Tensor = torch.zeros((batch_size, max_docs), dtype=torch.bool)
+            doc_mask: torch.Tensor = torch.zeros(
+                (batch_size, max_docs), dtype=torch.bool
+            )
+            pos_mask: torch.Tensor = torch.zeros(
+                (batch_size, max_docs), dtype=torch.bool
+            )
             teacher_scores: torch.Tensor = torch.full(
                 (batch_size, max_docs), float("nan"), dtype=torch.float
             )
 
             for i, item in enumerate(batch):
-                query_len: int = min(int(item.query_input_ids.shape[0]), max_query_length)
+                query_len: int = min(
+                    int(item.query_input_ids.shape[0]), max_query_length
+                )
                 if query_len > 0:
                     query_input_ids[i, :query_len] = item.query_input_ids[:query_len]
                     query_attention_mask[i, :query_len] = item.query_attention_mask[
@@ -120,8 +130,12 @@ class RerankingCollator:
             doc_attention_mask: torch.Tensor = torch.zeros(
                 (len(batch), max_docs, max_doc_len), dtype=torch.long
             )
-            doc_mask: torch.Tensor = torch.zeros((len(batch), max_docs), dtype=torch.bool)
-            pos_mask: torch.Tensor = torch.zeros((len(batch), max_docs), dtype=torch.bool)
+            doc_mask: torch.Tensor = torch.zeros(
+                (len(batch), max_docs), dtype=torch.bool
+            )
+            pos_mask: torch.Tensor = torch.zeros(
+                (len(batch), max_docs), dtype=torch.bool
+            )
             teacher_scores: torch.Tensor = torch.full(
                 (len(batch), max_docs), float("nan"), dtype=torch.float
             )

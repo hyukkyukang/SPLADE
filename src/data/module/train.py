@@ -92,7 +92,9 @@ class TrainDataModule(L.LightningDataModule):
         shuffle: bool,
         drop_last: bool,
     ) -> DistributedSampler | None:
-        if not (torch.distributed.is_available() and torch.distributed.is_initialized()):
+        if not (
+            torch.distributed.is_available() and torch.distributed.is_initialized()
+        ):
             return None
         inner_dataset: Any = getattr(dataset, "dataset", None)
         if isinstance(inner_dataset, IterableDataset):
