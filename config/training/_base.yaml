@@ -17,6 +17,7 @@ max_grad_norm: 1.0
 precision: bf16-mixed
 use_cpu: false
 torch_compile: true
+torch_compile_loss: false
 strategy: ddp
 num_devices: null
 device_id: 0

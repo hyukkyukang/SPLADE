@@ -35,6 +35,8 @@ class SPLADETrainingModule(L.LightningModule):
         # Transformers from_pretrained defaults to eval; ensure training mode here.
         self.model.train()
         compile_enabled: bool = bool(getattr(cfg.training, "torch_compile", False))
+        # Loss compilation is optional to avoid fragile Inductor/Triton paths.
+        compile_loss: bool = bool(getattr(cfg.training, "torch_compile_loss", False))
         compile_available: bool = hasattr(torch, "compile")
         if compile_enabled and not compile_available:
             log_if_rank_zero(
@@ -78,7 +80,7 @@ class SPLADETrainingModule(L.LightningModule):
             reg_type=str(self.reg_cfg.type),
             reg_paper_faithful=bool(self.reg_cfg.paper_faithful),
         )
-        if compile_enabled and compile_available:
+        if compile_enabled and compile_available and compile_loss:
             self.loss_computer = torch.compile(self.loss_computer)
 
         self.val_metrics_cfg: DictConfig | None = getattr(
@@ -351,20 +353,19 @@ class SPLADETrainingModule(L.LightningModule):
             )
             return
 
-        if self.trainer.is_global_zero:
-            metrics: dict[str, torch.Tensor] = self.val_metric_collection.compute()
-            filtered_metrics: dict[str, torch.Tensor] = {
-                f"val_{name}": value
-                for name, value in metrics.items()
-                if name.startswith(("nDCG_", "MRR_", "Recall_"))
-            }
-            if filtered_metrics:
-                self.log_dict(
-                    filtered_metrics,
-                    sync_dist=False,
-                    prog_bar=False,
-                    rank_zero_only=True,
-                )
+        metrics: dict[str, torch.Tensor] = self.val_metric_collection.compute()
+        filtered_metrics: dict[str, torch.Tensor] = {
+            f"val_{name}": value
+            for name, value in metrics.items()
+            if name.startswith(("nDCG_", "MRR_", "Recall_"))
+        }
+        if filtered_metrics:
+            self.log_dict(
+                filtered_metrics,
+                sync_dist=True,
+                prog_bar=False,
+                rank_zero_only=True,
+            )
         self.val_metric_collection.reset()
 
     def configure_optimizers(self) -> torch.optim.Optimizer | dict[str, Any]:
