@@ -7,6 +7,7 @@ import lightning as L
 import torch
 from omegaconf import DictConfig
 
+from src.metric.retrieval import RetrievalMetrics, resolve_k_list
 from src.model.losses import LossComputer
 from src.model.retriever.sparse.neural.splade_model import SpladeModel
 from src.utils.logging import log_if_rank_zero
@@ -80,9 +81,36 @@ class SPLADETrainingModule(L.LightningModule):
         if compile_enabled and compile_available:
             self.loss_computer = torch.compile(self.loss_computer)
 
+        self.val_metrics_cfg: DictConfig | None = getattr(
+            cfg.training, "validation_metrics", None
+        )
+        self.val_metrics_enabled: bool = bool(
+            getattr(self.val_metrics_cfg, "enabled", False)
+            if self.val_metrics_cfg is not None
+            else False
+        )
+        self._val_query_offset: int = 0
+        self.val_metric_collection: RetrievalMetrics | None = None
+        if self.val_metrics_enabled:
+            k_list: list[int] = resolve_k_list(
+                getattr(self.val_metrics_cfg, "k_list", None)
+            )
+            self.val_metric_collection = RetrievalMetrics(
+                dataset_name="",
+                k_list=k_list,
+                sync_on_compute=False,
+            )
+
     def _training_step_shared(
-        self, batch: dict[str, torch.Tensor], stage: str
-    ) -> dict[str, torch.Tensor]:
+        self,
+        batch: dict[str, torch.Tensor],
+        stage: str,
+        *,
+        return_reps: bool = False,
+    ) -> (
+        dict[str, torch.Tensor]
+        | tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]
+    ):
         q_reps: torch.Tensor = self.model.encode_queries(
             batch["query_input_ids"], batch["query_attention_mask"]
         )
@@ -142,8 +170,13 @@ class SPLADETrainingModule(L.LightningModule):
         if self.reg_cfg.doc_weight > 0:
             metrics["d_reg"] = d_reg
 
-        if stage != "train":
-            metrics.update(self._compute_mrr(pairwise_scores, pos_mask, doc_mask, k=10))
+        if return_reps:
+            return metrics, {
+                "q_reps": q_reps,
+                "doc_reps": doc_reps,
+                "pos_mask": pos_mask,
+                "doc_mask": doc_mask,
+            }
 
         return metrics
 
@@ -189,6 +222,14 @@ class SPLADETrainingModule(L.LightningModule):
                 on_epoch=True,
             )
 
+    def on_validation_start(self) -> None:
+        if self.val_metric_collection is None:
+            return
+        self._val_query_offset = 0
+        self.val_metric_collection.reset()
+        # Ensure metric buffers live on the same device as predictions.
+        self.val_metric_collection.to(self.device)
+
     def _lambda_schedule_multiplier(self) -> float:
         schedule_steps: int | None = getattr(self.reg_cfg, "schedule_steps", 0)
         if schedule_steps is None:
@@ -200,32 +241,57 @@ class SPLADETrainingModule(L.LightningModule):
         progress: float = min(step, schedule_steps) / float(schedule_steps)
         return progress * progress
 
-    @staticmethod
-    def _compute_mrr(
-        scores: torch.Tensor, pos_mask: torch.Tensor, doc_mask: torch.Tensor, k: int
-    ) -> dict[str, torch.Tensor]:
-        # Mask padded documents before ranking.
-        # Compute in fp32 to avoid fp16 overflow on large negative masks.
-        scores_fp32: torch.Tensor = scores.float()
-        masked_scores: torch.Tensor = scores_fp32.masked_fill(
-            ~doc_mask, torch.finfo(scores_fp32.dtype).min
+    def _append_validation_metrics(
+        self,
+        q_reps: torch.Tensor,
+        doc_reps: torch.Tensor,
+        pos_mask: torch.Tensor,
+        doc_mask: torch.Tensor,
+    ) -> None:
+        if self.val_metric_collection is None:
+            return
+        in_batch_scores: torch.Tensor
+        in_batch_pos_mask: torch.Tensor
+        in_batch_doc_mask: torch.Tensor
+        in_batch_scores, in_batch_pos_mask, in_batch_doc_mask = (
+            self.loss_computer._compute_in_batch_scores(
+                q_reps=q_reps,
+                doc_reps=doc_reps,
+                pos_mask=pos_mask,
+                doc_mask=doc_mask,
+            )
         )
-        topk_indices: torch.Tensor = torch.topk(
-            masked_scores, k=min(k, scores.size(1)), dim=1
-        ).indices
-        # Gather positives within the ranked list for vectorized MRR.
-        topk_pos_mask: torch.Tensor = pos_mask.gather(1, topk_indices)
-        has_positive: torch.Tensor = topk_pos_mask.any(dim=1)
-        first_positive: torch.Tensor = torch.argmax(
-            topk_pos_mask.to(torch.int64), dim=1
-        )
-        rank: torch.Tensor = first_positive + 1
-        mrr_values: torch.Tensor = torch.where(
-            has_positive,
-            1.0 / rank.to(dtype=masked_scores.dtype),
-            torch.zeros_like(rank, dtype=masked_scores.dtype),
-        )
-        return {"mrr10": mrr_values.mean()}
+
+        batch_size: int = int(in_batch_scores.shape[0])
+        base_offset: int = self._val_query_offset
+        self._val_query_offset += batch_size
+        world_size: int = int(self.trainer.world_size)
+        global_rank: int = int(self.trainer.global_rank)
+
+        for i in range(batch_size):
+            valid_mask: torch.Tensor = in_batch_doc_mask[i]
+            if not valid_mask.any():
+                continue
+            scores: torch.Tensor = (
+                in_batch_scores[i][valid_mask]
+                .float()
+                .detach()
+                .to(self.val_metric_collection._device_ref.device)
+            )
+            targets: torch.Tensor = (
+                in_batch_pos_mask[i][valid_mask]
+                .float()
+                .detach()
+                .to(self.val_metric_collection._device_ref.device)
+            )
+            global_query_idx: int = global_rank + world_size * (base_offset + i)
+            indexes: torch.Tensor = torch.full(
+                (scores.shape[0],),
+                global_query_idx,
+                dtype=torch.long,
+                device=scores.device,
+            )
+            self.val_metric_collection.append(scores, targets, indexes)
 
     def forward(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         q: torch.Tensor = self.model.encode_queries(
@@ -246,9 +312,20 @@ class SPLADETrainingModule(L.LightningModule):
         return metrics["loss"]
 
     def validation_step(self, batch: dict[str, torch.Tensor], batch_idx: int) -> None:
-        metrics: dict[str, torch.Tensor] = self._training_step_shared(
-            batch, stage="val"
-        )
+        if self.val_metric_collection is None:
+            metrics: dict[str, torch.Tensor] = self._training_step_shared(
+                batch, stage="val"
+            )
+        else:
+            metrics, rep_cache = self._training_step_shared(
+                batch, stage="val", return_reps=True
+            )
+            self._append_validation_metrics(
+                rep_cache["q_reps"],
+                rep_cache["doc_reps"],
+                rep_cache["pos_mask"],
+                rep_cache["doc_mask"],
+            )
         batch_size: int = int(batch["query_input_ids"].shape[0])
         val_loss: torch.Tensor = metrics["loss"].detach()
         self.log(
@@ -260,17 +337,35 @@ class SPLADETrainingModule(L.LightningModule):
             sync_dist=True,
             batch_size=batch_size,
         )
-        if "mrr10" in metrics:
-            val_mrr10: torch.Tensor = metrics["mrr10"].detach()
-            self.log(
-                "val_mrr10",
-                val_mrr10,
-                on_step=False,
-                on_epoch=True,
-                prog_bar=True,
-                sync_dist=True,
-                batch_size=batch_size,
+
+    def on_validation_epoch_end(self) -> None:
+        if self.val_metric_collection is None:
+            return
+        has_data: bool = self.val_metric_collection.gather(
+            world_size=self.trainer.world_size,
+            all_gather_fn=self.all_gather if self.trainer.world_size > 1 else None,
+        )
+        if not has_data:
+            log_if_rank_zero(
+                logger, "No predictions accumulated during validation.", level="warning"
             )
+            return
+
+        if self.trainer.is_global_zero:
+            metrics: dict[str, torch.Tensor] = self.val_metric_collection.compute()
+            filtered_metrics: dict[str, torch.Tensor] = {
+                f"val_{name}": value
+                for name, value in metrics.items()
+                if name.startswith(("nDCG_", "MRR_", "Recall_"))
+            }
+            if filtered_metrics:
+                self.log_dict(
+                    filtered_metrics,
+                    sync_dist=False,
+                    prog_bar=False,
+                    rank_zero_only=True,
+                )
+        self.val_metric_collection.reset()
 
     def configure_optimizers(self) -> torch.optim.Optimizer | dict[str, Any]:
         optimizer: torch.optim.Optimizer = torch.optim.AdamW(

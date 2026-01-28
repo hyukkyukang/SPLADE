@@ -1,5 +1,6 @@
 import logging
 import os
+from datetime import datetime
 from typing import Any
 
 import hydra
@@ -57,6 +58,20 @@ def _maybe_mark_ddp_launcher(
     os.environ["SPLADE_DDP_LAUNCHER"] = "1"
 
 
+def _resolve_checkpoint_dir(log_dir: str) -> str:
+    """Return a checkpoint directory, suffixing when checkpoints already exist."""
+    base_dir: str = os.path.join(log_dir, "checkpoints")
+    # Only fork when previous checkpoints exist to avoid overwriting.
+    if not os.path.isdir(base_dir):
+        return base_dir
+    entries: list[str] = os.listdir(base_dir)
+    has_checkpoints: bool = any(entry.endswith(".ckpt") for entry in entries)
+    if not has_checkpoints:
+        return base_dir
+    timestamp: str = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    return f"{base_dir}_{timestamp}"
+
+
 @hydra.main(version_base=None, config_path=ABS_CONFIG_DIR, config_name="train")
 def main(cfg: DictConfig) -> None:
     setup_tqdm_friendly_logging()
@@ -78,12 +93,18 @@ def main(cfg: DictConfig) -> None:
     model: SPLADETrainingModule = SPLADETrainingModule(cfg=cfg)
     data_module: TrainDataModule = TrainDataModule(cfg=cfg)
 
-    checkpoint_dir: str = os.path.join(cfg.log_dir, "checkpoints")
+    checkpoint_dir: str = _resolve_checkpoint_dir(cfg.log_dir)
     os.makedirs(checkpoint_dir, exist_ok=True)
+    if checkpoint_dir != os.path.join(cfg.log_dir, "checkpoints"):
+        log_if_rank_zero(
+            logger,
+            "Existing checkpoints found; writing new checkpoints to "
+            f"{checkpoint_dir}.",
+        )
     checkpoint_callback: ModelCheckpoint = ModelCheckpoint(
         dirpath=checkpoint_dir,
-        filename="step{step}-val_mrr10{val_mrr10:.4f}",
-        monitor="val_mrr10",
+        filename="step{step}-val_MRR_10{val_MRR_10:.4f}",
+        monitor="val_MRR_10",
         mode="max",
         save_top_k=1,
         save_last=True,
