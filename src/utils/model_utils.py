@@ -5,7 +5,7 @@ from typing import Any
 import torch
 from omegaconf import DictConfig
 
-from src.model.retriever.sparse.neural.splade_model import SpladeModel
+from src.model.retriever.sparse.neural.splade_model import SpladeDocModel, SpladeModel
 
 
 def resolve_model_dtype(dtype_name: str, use_cpu: bool) -> torch.dtype | None:
@@ -23,10 +23,26 @@ def resolve_model_dtype(dtype_name: str, use_cpu: bool) -> torch.dtype | None:
     return resolved
 
 
-def build_splade_model(cfg: DictConfig, *, use_cpu: bool) -> SpladeModel:
-    """Build a SpladeModel from config with dtype handling."""
+def build_splade_model(
+    cfg: DictConfig, *, use_cpu: bool
+) -> SpladeModel | SpladeDocModel:
+    """Build a SPLADE model from config with dtype handling."""
     dtype: torch.dtype | None = resolve_model_dtype(cfg.model.dtype, use_cpu)
-    model: SpladeModel = SpladeModel(
+    doc_only: bool = bool(getattr(cfg.model, "doc_only", False))
+    if doc_only:
+        query_bow_excluded_token_ids: list[int] = list(
+            getattr(cfg.model, "query_bow_excluded_token_ids", [])
+        )
+        return SpladeDocModel(
+            model_name=cfg.model.huggingface_name,
+            doc_pooling=cfg.model.doc_pooling,
+            sparse_activation=cfg.model.sparse_activation,
+            attn_implementation=cfg.model.attn_implementation,
+            dtype=dtype,
+            normalize=cfg.model.normalize,
+            query_bow_excluded_token_ids=query_bow_excluded_token_ids,
+        )
+    return SpladeModel(
         model_name=cfg.model.huggingface_name,
         query_pooling=cfg.model.query_pooling,
         doc_pooling=cfg.model.doc_pooling,
@@ -35,7 +51,6 @@ def build_splade_model(cfg: DictConfig, *, use_cpu: bool) -> SpladeModel:
         dtype=dtype,
         normalize=cfg.model.normalize,
     )
-    return model
 
 
 def load_splade_checkpoint(

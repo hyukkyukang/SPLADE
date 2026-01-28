@@ -14,6 +14,7 @@ from src.model.module.train import SPLADETrainingModule
 from src.utils import log_if_rank_zero, set_seed
 from src.utils.logging import (
     get_logger,
+    suppress_accumulate_grad_stream_mismatch_warning,
     setup_tqdm_friendly_logging,
 )
 from src.utils.script_setup import configure_script_environment
@@ -38,6 +39,7 @@ configure_script_environment(
 @hydra.main(version_base=None, config_path=ABS_CONFIG_DIR, config_name="train")
 def main(cfg: DictConfig) -> None:
     setup_tqdm_friendly_logging()
+    suppress_accumulate_grad_stream_mismatch_warning()
     os.makedirs(cfg.log_dir, exist_ok=True)
 
     set_seed(cfg.seed)

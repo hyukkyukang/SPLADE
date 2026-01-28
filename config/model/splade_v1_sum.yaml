@@ -4,5 +4,5 @@ defaults:
 
 name: splade_v1_sum
 query_pooling: sum
-doc_pooling: max
+doc_pooling: sum
 sparse_activation: log1p_relu

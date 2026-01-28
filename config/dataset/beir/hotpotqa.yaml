@@ -1,6 +1,6 @@
 # @package dataset
 defaults:
-  - _base
+  - _base@_here_
 
 name: beir_hotpotqa
 beir_dataset: hotpotqa

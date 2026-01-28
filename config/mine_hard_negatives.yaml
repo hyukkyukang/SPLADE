@@ -1,0 +1,30 @@
+# Mining entrypoint config
+seed: 10
+log_dir: "logs"
+root_dir_path: "."
+
+defaults:
+  - _self_
+  - model: splade_v1_sum
+  - dataset@train_dataset: msmarco_hf_train
+  - dataset@retrieval_dataset: beir/msmarco
+  - testing: default
+  - override hydra/job_logging: colorlog_custom
+
+mining:
+  output_dir: "data/hard_negatives"
+  output_basename: "msmarco_spladev1_hardneg"
+  output_format: list
+  negatives_per_query: 1
+  top_k: 200
+  max_queries: null
+  max_docs: null
+  query_batch_size: 32
+  doc_batch_size: 32
+  use_cpu: false
+  faiss_index_type: Flat
+  faiss_use_gpu: false
+  faiss_gpu_device: 0
+  normalize_embeddings: false
+  checkpoint_path: null
+  use_qrels: false

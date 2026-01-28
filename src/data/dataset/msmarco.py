@@ -7,7 +7,7 @@ import random
 import time
 from functools import cached_property
 from numbers import Number
-from typing import Any, Iterable, Iterator
+from typing import Any, Iterable, Iterator, Mapping
 
 import pyarrow as pa
 import torch
@@ -29,6 +29,44 @@ from src.data.utils import (
 logger: logging.Logger = logging.getLogger("MSMARCO")
 
 
+def _normalize_optional_str(value: Any) -> str | None:
+    """Normalize optional string values from configs."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        normalized: str = value.strip().lower()
+        if normalized in {"", "none", "null"}:
+            return None
+    return str(value)
+
+
+def _load_hf_dataset(
+    hf_name: str,
+    hf_subset: str | None,
+    split: str,
+    cache_dir: str | None,
+    streaming: bool,
+    data_files: Mapping[str, Any] | None,
+) -> Any:
+    """Load a Hugging Face dataset with optional data_files support."""
+    if data_files:
+        return load_dataset(
+            hf_name,
+            name=hf_subset,
+            split=split,
+            cache_dir=cache_dir,
+            streaming=streaming,
+            data_files=dict(data_files),
+        )
+    return load_dataset(
+        hf_name,
+        name=hf_subset,
+        split=split,
+        cache_dir=cache_dir,
+        streaming=streaming,
+    )
+
+
 class MSMARCO(BaseDataset):
 
     def __init__(
@@ -42,14 +80,28 @@ class MSMARCO(BaseDataset):
         BaseDataset.__init__(self, cfg=cfg, global_cfg=global_cfg, tokenizer=tokenizer)
 
         self.hf_name: str = str(cfg.hf_name)
-        self.hf_subset: str = str(cfg.hf_subset)
+        self.hf_subset: str | None = _normalize_optional_str(
+            getattr(cfg, "hf_subset", None)
+        )
         self.hf_split: str = str(cfg.hf_split)
-        self.hf_text_name: str | None = getattr(cfg, "hf_text_name", None)
+        self.hf_text_name: str | None = _normalize_optional_str(
+            getattr(cfg, "hf_text_name", None)
+        )
+        self.hf_data_files: Mapping[str, Any] | None = getattr(
+            cfg, "hf_data_files", None
+        )
         self.hf_cache_dir: str | None = getattr(cfg, "hf_cache_dir", None)
         self.hf_max_samples: int | None = getattr(cfg, "hf_max_samples", None)
-        self.hf_teacher_name: str | None = getattr(cfg, "hf_teacher_name", None)
-        self.hf_teacher_subset: str | None = getattr(cfg, "hf_teacher_subset", None)
+        self.hf_teacher_name: str | None = _normalize_optional_str(
+            getattr(cfg, "hf_teacher_name", None)
+        )
+        self.hf_teacher_subset: str | None = _normalize_optional_str(
+            getattr(cfg, "hf_teacher_subset", None)
+        )
         self.hf_teacher_split: str = str(getattr(cfg, "hf_teacher_split", "train"))
+        self.hf_teacher_data_files: Mapping[str, Any] | None = getattr(
+            cfg, "hf_teacher_data_files", None
+        )
         self.hf_teacher_cache_dir: str | None = getattr(
             cfg, "hf_teacher_cache_dir", None
         )
@@ -123,9 +175,17 @@ class MSMARCO(BaseDataset):
     @property
     def collator(self) -> RerankingCollator:
         if self._collator is None:
+            max_padding: bool = bool(getattr(self.cfg, "max_padding", False))
+            max_query_length: int = int(self.cfg.max_query_length)
+            max_doc_length: int = int(self.cfg.max_doc_length)
+            max_docs: int = int(self.num_positives + self.num_negatives)
             self._collator = RerankingCollator(
                 pad_token_id=self.tokenizer.pad_token_id,
                 require_teacher_scores=self.require_teacher_scores,
+                max_padding=max_padding,
+                max_query_length=max_query_length,
+                max_doc_length=max_doc_length,
+                max_docs=max_docs,
             )
         return self._collator
 
@@ -138,12 +198,13 @@ class MSMARCO(BaseDataset):
                 text_name,
                 False,
             )
-            return load_dataset(
+            return _load_hf_dataset(
                 text_name,
                 "queries",
                 split="train",
                 cache_dir=self.hf_cache_dir,
                 streaming=False,
+                data_files=None,
             )
         except Exception:  # pylint: disable=broad-except
             logger.info(
@@ -153,12 +214,13 @@ class MSMARCO(BaseDataset):
                 self.hf_split,
                 False,
             )
-            return load_dataset(
+            return _load_hf_dataset(
                 self.hf_name,
                 self.hf_subset,
                 split=self.hf_split,
                 cache_dir=self.hf_cache_dir,
                 streaming=False,
+                data_files=self.hf_data_files,
             )
 
     @cached_property
@@ -170,12 +232,13 @@ class MSMARCO(BaseDataset):
                 text_name,
                 False,
             )
-            return load_dataset(
+            return _load_hf_dataset(
                 text_name,
                 "corpus",
                 split="train",
                 cache_dir=self.hf_cache_dir,
                 streaming=False,
+                data_files=None,
             )
         except Exception:  # pylint: disable=broad-except
             logger.info(
@@ -185,12 +248,13 @@ class MSMARCO(BaseDataset):
                 self.hf_split,
                 False,
             )
-            return load_dataset(
+            return _load_hf_dataset(
                 self.hf_name,
                 self.hf_subset,
                 split=self.hf_split,
                 cache_dir=self.hf_cache_dir,
                 streaming=False,
+                data_files=self.hf_data_files,
             )
 
     @cached_property
@@ -275,7 +339,7 @@ class MSMARCO(BaseDataset):
             return self._integer_id_cache_path
         cache_key: str = build_integer_id_cache_key(
             hf_name=self.hf_name,
-            hf_subset=self.hf_subset,
+            hf_subset=self.hf_subset or "",
             hf_split=self.hf_split,
             query_id_column=self.query_id_column,
             corpus_id_column=self.corpus_id_column,
@@ -610,11 +674,18 @@ class MSMARCO(BaseDataset):
         ):
             raise ValueError(f"Missing teacher score in HF sample for query {qid}")
 
+        max_padding: bool = bool(getattr(self.cfg, "max_padding", False))
+        # Use max_length padding to keep fixed shapes when enabled.
+        query_padding: str | bool = "max_length" if max_padding else True
+        doc_padding: str | bool = "max_length" if max_padding else True
+        max_query_length: int = int(self.cfg.max_query_length)
+        max_doc_length: int = int(self.cfg.max_doc_length)
+
         query_tokens: Any = self.tokenizer(
             query_text,
-            padding=True,
+            padding=query_padding,
             truncation=True,
-            max_length=self.cfg.max_query_length,
+            max_length=max_query_length,
             return_tensors="pt",
         )
         query_input_ids: torch.Tensor = query_tokens["input_ids"].squeeze(0)
@@ -623,18 +694,16 @@ class MSMARCO(BaseDataset):
         if docs:
             doc_tokens: Any = self.tokenizer(
                 docs,
-                padding=True,
+                padding=doc_padding,
                 truncation=True,
-                max_length=self.cfg.max_doc_length,
+                max_length=max_doc_length,
                 return_tensors="pt",
             )
             doc_input_ids: torch.Tensor = doc_tokens["input_ids"]
             doc_attention_mask: torch.Tensor = doc_tokens["attention_mask"]
         else:
-            doc_input_ids = torch.empty((0, self.cfg.max_doc_length), dtype=torch.long)
-            doc_attention_mask = torch.empty(
-                (0, self.cfg.max_doc_length), dtype=torch.long
-            )
+            doc_input_ids = torch.empty((0, max_doc_length), dtype=torch.long)
+            doc_attention_mask = torch.empty((0, max_doc_length), dtype=torch.long)
 
         doc_mask: torch.Tensor = torch.zeros(len(docs), dtype=torch.bool)
         if docs:
@@ -696,6 +765,7 @@ class MSMARCO(BaseDataset):
         split: str,
         hf_cache_dir: str | None,
         max_samples: int | None,
+        data_files: Mapping[str, Any] | None,
     ) -> dict[tuple[str, str], float]:
         if hf_name is None or subset is None:
             return {}
@@ -706,8 +776,13 @@ class MSMARCO(BaseDataset):
             split,
             False,
         )
-        teacher_ds: Any = load_dataset(
-            hf_name, subset, split=split, cache_dir=hf_cache_dir
+        teacher_ds: Any = _load_hf_dataset(
+            hf_name,
+            subset,
+            split=split,
+            cache_dir=hf_cache_dir,
+            streaming=False,
+            data_files=data_files,
         )
         if max_samples is not None:
             teacher_ds = teacher_ds.select(range(min(max_samples, len(teacher_ds))))
@@ -819,12 +894,13 @@ class MSMARCO(BaseDataset):
         )
         if self.hf_max_samples is not None:
             max_samples: int = int(self.hf_max_samples)
-            streaming_dataset: IterableDataset = load_dataset(
+            streaming_dataset: IterableDataset = _load_hf_dataset(
                 self.hf_name,
                 self.hf_subset,
                 split=self.hf_split,
                 cache_dir=self.hf_cache_dir,
                 streaming=True,
+                data_files=self.hf_data_files,
             )
             column_names: list[str] = list(streaming_dataset.column_names)
             rows: list[dict[str, Any]] = list(
@@ -832,12 +908,13 @@ class MSMARCO(BaseDataset):
             )
             dataset: Dataset = Dataset.from_list(rows)
         else:
-            dataset: Dataset = load_dataset(
+            dataset: Dataset = _load_hf_dataset(
                 self.hf_name,
                 self.hf_subset,
                 split=self.hf_split,
                 cache_dir=self.hf_cache_dir,
                 streaming=False,
+                data_files=self.hf_data_files,
             )
             column_names: list[str] = list(dataset.column_names)
 
@@ -931,12 +1008,13 @@ class MSMARCO(BaseDataset):
             self.hf_split,
             True,
         )
-        dataset: Any = load_dataset(
+        dataset: Any = _load_hf_dataset(
             self.hf_name,
             self.hf_subset,
             split=self.hf_split,
             cache_dir=self.hf_cache_dir,
             streaming=True,
+            data_files=self.hf_data_files,
         )
         has_text_triplets: bool = self._has_inline_triplets(dataset.column_names)
         if not has_text_triplets:
@@ -946,24 +1024,26 @@ class MSMARCO(BaseDataset):
                 text_name,
                 False,
             )
-            load_dataset(
+            _load_hf_dataset(
                 text_name,
                 "queries",
                 split="train",
                 cache_dir=self.hf_cache_dir,
                 streaming=False,
+                data_files=None,
             )
             logger.info(
                 "Loading HF corpus dataset: name=%s subset=corpus split=train streaming=%s",
                 text_name,
                 False,
             )
-            load_dataset(
+            _load_hf_dataset(
                 text_name,
                 "corpus",
                 split="train",
                 cache_dir=self.hf_cache_dir,
                 streaming=False,
+                data_files=None,
             )
         if self.load_teacher_scores and self.hf_teacher_name and self.hf_teacher_subset:
             raise ValueError(
@@ -995,12 +1075,13 @@ class MSMARCO(BaseDataset):
                 self.hf_split,
                 True,
             )
-            self.dataset = load_dataset(
+            self.dataset = _load_hf_dataset(
                 self.hf_name,
                 self.hf_subset,
                 split=self.hf_split,
                 cache_dir=self.hf_cache_dir,
                 streaming=True,
+                data_files=self.hf_data_files,
             )
             if self.hf_max_samples is not None:
                 self.dataset = self.dataset.take(self.hf_max_samples)

@@ -129,3 +129,83 @@ class SpladeModel(nn.Module):
         q: torch.Tensor = self.encode_queries(query_input_ids, query_attention_mask)
         d: torch.Tensor = self.encode_docs(doc_input_ids, doc_attention_mask)
         return q, d
+
+
+class SpladeDocModel(nn.Module):
+    # --- Special methods ---
+    def __init__(
+        self,
+        model_name: str,
+        doc_pooling: str,
+        sparse_activation: str,
+        attn_implementation: Optional[str] = None,
+        dtype: Optional[torch.dtype] = None,
+        normalize: bool = False,
+        query_bow_excluded_token_ids: Optional[list[int]] = None,
+    ) -> None:
+        super().__init__()
+        self.encoder: SpladeEncoder = SpladeEncoder(
+            model_name=model_name,
+            sparse_activation=sparse_activation,
+            attn_implementation=attn_implementation,
+            dtype=dtype,
+        )
+        self.doc_pooling: str = doc_pooling
+        self.normalize: bool = normalize
+        self.query_bow_excluded_token_ids: list[int] = list(
+            query_bow_excluded_token_ids or []
+        )
+
+    # --- Protected methods ---
+    def _build_query_bow(
+        self, input_ids: torch.Tensor, attention_mask: torch.Tensor
+    ) -> torch.Tensor:
+        batch_size: int = int(input_ids.shape[0])
+        vocab_size: int = int(self.encoder.mlm.config.vocab_size)
+        mask: torch.Tensor = attention_mask.to(torch.bool)
+
+        if self.query_bow_excluded_token_ids:
+            excluded_mask: torch.Tensor = torch.zeros_like(input_ids, dtype=torch.bool)
+            for token_id in self.query_bow_excluded_token_ids:
+                excluded_mask |= input_ids == int(token_id)
+            mask = mask & ~excluded_mask
+
+        masked_ids: torch.Tensor = input_ids.masked_fill(~mask, 0)
+        bow: torch.Tensor = torch.zeros(
+            (batch_size, vocab_size),
+            device=input_ids.device,
+            dtype=self.encoder.mlm.dtype,
+        )
+        counts: torch.Tensor = mask.to(dtype=bow.dtype)
+        bow.scatter_add_(1, masked_ids, counts)
+
+        if self.normalize:
+            bow = F.normalize(bow, p=2, dim=-1)
+        return bow
+
+    # --- Public methods ---
+    def encode_queries(
+        self, input_ids: torch.Tensor, attention_mask: torch.Tensor
+    ) -> torch.Tensor:
+        return self._build_query_bow(input_ids, attention_mask)
+
+    def encode_docs(
+        self, input_ids: torch.Tensor, attention_mask: torch.Tensor
+    ) -> torch.Tensor:
+        return self.encoder(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            pooling=self.doc_pooling,
+            normalize=self.normalize,
+        )
+
+    def forward(
+        self,
+        query_input_ids: torch.Tensor,
+        query_attention_mask: torch.Tensor,
+        doc_input_ids: torch.Tensor,
+        doc_attention_mask: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        q: torch.Tensor = self.encode_queries(query_input_ids, query_attention_mask)
+        d: torch.Tensor = self.encode_docs(doc_input_ids, doc_attention_mask)
+        return q, d

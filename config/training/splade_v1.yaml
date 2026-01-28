@@ -4,8 +4,11 @@ defaults:
 
 name: splade_v1
 
+loss:
+  type: both
+
 regularization:
-  query_weight: 0.0001
+  query_weight: 0.001
   doc_weight: 0.0001
   type: l1
   paper_faithful: true

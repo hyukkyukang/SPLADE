@@ -1,8 +1,10 @@
+import argparse
 import logging
 import os
-from typing import Optional
-import argparse
 import sys
+from typing import Any, Optional
+
+import torch
 
 
 def get_logger(name: str, file_path: Optional[str] = None) -> logging.Logger:
@@ -181,3 +183,16 @@ def suppress_pytorch_lightning_tips() -> None:
 
 def suppress_dataloader_workers_warning() -> None:
     logging.getLogger("torch.utils.data").setLevel(logging.WARNING)
+
+
+def suppress_accumulate_grad_stream_mismatch_warning() -> None:
+    """Disable the AccumulateGrad stream mismatch warning in PyTorch."""
+    graph_module: Any | None = getattr(torch.autograd, "graph", None)
+    if graph_module is None:
+        return
+    set_warn_fn: Any | None = getattr(
+        graph_module, "set_warn_on_accumulate_grad_stream_mismatch", None
+    )
+    if callable(set_warn_fn):
+        # Avoid spamming warnings for benign DDP/compile stream mismatches.
+        set_warn_fn(False)

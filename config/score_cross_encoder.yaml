@@ -1,0 +1,21 @@
+# Cross-encoder scoring entrypoint config
+seed: 10
+log_dir: "logs"
+root_dir_path: "."
+
+defaults:
+  - _self_
+  - dataset@score_dataset: msmarco_spladev1_hardneg_minilm12
+  - override hydra/job_logging: colorlog_custom
+
+scoring:
+  model_name: cross-encoder/ms-marco-MiniLM-L-12-v2
+  output_dir: "data/hard_negatives"
+  output_basename: "msmarco_spladev1_hardneg_minilm12"
+  output_format: jsonl
+  batch_size: 16
+  max_length: 512
+  use_cpu: false
+  max_rows: null
+  overwrite: true
+  score_key: scores

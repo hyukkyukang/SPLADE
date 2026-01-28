@@ -85,20 +85,32 @@ class TrainDataModule(L.LightningDataModule):
 
     def _make_dataloader(
         self,
-        dataset,
+        dataset: Any,
         batch_size: int,
         shuffle: bool,
         drop_last: bool = False,
     ) -> DataLoader:
-        num_workers = 0
-        return DataLoader(
-            dataset,
-            batch_size=batch_size,
-            shuffle=shuffle,
-            num_workers=num_workers,
-            collate_fn=dataset.collator,
-            drop_last=drop_last,
-        )
+        num_workers: int = self.cfg.training.num_workers
+        pin_memory: bool = not bool(self.cfg.training.use_cpu)
+        persistent_workers: bool = num_workers > 0
+        prefetch_factor: int | None = None
+        if num_workers > 0:
+            # Use a small prefetch to overlap CPU preprocessing and GPU work.
+            prefetch_factor = self.cfg.training.prefetch_factor
+
+        dataloader_kwargs: dict[str, Any] = {
+            "dataset": dataset,
+            "batch_size": batch_size,
+            "shuffle": shuffle,
+            "num_workers": num_workers,
+            "collate_fn": dataset.collator,
+            "drop_last": drop_last,
+            "pin_memory": pin_memory,
+            "persistent_workers": persistent_workers,
+        }
+        if prefetch_factor is not None:
+            dataloader_kwargs["prefetch_factor"] = prefetch_factor
+        return DataLoader(**dataloader_kwargs)
 
     def train_dataloader(self) -> DataLoader:
         dataset = self.train_dataset

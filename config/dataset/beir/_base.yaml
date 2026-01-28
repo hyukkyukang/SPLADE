@@ -1,6 +1,6 @@
 # @package dataset
 defaults:
-  - /dataset/_base
+  - /dataset/_base@_here_
 
 name: beir_base
 type: beir

@@ -2,8 +2,10 @@
 defaults:
   - _base
 
-name: splade_v2
+name: splade_v2_doc
 huggingface_name: distilbert-base-uncased
 query_pooling: max
 doc_pooling: max
 sparse_activation: log1p_relu
+doc_only: true
+query_bow_excluded_token_ids: [0, 101, 102]
