@@ -6,7 +6,7 @@ root_dir_path: "."
 # Defaults
 defaults:
   - _self_
-  - model: splade_v1_sum
+  - model: splade_v1
   - dataset: beir/msmarco
   - testing: default
   # The following overrides are necessary to make the logging colorized.

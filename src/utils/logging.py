@@ -2,7 +2,8 @@ import argparse
 import logging
 import os
 import sys
-from typing import Any, Optional
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
+from typing import Any, Iterator, Optional, TextIO
 
 import torch
 from pytorch_lightning.utilities import rank_zero_only
@@ -27,6 +28,53 @@ def log_if_rank_zero(logger: logging.Logger, message: str, level: str = "info") 
         >>> log_if_rank_zero(logger, "Missing config", level="warning")
     """
     getattr(logger, level)(message)
+
+
+def get_global_rank() -> int:
+    """Return the global rank when available, defaulting to 0."""
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        return int(torch.distributed.get_rank())
+    rank_env: str | None = os.environ.get("RANK") or os.environ.get("LOCAL_RANK")
+    if rank_env is None:
+        return 0
+    try:
+        return int(rank_env)
+    except ValueError:
+        return 0
+
+
+def is_rank_zero() -> bool:
+    """Check whether the current process is global rank zero."""
+    return get_global_rank() == 0
+
+
+def is_ddp_launcher_process() -> bool:
+    """Identify the DDP launcher process created by Lightning."""
+    launcher_flag: str | None = os.environ.get("SPLADE_DDP_LAUNCHER")
+    if launcher_flag != "1":
+        return False
+    rank_env: str | None = os.environ.get("RANK") or os.environ.get("LOCAL_RANK")
+    # Launcher processes do not have rank environment variables set.
+    return rank_env is None
+
+
+@contextmanager
+def suppress_output_if_not_rank_zero() -> Iterator[None]:
+    """Silence stdout/stderr on non-zero ranks to avoid duplicate logs."""
+    if is_ddp_launcher_process():
+        devnull: TextIO
+        # Launcher output is redundant once worker processes start.
+        with open(os.devnull, "w") as devnull:
+            with redirect_stdout(devnull), redirect_stderr(devnull):
+                yield
+        return
+    if is_rank_zero():
+        yield
+        return
+    devnull: TextIO
+    with open(os.devnull, "w") as devnull:
+        with redirect_stdout(devnull), redirect_stderr(devnull):
+            yield
 
 
 def get_logger(name: str, file_path: Optional[str] = None) -> logging.Logger:

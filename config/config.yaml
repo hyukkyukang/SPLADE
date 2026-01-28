@@ -6,7 +6,7 @@ root_dir_path: "."
 # Defaults
 defaults:
   - _self_
-  - model: splade_v1_sum
+  - model: splade_v1
   - dataset: msmarco_hf_train
   - training: splade_v1
   - testing: default

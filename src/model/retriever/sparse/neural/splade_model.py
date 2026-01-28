@@ -7,6 +7,8 @@ from torch import nn
 from torch.nn import functional as F
 from transformers import AutoModelForMaskedLM
 
+from src.utils.logging import suppress_output_if_not_rank_zero
+
 
 def _apply_activation(logits: torch.Tensor, activation: str) -> torch.Tensor:
     if activation == "log1p_relu":
@@ -51,9 +53,10 @@ class SpladeEncoder(nn.Module):
         if dtype is not None:
             kwargs["dtype"] = dtype
         # Load the masked language model backbone.
-        self.mlm: AutoModelForMaskedLM = AutoModelForMaskedLM.from_pretrained(
-            model_name, **kwargs
-        )
+        self.mlm: AutoModelForMaskedLM
+        # Avoid duplicate load reports on non-zero ranks.
+        with suppress_output_if_not_rank_zero():
+            self.mlm = AutoModelForMaskedLM.from_pretrained(model_name, **kwargs)
         self.sparse_activation: str = sparse_activation
 
     # --- Public methods ---

@@ -36,6 +36,27 @@ configure_script_environment(
 )
 
 
+def _maybe_mark_ddp_launcher(
+    training_cfg: DictConfig, trainer_kwargs: dict[str, Any]
+) -> None:
+    """Flag the Lightning DDP launcher to silence duplicate logs."""
+    strategy_name: str = str(getattr(training_cfg, "strategy", "auto")).lower()
+    if strategy_name != "ddp":
+        return
+    rank_env: str | None = os.environ.get("RANK") or os.environ.get("LOCAL_RANK")
+    if rank_env is not None:
+        return
+    devices: Any = trainer_kwargs.get("devices", 1)
+    # Devices can be an int (count) or an explicit device list.
+    if isinstance(devices, (list, tuple)):
+        device_count: int = len(devices)
+    else:
+        device_count = int(devices)
+    if device_count <= 1:
+        return
+    os.environ["SPLADE_DDP_LAUNCHER"] = "1"
+
+
 @hydra.main(version_base=None, config_path=ABS_CONFIG_DIR, config_name="train")
 def main(cfg: DictConfig) -> None:
     setup_tqdm_friendly_logging()
@@ -45,16 +66,17 @@ def main(cfg: DictConfig) -> None:
     set_seed(cfg.seed)
     log_if_rank_zero(logger, f"Random seed set to: {cfg.seed}")
 
-    model: SPLADETrainingModule = SPLADETrainingModule(cfg=cfg)
-    data_module: TrainDataModule = TrainDataModule(cfg=cfg)
-
     training_cfg: DictConfig = cfg.training
     trainer_kwargs: dict[str, Any] = (
         get_cpu_trainer_kwargs(training_cfg)
         if training_cfg.use_cpu
         else get_gpu_trainer_kwargs(training_cfg)
     )
+    _maybe_mark_ddp_launcher(training_cfg, trainer_kwargs)
     precision: str = resolve_precision(training_cfg)
+
+    model: SPLADETrainingModule = SPLADETrainingModule(cfg=cfg)
+    data_module: TrainDataModule = TrainDataModule(cfg=cfg)
 
     checkpoint_dir: str = os.path.join(cfg.log_dir, "checkpoints")
     os.makedirs(checkpoint_dir, exist_ok=True)
@@ -68,10 +90,12 @@ def main(cfg: DictConfig) -> None:
     )
 
     wandb_cfg: DictConfig = cfg.training.wandb
+    # Use the training config name for clearer W&B run identification.
+    training_name: str = str(getattr(training_cfg, "name", "training"))
     wandb_logger: WandbLogger = WandbLogger(
         project=wandb_cfg.project,
         entity=wandb_cfg.entity,
-        name=wandb_cfg.name,
+        name=training_name,
         group=wandb_cfg.group,
         tags=list(wandb_cfg.tags) if wandb_cfg.tags is not None else None,
         mode=wandb_cfg.mode,

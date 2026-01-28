@@ -16,7 +16,7 @@ All dataset selection happens via config (e.g., `dataset.hf_name`, `dataset.hf_s
 ## Train
 
 ```
-python scripts/train.py training=splade_v1 model=splade_v1_sum
+python scripts/train.py training=splade_v1 model=splade_v1
 ```
 
 Use Hugging Face MS MARCO (sentence-transformers/msmarco):
