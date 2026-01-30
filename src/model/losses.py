@@ -107,9 +107,19 @@ class LossComputer(nn.Module):
         flat_doc_reps: torch.Tensor = doc_reps.view(bsz * doc_count, rep_dim)
         scores: torch.Tensor = torch.matmul(q_reps, flat_doc_reps.transpose(0, 1))
 
-        # Broadcast valid-document mask across all queries.
+        # Build the per-query valid-document mask:
+        # - include all docs from the same query (positives + negatives)
+        # - include only positives from other queries as in-batch negatives
         flat_doc_mask: torch.Tensor = doc_mask.view(-1)
-        in_batch_doc_mask: torch.Tensor = flat_doc_mask.unsqueeze(0).expand(bsz, -1)
+        flat_pos_mask: torch.Tensor = (pos_mask & doc_mask).view(-1)
+        doc_owner: torch.Tensor = torch.arange(
+            bsz, device=doc_mask.device
+        ).repeat_interleave(doc_count)
+        query_ids: torch.Tensor = torch.arange(bsz, device=doc_mask.device).unsqueeze(1)
+        same_query_mask: torch.Tensor = doc_owner.unsqueeze(0) == query_ids
+        same_query_docs: torch.Tensor = same_query_mask & flat_doc_mask.unsqueeze(0)
+        other_query_pos: torch.Tensor = (~same_query_mask) & flat_pos_mask.unsqueeze(0)
+        in_batch_doc_mask: torch.Tensor = same_query_docs | other_query_pos
 
         # Build a per-query positive mask aligned with flattened docs.
         pos_mask_in_batch: torch.Tensor = torch.zeros(
