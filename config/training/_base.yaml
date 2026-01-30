@@ -9,6 +9,7 @@ prefetch_factor: 2
 grad_accumulation: 1
 
 lr: 2e-5
+optimizer: adamw
 weight_decay: 0.01
 warmup_steps: 6000
 scheduler: linear

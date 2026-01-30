@@ -390,7 +390,18 @@ class SPLADETrainingModule(L.LightningModule):
         self.val_metric_collection.reset()
 
     def configure_optimizers(self) -> torch.optim.Optimizer | dict[str, Any]:
-        optimizer: torch.optim.Optimizer = torch.optim.AdamW(
+        optimizer_name: str = str(
+            getattr(self.cfg.training, "optimizer", "adamw")
+        ).lower()
+        optimizer_cls: type[torch.optim.Optimizer]
+        if optimizer_name == "adamw":
+            optimizer_cls = torch.optim.AdamW
+        elif optimizer_name == "adam":
+            optimizer_cls = torch.optim.Adam
+        else:
+            raise ValueError(f"Unsupported optimizer: {optimizer_name}")
+
+        optimizer: torch.optim.Optimizer = optimizer_cls(
             self.parameters(),
             lr=self.cfg.training.lr,
             weight_decay=self.cfg.training.weight_decay,
