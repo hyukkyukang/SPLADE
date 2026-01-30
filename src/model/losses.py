@@ -89,7 +89,15 @@ class LossComputer(nn.Module):
     def _compute_pairwise_scores(
         self, q_reps: torch.Tensor, doc_reps: torch.Tensor
     ) -> torch.Tensor:
-        return torch.bmm(doc_reps, q_reps.unsqueeze(2)).squeeze(2)
+        device_type: str = str(q_reps.device.type)
+        q_reps_fp32: torch.Tensor = q_reps.float()
+        doc_reps_fp32: torch.Tensor = doc_reps.float()
+        # Ensure FP32 matmul to prevent AMP overflow.
+        with torch.autocast(device_type=device_type, enabled=False):
+            scores_fp32: torch.Tensor = torch.bmm(
+                doc_reps_fp32, q_reps_fp32.unsqueeze(2)
+            ).squeeze(2)
+        return scores_fp32
 
     def _compute_in_batch_scores(
         self,
@@ -105,11 +113,16 @@ class LossComputer(nn.Module):
 
         # Flatten docs so each query scores against all docs in the batch.
         flat_doc_reps: torch.Tensor = doc_reps.view(bsz * doc_count, rep_dim)
-        scores: torch.Tensor = torch.matmul(q_reps, flat_doc_reps.transpose(0, 1))
 
-        # Build the per-query valid-document mask:
-        # - include all docs from the same query (positives + negatives)
-        # - include only positives from other queries as in-batch negatives
+        device_type: str = str(q_reps.device.type)
+        q_reps_fp32: torch.Tensor = q_reps.float()
+        flat_doc_reps_fp32: torch.Tensor = flat_doc_reps.float()
+        # Ensure FP32 matmul to prevent AMP overflow.
+        with torch.autocast(device_type=device_type, enabled=False):
+            scores: torch.Tensor = torch.matmul(
+                q_reps_fp32, flat_doc_reps_fp32.transpose(0, 1)
+            )
+        # Broadcast valid-document mask across all queries.
         flat_doc_mask: torch.Tensor = doc_mask.view(-1)
         flat_pos_mask: torch.Tensor = (pos_mask & doc_mask).view(-1)
         doc_owner: torch.Tensor = torch.arange(
