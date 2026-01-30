@@ -97,7 +97,8 @@ class SpladeEncoder(nn.Module):
         pooling_mode: torch.Tensor,
     ) -> torch.Tensor:
         outputs: Any = self.mlm(input_ids=input_ids, attention_mask=attention_mask)
-        token_scores: torch.Tensor = self.activation(outputs.logits)
+        logits: torch.Tensor = outputs.logits
+        token_scores: torch.Tensor = self.activation(logits)
         embeddings: torch.Tensor = self._pool_sparse(
             token_scores, attention_mask, pooling_mode
         )
