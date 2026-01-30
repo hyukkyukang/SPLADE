@@ -11,37 +11,36 @@ from src.model.retriever.base import BaseRetriever
 from src.model.retriever.registry import RETRIEVER_REGISTRY
 from src.utils.logging import suppress_output_if_not_rank_zero
 
-def _apply_activation(logits: torch.Tensor, activation: str) -> torch.Tensor:
+class _Log1pRelu(nn.Module):
+    def forward(self, logits: torch.Tensor) -> torch.Tensor:
+        return torch.log1p(torch.relu(logits))
+
+
+class _Log1pSoftplus(nn.Module):
+    def forward(self, logits: torch.Tensor) -> torch.Tensor:
+        return torch.log1p(F.softplus(logits))
+
+
+class _Softplus(nn.Module):
+    def forward(self, logits: torch.Tensor) -> torch.Tensor:
+        return F.softplus(logits)
+
+
+class _Relu(nn.Module):
+    def forward(self, logits: torch.Tensor) -> torch.Tensor:
+        return torch.relu(logits)
+
+
+def _resolve_activation_module(activation: str) -> nn.Module:
     if activation == "log1p_relu":
-        activated: torch.Tensor = torch.log1p(torch.relu(logits))
-        return activated
+        return _Log1pRelu()
     if activation == "log1p_softplus":
-        activated: torch.Tensor = torch.log1p(F.softplus(logits))
-        return activated
+        return _Log1pSoftplus()
     if activation == "softplus":
-        activated: torch.Tensor = F.softplus(logits)
-        return activated
+        return _Softplus()
     if activation == "relu":
-        activated: torch.Tensor = torch.relu(logits)
-        return activated
+        return _Relu()
     raise ValueError(f"Unsupported sparse activation: {activation}")
-
-
-def _pool_sparse(
-    token_scores: torch.Tensor, attention_mask: torch.Tensor, pooling: str
-) -> torch.Tensor:
-    # Expand mask for token-wise pooling.
-    mask: torch.Tensor = attention_mask.unsqueeze(-1).to(token_scores.dtype)
-    if pooling == "sum":
-        pooled_sum: torch.Tensor = (token_scores * mask).sum(dim=1)
-        return pooled_sum
-    if pooling == "max":
-        neg_inf: float = torch.finfo(token_scores.dtype).min
-        masked: torch.Tensor = token_scores.masked_fill(mask == 0, neg_inf)
-        pooled: torch.Tensor = masked.max(dim=1).values
-        clipped: torch.Tensor = torch.clamp(pooled, min=0.0)
-        return clipped
-    raise ValueError(f"Unsupported pooling: {pooling}")
 
 
 class SpladeEncoder(nn.Module):
@@ -65,22 +64,43 @@ class SpladeEncoder(nn.Module):
         with suppress_output_if_not_rank_zero():
             self.mlm = AutoModelForMaskedLM.from_pretrained(model_name, **kwargs)
         self.sparse_activation: str = sparse_activation
+        self.activation: nn.Module = _resolve_activation_module(sparse_activation)
+        self._neg_inf: torch.Tensor
+        self.register_buffer("_neg_inf", torch.tensor(float("-inf")), persistent=False)
+
+    # --- Protected methods ---
+    def _pool_sparse(
+        self,
+        token_scores: torch.Tensor,
+        attention_mask: torch.Tensor,
+        pooling_mode: torch.Tensor,
+    ) -> torch.Tensor:
+        # Expand mask for token-wise pooling.
+        mask: torch.Tensor = attention_mask.unsqueeze(-1).to(token_scores.dtype)
+        pooled_sum: torch.Tensor = (token_scores * mask).sum(dim=1)
+        neg_inf: torch.Tensor = self._neg_inf.to(
+            dtype=token_scores.dtype, device=token_scores.device
+        )
+        masked: torch.Tensor = token_scores.masked_fill(mask == 0, neg_inf)
+        pooled_max: torch.Tensor = torch.clamp(masked.max(dim=1).values, min=0.0)
+        pooling_value: torch.Tensor = pooling_mode.to(
+            dtype=token_scores.dtype, device=token_scores.device
+        )
+        pooled: torch.Tensor = pooled_sum + (pooled_max - pooled_sum) * pooling_value
+        return pooled
 
     # --- Public methods ---
     def forward(
         self,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
-        pooling: str,
-        normalize: bool,
+        pooling_mode: torch.Tensor,
     ) -> torch.Tensor:
         outputs: Any = self.mlm(input_ids=input_ids, attention_mask=attention_mask)
-        token_scores: torch.Tensor = _apply_activation(
-            outputs.logits, self.sparse_activation
+        token_scores: torch.Tensor = self.activation(outputs.logits)
+        embeddings: torch.Tensor = self._pool_sparse(
+            token_scores, attention_mask, pooling_mode
         )
-        embeddings: torch.Tensor = _pool_sparse(token_scores, attention_mask, pooling)
-        if normalize:
-            embeddings = F.normalize(embeddings, p=2, dim=-1)
         return embeddings
 
 
@@ -106,28 +126,53 @@ class SpladeModel(nn.Module):
         )
         self.query_pooling: str = query_pooling
         self.doc_pooling: str = doc_pooling
+        self._query_pooling_mode: torch.Tensor
+        self.register_buffer(
+            "_query_pooling_mode",
+            torch.tensor(self._resolve_pooling_mode(query_pooling)),
+            persistent=False,
+        )
+        self._doc_pooling_mode: torch.Tensor
+        self.register_buffer(
+            "_doc_pooling_mode",
+            torch.tensor(self._resolve_pooling_mode(doc_pooling)),
+            persistent=False,
+        )
         self.normalize: bool = normalize
+
+    # --- Protected methods ---
+    @staticmethod
+    def _resolve_pooling_mode(pooling: str) -> float:
+        if pooling == "sum":
+            return 0.0
+        if pooling == "max":
+            return 1.0
+        raise ValueError(f"Unsupported pooling: {pooling}")
 
     # --- Public methods ---
     def encode_queries(
         self, input_ids: torch.Tensor, attention_mask: torch.Tensor
     ) -> torch.Tensor:
-        return self.encoder(
+        embeddings: torch.Tensor = self.encoder(
             input_ids=input_ids,
             attention_mask=attention_mask,
-            pooling=self.query_pooling,
-            normalize=self.normalize,
+            pooling_mode=self._query_pooling_mode,
         )
+        if self.normalize:
+            embeddings = F.normalize(embeddings, p=2, dim=-1)
+        return embeddings
 
     def encode_docs(
         self, input_ids: torch.Tensor, attention_mask: torch.Tensor
     ) -> torch.Tensor:
-        return self.encoder(
+        embeddings: torch.Tensor = self.encoder(
             input_ids=input_ids,
             attention_mask=attention_mask,
-            pooling=self.doc_pooling,
-            normalize=self.normalize,
+            pooling_mode=self._doc_pooling_mode,
         )
+        if self.normalize:
+            embeddings = F.normalize(embeddings, p=2, dim=-1)
+        return embeddings
 
     def forward(
         self,

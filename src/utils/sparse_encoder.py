@@ -126,6 +126,11 @@ def build_sparse_encoder_from_checkpoint(
             "Sparse activation 'relu' is not supported because "
             "SentenceTransformers SpladePooling always applies log1p."
         )
+    elif sparse_activation == "softplus":
+        raise ValueError(
+            "Sparse activation 'softplus' is not supported because "
+            "SentenceTransformers SpladePooling always applies log1p."
+        )
     else:
         raise ValueError(f"Unsupported sparse_activation: {sparse_activation}")
 
