@@ -1,5 +1,6 @@
 torch
 transformers
+sentence-transformers
 lightning[extra]
 torchmetrics
 wandb

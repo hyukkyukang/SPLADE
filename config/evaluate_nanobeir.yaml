@@ -1,18 +1,20 @@
-# Evaluation entrypoint config
+# NanoBEIR proxy evaluation config
 seed: 10
 log_dir_base: "logs"
 tag: null
 log_dir: ${tagged_log_dir:${log_dir_base},${tag}}
 root_dir_path: "."
 
-# Defaults
 defaults:
   - _self_
   - model: splade_v1
-  - dataset: beir/msmarco
   - testing: default
-  # The following overrides are necessary to make the logging colorized.
   - override hydra/job_logging: colorlog_custom
+
+nanobeir:
+  datasets: [msmarco, nfcorpus, nq]
+  batch_size: ${testing.batch_size}
+  save_json: false
 
 hydra:
   output_subdir: null
@@ -26,4 +28,4 @@ hydra:
         stream: ext://sys.stdout
       file:
         class: logging.FileHandler
-        filename: ${log_dir}/evaluate.log
+        filename: ${log_dir}/evaluate_nanobeir.log

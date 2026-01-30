@@ -89,8 +89,6 @@ class LossComputer(nn.Module):
         *,
         loss_type: str,
         temperature: float,
-        pairwise_weight: float,
-        in_batch_weight: float,
         distill_enabled: bool,
         distill_weight: float,
         distill_loss_type: str,
@@ -102,8 +100,6 @@ class LossComputer(nn.Module):
         super().__init__()
         self.loss_type: str = loss_type.replace("-", "_").lower()
         self.temperature: float = float(temperature)
-        self.pairwise_weight: float = float(pairwise_weight)
-        self.in_batch_weight: float = float(in_batch_weight)
         self.distill_enabled: bool = bool(distill_enabled)
         self.distill_weight: float = float(distill_weight)
         self.distill_loss_type: str = str(distill_loss_type).lower()
@@ -116,7 +112,7 @@ class LossComputer(nn.Module):
     def _compute_pairwise_scores(
         self, q_reps: torch.Tensor, doc_reps: torch.Tensor
     ) -> torch.Tensor:
-        return torch.einsum("bv,bnv->bn", q_reps, doc_reps)
+        return torch.bmm(doc_reps, q_reps.unsqueeze(2)).squeeze(2)
 
     def _compute_in_batch_scores(
         self,
@@ -194,25 +190,6 @@ class LossComputer(nn.Module):
             )
             pairwise_loss: torch.Tensor = torch.zeros_like(in_batch_loss)
             loss: torch.Tensor = in_batch_loss
-        elif self.loss_type == "both":
-            pairwise_loss: torch.Tensor = multi_positive_contrastive_loss(
-                pairwise_scores, pos_mask, doc_mask, temperature=self.temperature
-            )
-            in_batch_scores: torch.Tensor
-            in_batch_pos_mask: torch.Tensor
-            in_batch_doc_mask: torch.Tensor
-            in_batch_scores, in_batch_pos_mask, in_batch_doc_mask = (
-                self._compute_in_batch_scores(q_reps, doc_reps, pos_mask, doc_mask)
-            )
-            in_batch_loss: torch.Tensor = multi_positive_contrastive_loss(
-                in_batch_scores,
-                in_batch_pos_mask,
-                in_batch_doc_mask,
-                temperature=self.temperature,
-            )
-            loss: torch.Tensor = (self.pairwise_weight * pairwise_loss) + (
-                self.in_batch_weight * in_batch_loss
-            )
         else:
             raise ValueError(f"Unsupported loss type: {self.loss_type}")
 

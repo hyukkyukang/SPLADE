@@ -1,6 +1,8 @@
 # Training entrypoint config
 seed: 10
-log_dir: "logs"
+log_dir_base: "logs"
+tag: null
+log_dir: ${tagged_log_dir:${log_dir_base},${tag}}
 root_dir_path: "."
 
 # Defaults

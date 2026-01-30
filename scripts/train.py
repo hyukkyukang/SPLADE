@@ -6,7 +6,7 @@ from typing import Any
 import hydra
 import lightning as L
 from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
-from lightning.pytorch.loggers import CSVLogger, WandbLogger
+from lightning.pytorch.loggers import CSVLogger, Logger, WandbLogger
 from omegaconf import DictConfig, OmegaConf
 
 from config.path import ABS_CONFIG_DIR
@@ -18,7 +18,7 @@ from src.utils.logging import (
     suppress_accumulate_grad_stream_mismatch_warning,
     setup_tqdm_friendly_logging,
 )
-from src.utils.script_setup import configure_script_environment
+from src.utils.script_setup import configure_script_environment, normalize_tag
 from src.utils.trainer import (
     get_cpu_trainer_kwargs,
     get_gpu_trainer_kwargs,
@@ -113,18 +113,33 @@ def main(cfg: DictConfig) -> None:
     wandb_cfg: DictConfig = cfg.training.wandb
     # Use the training config name for clearer W&B run identification.
     training_name: str = str(getattr(training_cfg, "name", "training"))
-    wandb_logger: WandbLogger = WandbLogger(
-        project=wandb_cfg.project,
-        entity=wandb_cfg.entity,
-        name=training_name,
-        group=wandb_cfg.group,
-        tags=list(wandb_cfg.tags) if wandb_cfg.tags is not None else None,
-        mode=wandb_cfg.mode,
-        log_model=wandb_cfg.log_model,
-        save_dir=wandb_cfg.save_dir,
+    # Append the tag suffix when provided to group runs by tag.
+    tag_value: str | None = normalize_tag(getattr(cfg, "tag", None))
+    wandb_run_name: str = (
+        f"{training_name}-{tag_value}" if tag_value is not None else training_name
     )
-    wandb_logger.log_hyperparams(OmegaConf.to_container(cfg, resolve=True))
     csv_logger: CSVLogger = CSVLogger(save_dir=cfg.log_dir, name="lightning_logs")
+    is_debug_tag: bool = tag_value is not None and tag_value.lower() == "debug"
+    lightning_loggers: list[Logger] = [csv_logger]
+    if not is_debug_tag:
+        wandb_logger: WandbLogger = WandbLogger(
+            project=wandb_cfg.project,
+            entity=wandb_cfg.entity,
+            name=wandb_run_name,
+            group=wandb_cfg.group,
+            tags=list(wandb_cfg.tags) if wandb_cfg.tags is not None else None,
+            mode=wandb_cfg.mode,
+            log_model=wandb_cfg.log_model,
+            save_dir=wandb_cfg.save_dir,
+        )
+        wandb_logger.log_hyperparams(OmegaConf.to_container(cfg, resolve=True))
+        lightning_loggers.append(wandb_logger)
+
+    max_grad_norm_value: float | None = getattr(training_cfg, "max_grad_norm", None)
+    # Lightning disables clipping when the value is <= 0.
+    gradient_clip_val: float = (
+        max(float(max_grad_norm_value), 0.0) if max_grad_norm_value is not None else 0.0
+    )
 
     trainer: L.Trainer = L.Trainer(
         deterministic=False,
@@ -135,8 +150,9 @@ def main(cfg: DictConfig) -> None:
         limit_val_batches=cfg.training.limit_val_batches,
         log_every_n_steps=cfg.training.log_every_n_steps,
         default_root_dir=cfg.log_dir,
-        logger=[wandb_logger, csv_logger],
+        logger=lightning_loggers,
         callbacks=[checkpoint_callback, LearningRateMonitor(logging_interval="step")],
+        gradient_clip_val=gradient_clip_val,
         **trainer_kwargs,
     )
 

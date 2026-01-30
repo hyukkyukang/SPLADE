@@ -1,22 +1,29 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any, Dict, List
 
 import lightning as L
+import numpy as np
 import torch
 from omegaconf import DictConfig
 from transformers import PreTrainedTokenizerBase
 
 from src.data.dataclass import Query
+from src.indexing.sparse_index import (
+    InvertedIndex,
+    load_inverted_index,
+    score_query_postings,
+    sparsify_query_vector,
+)
 from src.metric.retrieval import RetrievalMetrics, resolve_k_list
-from src.model.retriever.sparse.neural.splade import SPLADE
-from src.model.retriever.sparse.neural.splade_model import SpladeModel
+from src.model.retriever.sparse.neural.splade import SPLADE, SpladeModel
 from src.utils.logging import log_if_rank_zero
 from src.utils.model_utils import build_splade_model, load_splade_checkpoint
 from src.utils.transformers import build_tokenizer
 
-logger = logging.getLogger("SPLADEEvaluationModule")
+logger: logging.Logger = logging.getLogger("SPLADEEvaluationModule")
 
 
 class SPLADEEvaluationModule(L.LightningModule):
@@ -44,7 +51,12 @@ class SPLADEEvaluationModule(L.LightningModule):
         )
 
         self._doc_ids: List[str] | None = None
-        self._doc_reps_t: torch.Tensor | None = None
+        self._index: InvertedIndex | None = None
+        self._score_buffer: np.ndarray | None = None
+        self._seen_buffer: np.ndarray | None = None
+        self._query_exclude_token_ids: list[int] = []
+        self._query_min_weight: float = 0.0
+        self._query_top_k: int | None = None
         self._local_query_offset: int = 0
 
     def _load_model(self) -> SpladeModel:
@@ -64,6 +76,33 @@ class SPLADEEvaluationModule(L.LightningModule):
 
         return model
 
+    def _load_index(self) -> InvertedIndex:
+        index_path_value: str | None = getattr(self.cfg.model, "index_path", None)
+        if not index_path_value:
+            raise ValueError("model.index_path must be set for index-based evaluation.")
+        index_path: Path = Path(index_path_value)
+        # Load memory-mapped postings for CPU scoring.
+        index: InvertedIndex = load_inverted_index(index_path)
+        return index
+
+    def _resolve_query_sparsify_config(self, metadata: dict[str, Any]) -> None:
+        # Mirror encode-time sparsification settings for queries.
+        exclude_ids: list[int] = [
+            int(token_id) for token_id in metadata.get("exclude_token_ids") or []
+        ]
+        min_weight_value: float = float(metadata.get("min_weight") or 0.0)
+        top_k_value: int | None = (
+            None if metadata.get("top_k") is None else int(metadata["top_k"])
+        )
+        self._query_exclude_token_ids = exclude_ids
+        self._query_min_weight = min_weight_value
+        self._query_top_k = top_k_value
+
+    def _prepare_score_buffers(self, doc_count: int) -> None:
+        # Allocate reusable buffers to avoid per-query allocations.
+        self._score_buffer = np.zeros(int(doc_count), dtype=np.float32)
+        self._seen_buffer = np.zeros(int(doc_count), dtype=np.uint8)
+
     def on_test_start(self) -> None:
         self._local_query_offset = 0
         self.metric_collection.reset()
@@ -79,15 +118,11 @@ class SPLADEEvaluationModule(L.LightningModule):
                 device=self.device,
             )
 
-        datamodule: Any = self.trainer.datamodule
-        if datamodule is None:
-            raise ValueError("Evaluation requires a DataModule with BEIRDataset.")
-
-        corpus_docs: list[Any] = datamodule.test_dataset.corpus
-        self._doc_ids: List[str]
-        doc_reps: torch.Tensor
-        self._doc_ids, doc_reps = self._retriever.encode_corpus(corpus_docs)
-        self._doc_reps_t = doc_reps.T
+        index: InvertedIndex = self._load_index()
+        self._index = index
+        self._doc_ids = list(index.doc_ids)
+        self._resolve_query_sparsify_config(index.metadata)
+        self._prepare_score_buffers(len(index.doc_ids))
 
     def test_step(
         self,
@@ -96,9 +131,15 @@ class SPLADEEvaluationModule(L.LightningModule):
         dataloader_idx: int = 0,
     ) -> None:
         _ = dataloader_idx
-        if self._retriever is None or self._doc_reps_t is None or self._doc_ids is None:
+        if (
+            self._retriever is None
+            or self._index is None
+            or self._doc_ids is None
+            or self._score_buffer is None
+            or self._seen_buffer is None
+        ):
             raise ValueError(
-                "Retriever and corpus must be initialized in on_test_start."
+                "Retriever and index must be initialized in on_test_start."
             )
 
         query_texts: List[str] = batch["query_text"]
@@ -112,7 +153,8 @@ class SPLADEEvaluationModule(L.LightningModule):
         query_ids: List[str]
         query_reps: torch.Tensor
         query_ids, query_reps = self._retriever.encode_queries(queries)
-        scores_batch: torch.Tensor = torch.matmul(query_reps, self._doc_reps_t)
+        # Score queries on CPU using the inverted index.
+        query_reps_cpu: np.ndarray = query_reps.detach().cpu().float().numpy()
 
         world_size: int = int(self.trainer.world_size)
         global_rank: int = int(self.trainer.global_rank)
@@ -120,16 +162,34 @@ class SPLADEEvaluationModule(L.LightningModule):
         # Track per-rank progress to keep unique global indexes across batches.
         self._local_query_offset += len(query_ids)
 
-        for i, (scores, relevance_judgments) in enumerate(
-            zip(scores_batch, relevance_judgments_list)
-        ):
-            topk_indices: torch.Tensor = torch.topk(
-                scores, k=min(self._k_max, scores.size(0))
-            ).indices
+        for i, relevance_judgments in enumerate(relevance_judgments_list):
+            query_vector: np.ndarray = query_reps_cpu[i]
+            q_indices: np.ndarray
+            q_values: np.ndarray
+            q_indices, q_values = sparsify_query_vector(
+                query_vector,
+                exclude_token_ids=self._query_exclude_token_ids,
+                min_weight=self._query_min_weight,
+                top_k=self._query_top_k,
+            )
+            top_docs: np.ndarray
+            top_scores: np.ndarray
+            top_docs, top_scores = score_query_postings(
+                self._index.term_ptr,
+                self._index.post_doc_ids,
+                self._index.post_weights,
+                q_indices,
+                q_values,
+                scores=self._score_buffer,
+                seen=self._seen_buffer,
+                top_k=self._k_max,
+            )
             selected_doc_ids: List[str] = [
-                self._doc_ids[idx] for idx in topk_indices.tolist()
+                self._doc_ids[int(doc_idx)] for doc_idx in top_docs.tolist()
             ]
-            selected_scores: List[float] = scores[topk_indices].tolist()
+            selected_scores: List[float] = [
+                float(score) for score in top_scores.tolist()
+            ]
 
             labels: List[float] = []
             final_scores: List[float] = []
@@ -149,16 +209,16 @@ class SPLADEEvaluationModule(L.LightningModule):
 
             global_query_idx: int = global_rank + world_size * (base_offset + i)
             score_tensor: torch.Tensor = torch.tensor(
-                final_scores, dtype=torch.float32, device=scores.device
+                final_scores, dtype=torch.float32, device=torch.device("cpu")
             )
             label_tensor: torch.Tensor = torch.tensor(
-                labels, dtype=torch.float32, device=scores.device
+                labels, dtype=torch.float32, device=torch.device("cpu")
             )
             indexes: torch.Tensor = torch.full(
                 (len(final_scores),),
                 global_query_idx,
                 dtype=torch.long,
-                device=scores.device,
+                device=torch.device("cpu"),
             )
             self.metric_collection.append(score_tensor, label_tensor, indexes)
 

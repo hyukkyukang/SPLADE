@@ -16,3 +16,7 @@ normalize: false
 
 # retrieval index
 index_path: null
+encode_path: null
+sparse_top_k: null
+sparse_min_weight: 0.0
+exclude_token_ids: null

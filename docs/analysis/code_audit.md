@@ -4,7 +4,7 @@
 - `src/data/dataset/msmarco.py`
 - `src/data/dataset/retrieval.py`
 - `src/model/retriever/base.py`
-- `src/model/retriever/sparse/neural/splade_model.py`
+- `src/model/retriever/sparse/neural/splade.py`
 - `src/model/module/train.py`
 - `src/model/losses.py`
 

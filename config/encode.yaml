@@ -1,4 +1,4 @@
-# Evaluation entrypoint config
+# Encoding entrypoint config
 seed: 10
 log_dir_base: "logs"
 tag: null
@@ -10,8 +10,7 @@ defaults:
   - _self_
   - model: splade_v1
   - dataset: beir/msmarco
-  - testing: default
-  # The following overrides are necessary to make the logging colorized.
+  - encoding: default
   - override hydra/job_logging: colorlog_custom
 
 hydra:
@@ -26,4 +25,4 @@ hydra:
         stream: ext://sys.stdout
       file:
         class: logging.FileHandler
-        filename: ${log_dir}/evaluate.log
+        filename: ${log_dir}/encode.log

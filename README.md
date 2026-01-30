@@ -54,12 +54,38 @@ python scripts/evaluation.py \
 
 Datasets are loaded from the Hub by default, so no local file paths are required.
 
-## Build a index
+## Evaluate (NanoBEIR proxy)
+
+Use NanoBEIR for quick retrieval checks without full-corpus encoding:
+
+```
+python scripts/evaluate_nanobeir.py \
+  testing.checkpoint_path=logs/checkpoints/last.ckpt
+```
+
+Override datasets or write a JSON summary:
+
+```
+python scripts/evaluate_nanobeir.py \
+  testing.checkpoint_path=logs/checkpoints/last.ckpt \
+  nanobeir.datasets='[msmarco, nfcorpus, nq]' \
+  nanobeir.save_json=true
+```
+
+## Encode corpus (sparse vectors)
+
+```
+python scripts/encode.py \
+  encoding.checkpoint_path=logs/checkpoints/last.ckpt \
+  dataset=beir/trec-covid \
+  model.encode_path=logs/encode
+```
+
+## Build an inverted index
 
 ```
 python scripts/index.py \
-  testing.checkpoint_path=logs/checkpoints/last.ckpt \
-  dataset=beir/trec-covid \
+  model.encode_path=logs/encode \
   model.index_path=logs/index
 ```
 

@@ -9,7 +9,7 @@ from omegaconf import DictConfig
 
 from src.metric.retrieval import RetrievalMetrics, resolve_k_list
 from src.model.losses import LossComputer
-from src.model.retriever.sparse.neural.splade_model import SpladeModel
+from src.model.retriever.sparse.neural.splade import SpladeModel
 from src.utils.logging import log_if_rank_zero
 from src.utils.model_utils import build_splade_model
 
@@ -29,7 +29,6 @@ class SPLADETrainingModule(L.LightningModule):
     def __init__(self, cfg: DictConfig) -> None:
         super().__init__()
         self.cfg: DictConfig = cfg
-
         # Build the encoder with a dtype appropriate for the device.
         self.model: SpladeModel = build_splade_model(cfg, use_cpu=cfg.training.use_cpu)
         # Transformers from_pretrained defaults to eval; ensure training mode here.
@@ -61,22 +60,23 @@ class SPLADETrainingModule(L.LightningModule):
         self.loss_cfg: DictConfig = cfg.training.loss
         # Loss type controls pairwise vs in-batch negatives.
         self.loss_type: str = str(getattr(self.loss_cfg, "type", "pairwise")).lower()
-        self.pairwise_weight: float = float(
-            getattr(self.loss_cfg, "pairwise_weight", 1.0)
-        )
-        self.in_batch_weight: float = float(
-            getattr(self.loss_cfg, "in_batch_weight", 1.0)
-        )
+        reg_weight_value: float | None = getattr(self.reg_cfg, "weight", None)
+        if reg_weight_value is None:
+            self.reg_query_weight = float(self.reg_cfg.query_weight)
+            self.reg_doc_weight = float(self.reg_cfg.doc_weight)
+        else:
+            # Single lambda applied to both query and document regularization.
+            self.reg_query_weight: float = float(reg_weight_value)
+            self.reg_doc_weight: float = float(reg_weight_value)
+
         self.loss_computer: LossComputer = LossComputer(
             loss_type=self.loss_type,
             temperature=self.temperature,
-            pairwise_weight=self.pairwise_weight,
-            in_batch_weight=self.in_batch_weight,
             distill_enabled=bool(self.distill_cfg.enabled),
             distill_weight=float(self.distill_cfg.weight),
             distill_loss_type=str(self.distill_cfg.loss),
-            reg_query_weight=float(self.reg_cfg.query_weight),
-            reg_doc_weight=float(self.reg_cfg.doc_weight),
+            reg_query_weight=self.reg_query_weight,
+            reg_doc_weight=self.reg_doc_weight,
             reg_type=str(self.reg_cfg.type),
             reg_paper_faithful=bool(self.reg_cfg.paper_faithful),
         )
@@ -136,6 +136,9 @@ class SPLADETrainingModule(L.LightningModule):
         lambda_scale: torch.Tensor = torch.tensor(
             lambda_scale_value, device=q_reps.device, dtype=q_reps.dtype
         )
+        # Effective per-step regularization weights with scheduling applied.
+        reg_query_lambda: torch.Tensor = lambda_scale * float(self.reg_query_weight)
+        reg_doc_lambda: torch.Tensor = lambda_scale * float(self.reg_doc_weight)
         loss: torch.Tensor
         pairwise_scores: torch.Tensor
         pairwise_loss: torch.Tensor
@@ -160,10 +163,14 @@ class SPLADETrainingModule(L.LightningModule):
             lambda_scale=lambda_scale,
         )
 
-        metrics: dict[str, torch.Tensor] = {"loss": loss}
-        if self.loss_type in {"pairwise", "both"}:
+        metrics: dict[str, torch.Tensor] = {
+            "loss": loss,
+            "reg_query_lambda": reg_query_lambda,
+            "reg_doc_lambda": reg_doc_lambda,
+        }
+        if self.loss_type == "pairwise":
             metrics["pairwise_loss"] = pairwise_loss
-        if self.loss_type in {"in_batch", "both"}:
+        if self.loss_type == "in_batch":
             metrics["in_batch_loss"] = in_batch_loss
         if self.distill_cfg.enabled:
             metrics["distill_loss"] = distill_loss
@@ -220,6 +227,20 @@ class SPLADETrainingModule(L.LightningModule):
             self.log(
                 "train_in_batch_loss",
                 detached_metrics["in_batch_loss"],
+                on_step=True,
+                on_epoch=True,
+            )
+        if "reg_query_lambda" in detached_metrics:
+            self.log(
+                "train_reg_query_lambda",
+                detached_metrics["reg_query_lambda"],
+                on_step=True,
+                on_epoch=True,
+            )
+        if "reg_doc_lambda" in detached_metrics:
+            self.log(
+                "train_reg_doc_lambda",
+                detached_metrics["reg_doc_lambda"],
                 on_step=True,
                 on_epoch=True,
             )

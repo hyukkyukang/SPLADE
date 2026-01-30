@@ -1,88 +1,88 @@
 import json
 import logging
+import os
 from pathlib import Path
+from typing import Any
 
 import hydra
-import torch
+import numpy as np
 from omegaconf import DictConfig
-from transformers import PreTrainedTokenizerBase
 
 from config.path import ABS_CONFIG_DIR
-from src.data.dataset.retrieval import RetrievalDataset
-from src.model.retriever.sparse.neural.splade import SPLADE
-from src.model.retriever.sparse.neural.splade_model import SpladeModel
-from src.utils.model_utils import build_splade_model, load_splade_checkpoint
-from src.utils.script_setup import configure_script_environment
-from src.utils.transformers import build_tokenizer
+from src.indexing.sparse_index import (
+    ShardInfo,
+    build_inverted_index_from_shards,
+    load_shard_manifest,
+    resolve_numpy_dtype,
+)
 from src.utils.logging import get_logger, log_if_rank_zero
+from src.utils.script_setup import configure_script_environment
 
 logger: logging.Logger = get_logger(__name__, __file__)
 
 configure_script_environment(
     load_env=False,
     set_tokenizers_parallelism=True,
-    set_matmul_precision=True,
-    suppress_lightning_tips=False,
-    suppress_httpx=False,
-    suppress_dataloader_workers=False,
+    set_matmul_precision=False,
+    suppress_lightning_tips=True,
+    suppress_httpx=True,
+    suppress_dataloader_workers=True,
 )
 
 
-def _load_model(cfg: DictConfig) -> SpladeModel:
-    model: SpladeModel = build_splade_model(cfg, use_cpu=cfg.testing.use_cpu)
-    checkpoint_path: str | None = getattr(cfg.testing, "checkpoint_path", None)
-    if checkpoint_path:
-        missing: list[str]
-        unexpected: list[str]
-        missing, unexpected = load_splade_checkpoint(model, checkpoint_path)
-        log_if_rank_zero(
-            logger,
-            f"Loaded checkpoint. Missing: {len(missing)}, unexpected: {len(unexpected)}",
-        )
-    return model
-
-
-@hydra.main(version_base=None, config_path=ABS_CONFIG_DIR, config_name="evaluate")
+@hydra.main(version_base=None, config_path=ABS_CONFIG_DIR, config_name="encode")
 def main(cfg: DictConfig) -> None:
-    device: torch.device = torch.device("cpu" if cfg.testing.use_cpu else "cuda")
-    model: SpladeModel = _load_model(cfg).to(device)
-    # Build tokenizer with padding support for indexing.
-    tokenizer: PreTrainedTokenizerBase = build_tokenizer(cfg.model.huggingface_name)
-
-    hf_name: str | None = cfg.dataset.hf_name or (
-        f"BeIR/{cfg.dataset.beir_dataset}" if cfg.dataset.beir_dataset else None
-    )
-    if hf_name is None:
-        raise ValueError("dataset.hf_name or dataset.beir_dataset must be set.")
-
-    dataset: RetrievalDataset = RetrievalDataset.from_hf(
-        hf_name=hf_name,
-        split=cfg.dataset.hf_split,
-        cache_dir=cfg.dataset.hf_cache_dir,
-        tokenizer=tokenizer,
-        max_query_length=cfg.dataset.max_query_length,
-    )
-
-    retriever: SPLADE = SPLADE(
-        model=model,
-        tokenizer=tokenizer,
-        max_query_length=cfg.dataset.max_query_length,
-        max_doc_length=cfg.dataset.max_doc_length,
-        batch_size=cfg.testing.batch_size,
-        device=device,
-    )
-
-    doc_ids: list[str]
-    doc_reps: torch.Tensor
-    doc_ids, doc_reps = retriever._encode_corpus(dataset.corpus)
-    index_path: Path = Path(cfg.model.index_path or "index")
+    os.makedirs(cfg.log_dir, exist_ok=True)
+    encode_path_value: str | None = getattr(cfg.model, "encode_path", None)
+    index_path_value: str | None = getattr(cfg.model, "index_path", None)
+    encode_path: Path = Path(encode_path_value or "encode")
+    index_path: Path = Path(index_path_value or "index")
     index_path.mkdir(parents=True, exist_ok=True)
 
-    torch.save(doc_reps, index_path / "doc_embeddings.pt")
-    with (index_path / "doc_ids.json").open("w", encoding="utf-8") as f:
-        json.dump(doc_ids, f)
+    shard_infos: list[ShardInfo]
+    metadata: dict[str, Any]
+    shard_infos, metadata = load_shard_manifest(encode_path)
+    vocab_size: int | None = None
+    if metadata.get("vocab_size") is not None:
+        vocab_size = int(metadata["vocab_size"])
+    if vocab_size is None:
+        raise ValueError("Missing vocab_size in encode metadata.")
 
-    log_if_rank_zero(logger, f"Saved index to {index_path}")
+    value_dtype_name: str = str(metadata.get("value_dtype") or cfg.encoding.value_dtype)
+    value_dtype: np.dtype = resolve_numpy_dtype(value_dtype_name)
+
+    term_ptr: np.ndarray
+    post_doc_ids: np.ndarray
+    post_weights: np.ndarray
+    doc_ids: list[str]
+    term_ptr, post_doc_ids, post_weights, doc_ids = build_inverted_index_from_shards(
+        shard_infos, vocab_size=vocab_size, value_dtype=value_dtype
+    )
+
+    np.save(index_path / "term_ptr.npy", term_ptr)
+    np.save(index_path / "post_doc_ids.npy", post_doc_ids)
+    np.save(index_path / "post_weights.npy", post_weights)
+
+    with (index_path / "doc_ids.json").open("w", encoding="utf-8") as doc_file:
+        json.dump(doc_ids, doc_file)
+
+    metadata_out: dict[str, Any] = {
+        "vocab_size": vocab_size,
+        "doc_count": len(doc_ids),
+        "nnz": int(term_ptr[-1]),
+        "value_dtype": value_dtype_name,
+        "encode_path": str(encode_path),
+        "top_k": metadata.get("top_k"),
+        "min_weight": metadata.get("min_weight"),
+        "exclude_token_ids": metadata.get("exclude_token_ids"),
+    }
+    with (index_path / "metadata.json").open("w", encoding="utf-8") as meta_file:
+        json.dump(metadata_out, meta_file, indent=2)
+
+    log_if_rank_zero(
+        logger,
+        f"Saved inverted index to {index_path} (docs={len(doc_ids)}, nnz={int(term_ptr[-1])}).",
+    )
 
 
 if __name__ == "__main__":

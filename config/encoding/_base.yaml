@@ -1,0 +1,15 @@
+# @package encoding
+name: encoding_base
+
+batch_size: 32
+num_workers: 4
+
+precision: 16-mixed
+use_cpu: false
+strategy: ddp
+num_devices: null
+device_id: 0
+
+checkpoint_path: null
+shard_max_docs: 10000
+value_dtype: float32

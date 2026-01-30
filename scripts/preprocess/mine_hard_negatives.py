@@ -16,7 +16,7 @@ from config.path import ABS_CONFIG_DIR
 from src.data.dataset.msmarco import MSMARCO
 from src.data.dataset.retrieval import RetrievalDataset
 from src.data.dataclass import Document, Query
-from src.model.retriever.sparse.neural.splade_model import SpladeDocModel, SpladeModel
+from src.model.retriever.sparse.neural.splade import SpladeModel
 from src.utils import set_seed
 from src.utils.logging import get_logger, log_if_rank_zero
 from src.utils.model_utils import build_splade_model, load_splade_checkpoint
@@ -260,11 +260,7 @@ def main(cfg: DictConfig) -> None:
 
     device: torch.device = _resolve_device(settings.use_cpu)
     tokenizer: PreTrainedTokenizerBase = build_tokenizer(cfg.model.huggingface_name)
-    model: SpladeModel | SpladeDocModel = build_splade_model(
-        cfg, use_cpu=settings.use_cpu
-    )
-    if isinstance(model, SpladeDocModel):
-        raise ValueError("Hard-negative mining requires a dual encoder SPLADE model.")
+    model: SpladeModel = build_splade_model(cfg, use_cpu=settings.use_cpu)
     model = model.to(device)
     model.eval()
 

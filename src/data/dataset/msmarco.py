@@ -165,7 +165,19 @@ class MSMARCO(BaseDataset):
         self._assert_setup()
         dataset: Any = self._prepare_stream(self.dataset)
         for index, row in enumerate(dataset):
-            yield self._row_to_item(row, index)
+            item: RerankingDataItem = self._row_to_item(row, index)
+            # Guard against malformed samples that would collapse training.
+            doc_mask: torch.Tensor = item.doc_mask
+            pos_mask: torch.Tensor = item.pos_mask
+            if doc_mask.numel() == 0 or not bool(doc_mask.any()):
+                raise ValueError(
+                    f"MSMARCO sample {index} (qid={item.qid}) has no documents."
+                )
+            if pos_mask.numel() == 0 or not bool(pos_mask.any()):
+                raise ValueError(
+                    f"MSMARCO sample {index} (qid={item.qid}) has no positives."
+                )
+            yield item
 
     def __getitem__(self, index: int) -> RerankingDataItem:
         self._assert_setup()
@@ -175,7 +187,19 @@ class MSMARCO(BaseDataset):
         else:
             # Map-style datasets allow direct indexing (faster than streaming).
             row = self.dataset[index]
-        return self._row_to_item(row, index)
+        item: RerankingDataItem = self._row_to_item(row, index)
+        # Guard against malformed samples that would collapse training.
+        doc_mask: torch.Tensor = item.doc_mask
+        pos_mask: torch.Tensor = item.pos_mask
+        if doc_mask.numel() == 0 or not bool(doc_mask.any()):
+            raise ValueError(
+                f"MSMARCO sample {index} (qid={item.qid}) has no documents."
+            )
+        if pos_mask.numel() == 0 or not bool(pos_mask.any()):
+            raise ValueError(
+                f"MSMARCO sample {index} (qid={item.qid}) has no positives."
+            )
+        return item
 
     @property
     def collator(self) -> RerankingCollator:
