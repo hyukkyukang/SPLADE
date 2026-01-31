@@ -64,7 +64,7 @@ class SPLADEEvaluationModule(L.LightningModule):
             self.cfg, use_cpu=self.cfg.testing.use_cpu
         )
 
-        checkpoint_path: str | None = getattr(self.cfg.testing, "checkpoint_path", None)
+        checkpoint_path: str | None = self.cfg.testing.checkpoint_path
         if checkpoint_path:
             missing: list[str]
             unexpected: list[str]
@@ -77,7 +77,7 @@ class SPLADEEvaluationModule(L.LightningModule):
         return model
 
     def _load_index(self) -> InvertedIndex:
-        index_path_value: str | None = getattr(self.cfg.model, "index_path", None)
+        index_path_value: str | None = self.cfg.model.index_path
         if not index_path_value:
             raise ValueError("model.index_path must be set for index-based evaluation.")
         index_path: Path = Path(index_path_value)

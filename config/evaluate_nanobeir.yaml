@@ -14,6 +14,7 @@ defaults:
 nanobeir:
   datasets: [msmarco, nfcorpus, nq]
   batch_size: ${testing.batch_size}
+  cache_dir: null
   save_json: false
 
 hydra:

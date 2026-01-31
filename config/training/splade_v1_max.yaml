@@ -1,0 +1,15 @@
+# @package training
+defaults:
+  - _base
+
+name: splade_v1_max
+
+loss:
+  type: in_batch
+
+regularization:
+  query_weight: 0.001
+  doc_weight: 0.0001
+  type: flops
+  paper_faithful: true
+  schedule_steps: 50000

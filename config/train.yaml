@@ -16,6 +16,16 @@ defaults:
   # The following overrides are necessary to make the logging colorized.
   - override hydra/job_logging: colorlog_custom
 
+nanobeir:
+  enabled: false
+  run_every_n_val: 1
+  datasets: [msmarco, nfcorpus, nq]
+  batch_size: ${testing.batch_size}
+  use_cpu: ${training.use_cpu}
+  device_id: ${training.device_id}
+  cache_dir: null
+  save_json: false
+
 hydra:
   output_subdir: null
   run:

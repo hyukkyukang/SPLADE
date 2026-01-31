@@ -2,6 +2,7 @@
 name: default
 
 batch_size: 32
+per_device_batch_size: null
 num_workers: 4
 
 precision: 16-mixed

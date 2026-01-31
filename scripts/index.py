@@ -33,10 +33,14 @@ configure_script_environment(
 @hydra.main(version_base=None, config_path=ABS_CONFIG_DIR, config_name="encode")
 def main(cfg: DictConfig) -> None:
     os.makedirs(cfg.log_dir, exist_ok=True)
-    encode_path_value: str | None = getattr(cfg.model, "encode_path", None)
-    index_path_value: str | None = getattr(cfg.model, "index_path", None)
-    encode_path: Path = Path(encode_path_value or "encode")
-    index_path: Path = Path(index_path_value or "index")
+    encode_path_value: str | None = cfg.model.encode_path
+    if encode_path_value is None:
+        raise ValueError("model.encode_path must be set for indexing.")
+    index_path_value: str | None = cfg.model.index_path
+    if index_path_value is None:
+        raise ValueError("model.index_path must be set for indexing.")
+    encode_path: Path = Path(encode_path_value)
+    index_path: Path = Path(index_path_value)
     index_path.mkdir(parents=True, exist_ok=True)
 
     shard_infos: list[ShardInfo]

@@ -7,11 +7,15 @@ root_dir_path: "."
 
 # Defaults
 defaults:
-  - _self_
   - model: splade_v1
   - dataset: beir/msmarco
   - encoding: default
+  - _self_
   - override hydra/job_logging: colorlog_custom
+
+model:
+  encode_path: encode
+  index_path: index
 
 hydra:
   output_subdir: null

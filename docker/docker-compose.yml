@@ -1,7 +1,7 @@
 services:
-    SPLADE:
+    SPLADE2:
         image: hyukkyukang/splade:latest
-        container_name: SPLADE
+        container_name: SPLADE2
 
         shm_size: 24gb
         ulimits:
@@ -18,7 +18,7 @@ services:
 
         volumes:
             - /etc/timezone:/etc/timezone:ro
-            - /home/hkkang/SPLADE:/home/user/SPLADE
+            - /home/hyukkyukang/SPLADE:/home/user/SPLADE
         working_dir: /home/user/SPLADE
         command: |
             bash -c '

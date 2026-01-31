@@ -74,20 +74,20 @@ class BEIRDataset(BaseDataset):
         self._is_loaded = True
 
     def _resolve_hf_name(self) -> str:
-        hf_name: str | None = getattr(self.cfg, "hf_name", None)
+        hf_name: str | None = self.cfg.hf_name
         if hf_name:
             return hf_name
-        beir_dataset: str | None = getattr(self.cfg, "beir_dataset", None)
+        beir_dataset: str | None = self.cfg.beir_dataset
         if beir_dataset:
             return f"BeIR/{beir_dataset}"
         raise ValueError("dataset.hf_name or dataset.beir_dataset must be set.")
 
     def _load_queries(self) -> None:
-        cache_dir: str | None = getattr(self.cfg, "hf_cache_dir", None)
+        cache_dir: str | None = self.cfg.hf_cache_dir
         query_dataset: Dataset = load_dataset(
             self._hf_name, "queries", split="train", cache_dir=cache_dir
         )
-        max_samples: int | None = getattr(self.cfg, "hf_max_samples", None)
+        max_samples: int | None = self.cfg.hf_max_samples
 
         # Build query IDs and text map.
         self._query_ids = []
@@ -106,8 +106,8 @@ class BEIRDataset(BaseDataset):
         )
 
     def _load_qrels(self) -> None:
-        cache_dir: str | None = getattr(self.cfg, "hf_cache_dir", None)
-        qrels_split: str = str(getattr(self.cfg, "hf_split", "test"))
+        cache_dir: str | None = self.cfg.hf_cache_dir
+        qrels_split: str = str(self.cfg.hf_split)
         qrels_dataset: Dataset = load_dataset(
             self._hf_name, "qrels", split=qrels_split, cache_dir=cache_dir
         )
@@ -127,7 +127,7 @@ class BEIRDataset(BaseDataset):
         log_if_rank_zero(logger, f"Loaded qrels for {len(self._qrels_dict)} queries")
 
     def _load_corpus(self) -> list[Document]:
-        cache_dir: str | None = getattr(self.cfg, "hf_cache_dir", None)
+        cache_dir: str | None = self.cfg.hf_cache_dir
         corpus_dataset: Dataset = load_dataset(
             self._hf_name, "corpus", split="train", cache_dir=cache_dir
         )

@@ -70,7 +70,7 @@ class TrainDataModule(L.LightningDataModule):
         require_teacher_scores: bool | None,
         load_teacher_scores: bool | None = None,
     ):
-        if not getattr(cfg, "use_hf", False):
+        if not cfg.use_hf:
             raise ValueError(
                 "Local dataset files are no longer supported. "
                 "Please use HuggingFace datasets with dataset.use_hf=true."

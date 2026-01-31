@@ -1,0 +1,4 @@
+# @package training
+optimizer: adam
+# Adam uses coupled L2 regularization; default to 0 to avoid accidental collapse.
+weight_decay: 0.0

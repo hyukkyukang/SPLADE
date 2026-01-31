@@ -29,11 +29,11 @@ class CorpusDataset(BaseDataset):
         )
 
         self._hf_name: str = self._resolve_hf_name()
-        self._hf_subset: str | None = getattr(self.cfg, "hf_subset", None)
-        self._hf_split: str = str(getattr(self.cfg, "hf_split", "train"))
-        self._hf_cache_dir: str | None = getattr(self.cfg, "hf_cache_dir", None)
-        self._hf_max_samples: int | None = getattr(self.cfg, "hf_max_samples", None)
-        self._hf_skip_samples: int = int(getattr(self.cfg, "hf_skip_samples", 0))
+        self._hf_subset: str | None = self.cfg.hf_subset
+        self._hf_split: str = str(self.cfg.hf_split)
+        self._hf_cache_dir: str | None = self.cfg.hf_cache_dir
+        self._hf_max_samples: int | None = self.cfg.hf_max_samples
+        self._hf_skip_samples: int = int(self.cfg.hf_skip_samples)
 
         self._corpus_split: str = self._resolve_corpus_split()
         self._dataset: Dataset | None = None
@@ -78,19 +78,19 @@ class CorpusDataset(BaseDataset):
 
     # --- Protected methods ---
     def _resolve_hf_name(self) -> str:
-        hf_name: str | None = getattr(self.cfg, "hf_name", None)
+        hf_name: str | None = self.cfg.hf_name
         if hf_name:
             return str(hf_name)
-        beir_dataset: str | None = getattr(self.cfg, "beir_dataset", None)
+        beir_dataset: str | None = self.cfg.beir_dataset
         if beir_dataset:
             return f"BeIR/{beir_dataset}"
         raise ValueError("dataset.hf_name or dataset.beir_dataset must be set.")
 
     def _resolve_corpus_split(self) -> str:
-        configured_split: str | None = getattr(self.cfg, "corpus_split", None)
+        configured_split: str | None = self.cfg.corpus_split
         if configured_split is not None:
             return str(configured_split)
-        if getattr(self.cfg, "beir_dataset", None):
+        if self.cfg.beir_dataset:
             return "train"
         return self._hf_split
 

@@ -38,10 +38,11 @@ class EvalDataModule(L.LightningDataModule):
         )
         shuffle: bool = False
 
+        per_device_batch_size: int | None = self.cfg.testing.per_device_batch_size
         batch_size: int = int(
-            getattr(
-                self.cfg.testing, "per_device_batch_size", self.cfg.testing.batch_size
-            )
+            per_device_batch_size
+            if per_device_batch_size is not None
+            else self.cfg.testing.batch_size
         )
 
         dataloader: DataLoader = DataLoader(

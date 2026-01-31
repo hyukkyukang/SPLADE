@@ -36,9 +36,7 @@ class SPLADEEncodeModule(L.LightningModule):
         model: SpladeModel = build_splade_model(
             self.cfg, use_cpu=bool(self.cfg.encoding.use_cpu)
         )
-        checkpoint_path: str | None = getattr(
-            self.cfg.encoding, "checkpoint_path", None
-        )
+        checkpoint_path: str | None = self.cfg.encoding.checkpoint_path
         if checkpoint_path:
             missing: list[str]
             unexpected: list[str]
@@ -50,24 +48,24 @@ class SPLADEEncodeModule(L.LightningModule):
         return model
 
     def _resolve_exclude_token_ids(self) -> list[int]:
-        configured_ids: Sequence[int] | None = getattr(
-            self.cfg.model, "exclude_token_ids", None
-        )
+        configured_ids: Sequence[int] | None = self.cfg.model.exclude_token_ids
         if configured_ids is not None:
             return [int(token_id) for token_id in configured_ids]
         return [int(token_id) for token_id in self._tokenizer.all_special_ids]
 
     # --- Public methods ---
     def on_predict_start(self) -> None:
-        encode_path_value: str | None = getattr(self.cfg.model, "encode_path", None)
-        encode_path: Path = Path(encode_path_value or "encode")
+        encode_path_value: str | None = self.cfg.model.encode_path
+        if encode_path_value is None:
+            raise ValueError("model.encode_path must be set for encoding.")
+        encode_path: Path = Path(encode_path_value)
         vocab_size: int = int(self.model.encoder.mlm.config.vocab_size)
         self._writer = SparseShardWriter(
             output_dir=encode_path,
             vocab_size=vocab_size,
             rank=int(self.trainer.global_rank),
-            top_k=getattr(self.cfg.model, "sparse_top_k", None),
-            min_weight=float(getattr(self.cfg.model, "sparse_min_weight", 0.0)),
+            top_k=self.cfg.model.sparse_top_k,
+            min_weight=float(self.cfg.model.sparse_min_weight),
             exclude_token_ids=self._resolve_exclude_token_ids(),
             shard_max_docs=int(self.cfg.encoding.shard_max_docs),
             value_dtype=str(self.cfg.encoding.value_dtype),

@@ -87,10 +87,10 @@ def _normalize_optional_str(value: Any) -> str | None:
 def _load_dataset_from_config(cfg: DictConfig) -> Dataset:
     """Load a dataset based on the dataset config block."""
     hf_name: str = str(cfg.hf_name)
-    hf_subset: str | None = _normalize_optional_str(getattr(cfg, "hf_subset", None))
+    hf_subset: str | None = _normalize_optional_str(cfg.hf_subset)
     hf_split: str = str(cfg.hf_split)
-    hf_cache_dir: str | None = getattr(cfg, "hf_cache_dir", None)
-    data_files: Mapping[str, Any] | None = getattr(cfg, "hf_data_files", None)
+    hf_cache_dir: str | None = cfg.hf_cache_dir
+    data_files: Mapping[str, Any] | None = cfg.hf_data_files
     dataset: Dataset = load_dataset(
         hf_name,
         name=hf_subset,
@@ -191,7 +191,7 @@ def main(cfg: DictConfig) -> None:
     score_dataset_cfg: DictConfig = cfg.score_dataset
     score_dataset: Dataset = _load_dataset_from_config(score_dataset_cfg)
     text_name: str = str(score_dataset_cfg.hf_text_name or score_dataset_cfg.hf_name)
-    text_cache_dir: str | None = getattr(score_dataset_cfg, "hf_cache_dir", None)
+    text_cache_dir: str | None = score_dataset_cfg.hf_cache_dir
     query_dataset: Dataset = load_dataset(
         text_name, "queries", split="train", cache_dir=text_cache_dir
     )

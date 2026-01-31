@@ -26,7 +26,7 @@ class RetrievalDataset(BaseDataset):
         )
         self.hf_name: str = str(cfg.hf_name)
         self.hf_split: str = str(cfg.hf_split)
-        self.hf_cache_dir: str | None = getattr(cfg, "hf_cache_dir", None)
+        self.hf_cache_dir: str | None = cfg.hf_cache_dir
         self.max_query_length: int = int(cfg.max_query_length)
 
         self._corpus: list[Document] = []

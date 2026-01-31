@@ -41,7 +41,7 @@ def _maybe_mark_ddp_launcher(
     training_cfg: DictConfig, trainer_kwargs: dict[str, Any]
 ) -> None:
     """Flag the Lightning DDP launcher to silence duplicate logs."""
-    strategy_name: str = str(getattr(training_cfg, "strategy", "auto")).lower()
+    strategy_name: str = str(training_cfg.strategy).lower()
     if strategy_name != "ddp":
         return
     rank_env: str | None = os.environ.get("RANK") or os.environ.get("LOCAL_RANK")
@@ -112,9 +112,9 @@ def main(cfg: DictConfig) -> None:
 
     wandb_cfg: DictConfig = cfg.training.wandb
     # Use the training config name for clearer W&B run identification.
-    training_name: str = str(getattr(training_cfg, "name", "training"))
+    training_name: str = str(training_cfg.name)
     # Append the tag suffix when provided to group runs by tag.
-    tag_value: str | None = normalize_tag(getattr(cfg, "tag", None))
+    tag_value: str | None = normalize_tag(cfg.tag)
     wandb_run_name: str = (
         f"{training_name}-{tag_value}" if tag_value is not None else training_name
     )
@@ -135,7 +135,7 @@ def main(cfg: DictConfig) -> None:
         wandb_logger.log_hyperparams(OmegaConf.to_container(cfg, resolve=True))
         lightning_loggers.append(wandb_logger)
 
-    max_grad_norm_value: float | None = getattr(training_cfg, "max_grad_norm", None)
+    max_grad_norm_value: float | None = training_cfg.max_grad_norm
     # Lightning disables clipping when the value is <= 0.
     gradient_clip_val: float = (
         max(float(max_grad_norm_value), 0.0) if max_grad_norm_value is not None else 0.0

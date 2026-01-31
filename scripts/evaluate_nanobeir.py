@@ -29,11 +29,11 @@ configure_script_environment(
 
 def _resolve_device(cfg: DictConfig) -> torch.device:
     """Resolve the torch device from the testing config."""
-    use_cpu: bool = bool(getattr(cfg.testing, "use_cpu", False))
+    use_cpu: bool = bool(cfg.testing.use_cpu)
     if use_cpu:
         return torch.device("cpu")
 
-    device_id: int | None = getattr(cfg.testing, "device_id", None)
+    device_id: int | None = cfg.testing.device_id
     if torch.cuda.is_available():
         if device_id is None:
             return torch.device("cuda")
@@ -50,7 +50,7 @@ def main(cfg: DictConfig) -> None:
     set_seed(cfg.seed)
     log_if_rank_zero(logger, f"Random seed set to: {cfg.seed}")
 
-    checkpoint_path_value: str | None = getattr(cfg.testing, "checkpoint_path", None)
+    checkpoint_path_value: str | None = cfg.testing.checkpoint_path
     if not checkpoint_path_value:
         raise ValueError("testing.checkpoint_path must be set for NanoBEIR eval.")
     checkpoint_path: str = str(checkpoint_path_value)
@@ -64,7 +64,7 @@ def main(cfg: DictConfig) -> None:
         raise ValueError("nanobeir.datasets must contain at least one dataset name.")
 
     batch_size: int = int(cfg.nanobeir.batch_size)
-    save_json: bool = bool(getattr(cfg.nanobeir, "save_json", False))
+    save_json: bool = bool(cfg.nanobeir.save_json)
 
     # Resolve device before model instantiation to keep tensors aligned.
     device: torch.device = _resolve_device(cfg)

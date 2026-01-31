@@ -1,4 +1,8 @@
 # @package training
+defaults:
+  # Select optimizer via `optimizer@training=adam|adamw` to keep weight_decay in sync.
+  - /optimizer@_global_.training: adamw
+
 name: splade
 
 max_steps: 150000
@@ -9,8 +13,6 @@ prefetch_factor: 2
 grad_accumulation: 1
 
 lr: 2e-5
-optimizer: adamw
-weight_decay: 0.01
 warmup_steps: 6000
 scheduler: linear
 max_grad_norm: 1.0
@@ -50,6 +52,8 @@ regularization:
   doc_weight: 0.0
   type: l1
   paper_faithful: true
+  weight: null
+  schedule_steps: 0
 
 beir_eval:
   enabled: false

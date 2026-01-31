@@ -55,7 +55,7 @@ def get_gpu_trainer_kwargs(cfg_section: DictConfig) -> dict[str, Any]:
     elif strategy_name == "deepspeed":
         kwargs["strategy"] = DeepSpeedStrategy()
     elif strategy_name == "single":
-        device_id: int = int(getattr(cfg_section, "device_id", 0))
+        device_id: int = int(cfg_section.device_id)
         kwargs = {
             "accelerator": "cuda",
             "devices": [device_id],

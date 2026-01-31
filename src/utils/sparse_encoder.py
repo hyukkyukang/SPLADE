@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Any, Iterable
 
 import torch
@@ -11,6 +12,14 @@ from sentence_transformers.sparse_encoder.models import MLMTransformer, SpladePo
 from src.utils.model_utils import resolve_model_dtype
 
 logger: logging.Logger = logging.getLogger("src.utils.sparse_encoder")
+
+
+@dataclass
+class SparseEncoderCache:
+    """Cache of NanoBEIR SparseEncoder components for reuse."""
+
+    mlm_transformer: MLMTransformer
+    sparse_encoder: SparseEncoder
 
 
 def _strip_prefix(value: str, prefixes: Iterable[str]) -> str | None:
@@ -51,28 +60,24 @@ def _extract_mlm_state_dict(
     return mlm_state
 
 
-def _load_mlm_transformer(
-    cfg: DictConfig,
-    checkpoint_path: str,
-) -> MLMTransformer:
-    """Load an MLMTransformer and override weights from Lightning checkpoint."""
+def _build_mlm_transformer(cfg: DictConfig) -> MLMTransformer:
+    """Build a SentenceTransformers MLMTransformer configured for SPLADE."""
     # Resolve dtype and attention implementation to match the training setup.
     dtype: torch.dtype | None = resolve_model_dtype(
         str(cfg.model.dtype), bool(cfg.testing.use_cpu)
     )
     model_args: dict[str, Any] = {}
-    attn_implementation: str | None = getattr(cfg.model, "attn_implementation", None)
+    attn_implementation: str | None = cfg.model.attn_implementation
     if attn_implementation:
         model_args["attn_implementation"] = attn_implementation
     if dtype is not None:
         model_args["torch_dtype"] = dtype
 
-    max_input_length: int = int(getattr(cfg.model, "max_input_length", 256))
+    max_input_length: int = int(cfg.model.max_input_length)
     tokenizer_args: dict[str, Any] = {"model_max_length": max_input_length}
-    nanobeir_cfg: DictConfig | None = getattr(cfg, "nanobeir", None)
-    cache_dir: str | None = getattr(nanobeir_cfg, "cache_dir", None)
+    nanobeir_cfg: DictConfig = cfg.nanobeir
+    cache_dir: str | None = nanobeir_cfg.cache_dir
 
-    # Initialize the SentenceTransformers MLMTransformer and overwrite weights.
     mlm_transformer: MLMTransformer = MLMTransformer(
         model_name_or_path=str(cfg.model.huggingface_name),
         max_seq_length=max_input_length,
@@ -80,17 +85,24 @@ def _load_mlm_transformer(
         tokenizer_args=tokenizer_args,
         cache_dir=cache_dir,
     )
+    return mlm_transformer
 
-    # Load the Lightning checkpoint on CPU to avoid device mismatches.
-    checkpoint: dict[str, Any] = torch.load(checkpoint_path, map_location="cpu")
-    raw_state_dict: dict[str, Any] = checkpoint.get("state_dict", checkpoint)
-    state_dict: dict[str, torch.Tensor] = {}
-    raw_key: str
-    raw_value: Any
-    for raw_key, raw_value in raw_state_dict.items():
-        if isinstance(raw_value, torch.Tensor):
-            state_dict[raw_key] = raw_value
-    mlm_state_dict: dict[str, torch.Tensor] = _extract_mlm_state_dict(state_dict)
+
+def _load_mlm_transformer_from_state_dict(
+    cfg: DictConfig,
+    mlm_state_dict: dict[str, torch.Tensor],
+) -> MLMTransformer:
+    """Load MLMTransformer weights from a provided state dict."""
+    mlm_transformer: MLMTransformer = _build_mlm_transformer(cfg)
+    _load_mlm_state_dict(mlm_transformer, mlm_state_dict)
+    return mlm_transformer
+
+
+def _load_mlm_state_dict(
+    mlm_transformer: MLMTransformer,
+    mlm_state_dict: dict[str, torch.Tensor],
+) -> None:
+    """Load MLM weights into an existing MLMTransformer."""
     incompatible: Any = mlm_transformer.auto_model.load_state_dict(
         mlm_state_dict, strict=False
     )
@@ -102,15 +114,34 @@ def _load_mlm_transformer(
             len(missing_keys),
             len(unexpected_keys),
         )
+
+
+def _load_mlm_transformer(
+    cfg: DictConfig,
+    checkpoint_path: str,
+) -> MLMTransformer:
+    """Load an MLMTransformer and override weights from Lightning checkpoint."""
+    mlm_transformer: MLMTransformer = _build_mlm_transformer(cfg)
+    # Load the Lightning checkpoint on CPU to avoid device mismatches.
+    checkpoint: dict[str, Any] = torch.load(checkpoint_path, map_location="cpu")
+    raw_state_dict: dict[str, Any] = checkpoint.get("state_dict", checkpoint)
+    state_dict: dict[str, torch.Tensor] = {}
+    raw_key: str
+    raw_value: Any
+    for raw_key, raw_value in raw_state_dict.items():
+        if isinstance(raw_value, torch.Tensor):
+            state_dict[raw_key] = raw_value
+    mlm_state_dict: dict[str, torch.Tensor] = _extract_mlm_state_dict(state_dict)
+    _load_mlm_state_dict(mlm_transformer, mlm_state_dict)
     return mlm_transformer
 
 
-def build_sparse_encoder_from_checkpoint(
+def _build_sparse_encoder_from_mlm(
     cfg: DictConfig,
-    checkpoint_path: str,
+    mlm_transformer: MLMTransformer,
     device: torch.device,
 ) -> SparseEncoder:
-    """Build a SentenceTransformers SparseEncoder from a Lightning checkpoint."""
+    """Build a SparseEncoder module stack from an MLMTransformer."""
     query_pooling: str = str(cfg.model.query_pooling)
     doc_pooling: str = str(cfg.model.doc_pooling)
     if query_pooling != doc_pooling:
@@ -134,10 +165,6 @@ def build_sparse_encoder_from_checkpoint(
     else:
         raise ValueError(f"Unsupported sparse_activation: {sparse_activation}")
 
-    # Build the MLM + pooling stack and optional normalization.
-    mlm_transformer: MLMTransformer = _load_mlm_transformer(
-        cfg=cfg, checkpoint_path=checkpoint_path
-    )
     splade_pooling: SpladePooling = SpladePooling(
         pooling_strategy=doc_pooling,
         activation_function=activation_function,
@@ -145,7 +172,7 @@ def build_sparse_encoder_from_checkpoint(
     )
 
     modules: list[Any] = [mlm_transformer, splade_pooling]
-    if bool(getattr(cfg.model, "normalize", False)):
+    if bool(cfg.model.normalize):
         # SentenceTransformers Normalize module mirrors L2 normalization.
         modules.append(Normalize())
 
@@ -155,3 +182,70 @@ def build_sparse_encoder_from_checkpoint(
     sparse_encoder.to(device)
     sparse_encoder.eval()
     return sparse_encoder
+
+
+def build_sparse_encoder_from_checkpoint(
+    cfg: DictConfig,
+    checkpoint_path: str,
+    device: torch.device,
+) -> SparseEncoder:
+    """Build a SentenceTransformers SparseEncoder from a Lightning checkpoint."""
+    # Build the MLM + pooling stack and optional normalization.
+    mlm_transformer: MLMTransformer = _load_mlm_transformer(
+        cfg=cfg, checkpoint_path=checkpoint_path
+    )
+    return _build_sparse_encoder_from_mlm(cfg, mlm_transformer, device)
+
+
+def build_sparse_encoder_from_model(
+    cfg: DictConfig,
+    model: torch.nn.Module,
+    device: torch.device,
+) -> SparseEncoder:
+    """Build a SentenceTransformers SparseEncoder from an in-memory SPLADE model."""
+    raw_state_dict: dict[str, torch.Tensor] = model.state_dict()
+    mlm_state_dict: dict[str, torch.Tensor] = _extract_mlm_state_dict(raw_state_dict)
+    cpu_state_dict: dict[str, torch.Tensor] = {
+        key: value.detach().to("cpu") for key, value in mlm_state_dict.items()
+    }
+    mlm_transformer: MLMTransformer = _build_mlm_transformer(cfg)
+    _load_mlm_state_dict(mlm_transformer, cpu_state_dict)
+    return _build_sparse_encoder_from_mlm(cfg, mlm_transformer, device)
+
+
+def build_sparse_encoder_cache(
+    cfg: DictConfig,
+    model: torch.nn.Module,
+    device: torch.device,
+) -> SparseEncoderCache:
+    """Build a cached SparseEncoder with weights loaded from the model."""
+    raw_state_dict: dict[str, torch.Tensor] = model.state_dict()
+    mlm_state_dict: dict[str, torch.Tensor] = _extract_mlm_state_dict(raw_state_dict)
+    cpu_state_dict: dict[str, torch.Tensor] = {
+        key: value.detach().to("cpu") for key, value in mlm_state_dict.items()
+    }
+    mlm_transformer: MLMTransformer = _build_mlm_transformer(cfg)
+    _load_mlm_state_dict(mlm_transformer, cpu_state_dict)
+    sparse_encoder: SparseEncoder = _build_sparse_encoder_from_mlm(
+        cfg, mlm_transformer, device
+    )
+    return SparseEncoderCache(
+        mlm_transformer=mlm_transformer, sparse_encoder=sparse_encoder
+    )
+
+
+def update_sparse_encoder_cache(
+    cache: SparseEncoderCache,
+    model: torch.nn.Module,
+    device: torch.device,
+) -> SparseEncoder:
+    """Update cached SparseEncoder weights and move to device."""
+    raw_state_dict: dict[str, torch.Tensor] = model.state_dict()
+    mlm_state_dict: dict[str, torch.Tensor] = _extract_mlm_state_dict(raw_state_dict)
+    cpu_state_dict: dict[str, torch.Tensor] = {
+        key: value.detach().to("cpu") for key, value in mlm_state_dict.items()
+    }
+    _load_mlm_state_dict(cache.mlm_transformer, cpu_state_dict)
+    cache.sparse_encoder.to(device)
+    cache.sparse_encoder.eval()
+    return cache.sparse_encoder

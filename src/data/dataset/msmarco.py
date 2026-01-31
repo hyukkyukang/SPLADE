@@ -81,42 +81,26 @@ class MSMARCO(BaseDataset):
         BaseDataset.__init__(self, cfg=cfg, global_cfg=global_cfg, tokenizer=tokenizer)
 
         self.hf_name: str = str(cfg.hf_name)
-        self.hf_subset: str | None = _normalize_optional_str(
-            getattr(cfg, "hf_subset", None)
-        )
+        self.hf_subset: str | None = _normalize_optional_str(cfg.hf_subset)
         self.hf_split: str = str(cfg.hf_split)
-        self.hf_text_name: str | None = _normalize_optional_str(
-            getattr(cfg, "hf_text_name", None)
-        )
-        self.hf_data_files: Mapping[str, Any] | None = getattr(
-            cfg, "hf_data_files", None
-        )
-        self.hf_cache_dir: str | None = getattr(cfg, "hf_cache_dir", None)
-        self.hf_max_samples: int | None = getattr(cfg, "hf_max_samples", None)
-        skip_samples_value: int = int(getattr(cfg, "hf_skip_samples", 0) or 0)
+        self.hf_text_name: str | None = _normalize_optional_str(cfg.hf_text_name)
+        self.hf_data_files: Mapping[str, Any] | None = cfg.hf_data_files
+        self.hf_cache_dir: str | None = cfg.hf_cache_dir
+        self.hf_max_samples: int | None = cfg.hf_max_samples
+        skip_samples_value: int = int(cfg.hf_skip_samples)
         if skip_samples_value < 0:
             raise ValueError("hf_skip_samples must be >= 0.")
         self.hf_skip_samples: int = skip_samples_value
-        self.hf_teacher_name: str | None = _normalize_optional_str(
-            getattr(cfg, "hf_teacher_name", None)
-        )
+        self.hf_teacher_name: str | None = _normalize_optional_str(cfg.hf_teacher_name)
         self.hf_teacher_subset: str | None = _normalize_optional_str(
-            getattr(cfg, "hf_teacher_subset", None)
+            cfg.hf_teacher_subset
         )
-        self.hf_teacher_split: str = str(getattr(cfg, "hf_teacher_split", "train"))
-        self.hf_teacher_data_files: Mapping[str, Any] | None = getattr(
-            cfg, "hf_teacher_data_files", None
-        )
-        self.hf_teacher_cache_dir: str | None = getattr(
-            cfg, "hf_teacher_cache_dir", None
-        )
-        self.hf_teacher_max_samples: int | None = getattr(
-            cfg, "hf_teacher_max_samples", None
-        )
-        self.use_integer_ids: bool = bool(getattr(cfg, "use_integer_ids", False))
-        self.integer_id_cache_dir: str | None = getattr(
-            cfg, "integer_id_cache_dir", None
-        )
+        self.hf_teacher_split: str = str(cfg.hf_teacher_split)
+        self.hf_teacher_data_files: Mapping[str, Any] | None = cfg.hf_teacher_data_files
+        self.hf_teacher_cache_dir: str | None = cfg.hf_teacher_cache_dir
+        self.hf_teacher_max_samples: int | None = cfg.hf_teacher_max_samples
+        self.use_integer_ids: bool = bool(cfg.use_integer_ids)
+        self.integer_id_cache_dir: str | None = cfg.integer_id_cache_dir
         self.query_idx_column: str = "query_idx"
         self.pos_idx_column: str = "positive_idx"
         self.neg_idx_column: str = "negative_idx"
@@ -138,9 +122,7 @@ class MSMARCO(BaseDataset):
             self.require_teacher_scores = bool(require_teacher_scores)
         self.teacher_score_key: str = str(distill_cfg.teacher_score_key)
 
-        self.shuffle_buffer_size: int = int(
-            getattr(cfg, "hf_shuffle_buffer_size", 0) or 0
-        )
+        self.shuffle_buffer_size: int = int(cfg.hf_shuffle_buffer_size)
         self.seed: int = int(global_cfg.seed)
 
         self.dataset: Any | None = None
@@ -204,7 +186,7 @@ class MSMARCO(BaseDataset):
     @property
     def collator(self) -> RerankingCollator:
         if self._collator is None:
-            max_padding: bool = bool(getattr(self.cfg, "max_padding", False))
+            max_padding: bool = bool(self.cfg.max_padding)
             max_query_length: int = int(self.cfg.max_query_length)
             max_doc_length: int = int(self.cfg.max_doc_length)
             max_docs: int = int(self.num_positives + self.num_negatives)
@@ -703,7 +685,7 @@ class MSMARCO(BaseDataset):
         ):
             raise ValueError(f"Missing teacher score in HF sample for query {qid}")
 
-        max_padding: bool = bool(getattr(self.cfg, "max_padding", False))
+        max_padding: bool = bool(self.cfg.max_padding)
         # Use max_length padding to keep fixed shapes when enabled.
         query_padding: str | bool = "max_length" if max_padding else True
         doc_padding: str | bool = "max_length" if max_padding else True

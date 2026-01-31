@@ -1,17 +1,26 @@
 from __future__ import annotations
 
+import json
 import logging
+import os
 from typing import Any, Callable, TypeVar, cast
 
 import lightning as L
 import torch
 from omegaconf import DictConfig
+from sentence_transformers import SparseEncoder
+from sentence_transformers.sparse_encoder.evaluation import SparseNanoBEIREvaluator
 
 from src.metric.retrieval import RetrievalMetrics, resolve_k_list
 from src.model.losses import LossComputer
 from src.model.retriever.sparse.neural.splade import SpladeModel
 from src.utils.logging import log_if_rank_zero
 from src.utils.model_utils import build_splade_model
+from src.utils.sparse_encoder import (
+    SparseEncoderCache,
+    build_sparse_encoder_cache,
+    update_sparse_encoder_cache,
+)
 
 logger: logging.Logger = logging.getLogger("SPLADETrainingModule")
 _TCallable = TypeVar("_TCallable", bound=Callable[..., Any])
@@ -33,9 +42,9 @@ class SPLADETrainingModule(L.LightningModule):
         self.model: SpladeModel = build_splade_model(cfg, use_cpu=cfg.training.use_cpu)
         # Transformers from_pretrained defaults to eval; ensure training mode here.
         self.model.train()
-        compile_enabled: bool = bool(getattr(cfg.training, "torch_compile", False))
+        compile_enabled: bool = bool(cfg.training.torch_compile)
         # Loss compilation is optional to avoid fragile Inductor/Triton paths.
-        compile_loss: bool = bool(getattr(cfg.training, "torch_compile_loss", False))
+        compile_loss: bool = bool(cfg.training.torch_compile_loss)
         compile_available: bool = hasattr(torch, "compile")
         if compile_enabled and not compile_available:
             log_if_rank_zero(
@@ -59,8 +68,8 @@ class SPLADETrainingModule(L.LightningModule):
         self.reg_cfg: DictConfig = cfg.training.regularization
         self.loss_cfg: DictConfig = cfg.training.loss
         # Loss type controls pairwise vs in-batch negatives.
-        self.loss_type: str = str(getattr(self.loss_cfg, "type", "pairwise")).lower()
-        reg_weight_value: float | None = getattr(self.reg_cfg, "weight", None)
+        self.loss_type: str = str(self.loss_cfg.type).lower()
+        reg_weight_value: float | None = self.reg_cfg.weight
         if reg_weight_value is None:
             self.reg_query_weight = float(self.reg_cfg.query_weight)
             self.reg_doc_weight = float(self.reg_cfg.doc_weight)
@@ -83,25 +92,67 @@ class SPLADETrainingModule(L.LightningModule):
         if compile_enabled and compile_available and compile_loss:
             self.loss_computer = torch.compile(self.loss_computer)
 
-        self.val_metrics_cfg: DictConfig | None = getattr(
-            cfg.training, "validation_metrics", None
-        )
-        self.val_metrics_enabled: bool = bool(
-            getattr(self.val_metrics_cfg, "enabled", False)
-            if self.val_metrics_cfg is not None
-            else False
-        )
+        self.val_metrics_cfg: DictConfig = cfg.training.validation_metrics
+        self.val_metrics_enabled: bool = bool(self.val_metrics_cfg.enabled)
         self._val_query_offset: int = 0
         self.val_metric_collection: RetrievalMetrics | None = None
         if self.val_metrics_enabled:
-            k_list: list[int] = resolve_k_list(
-                getattr(self.val_metrics_cfg, "k_list", None)
-            )
+            k_list: list[int] = resolve_k_list(self.val_metrics_cfg.k_list)
             self.val_metric_collection = RetrievalMetrics(
                 dataset_name="",
                 k_list=k_list,
                 sync_on_compute=False,
             )
+
+        nanobeir_cfg: DictConfig | None = getattr(cfg, "nanobeir", None)
+        self.nanobeir_enabled: bool = False
+        self.nanobeir_run_every_n_val: int = 1
+        self.nanobeir_batch_size: int = int(cfg.testing.batch_size)
+        self.nanobeir_save_json: bool = False
+        self.nanobeir_dataset_names: list[str] = []
+        self.nanobeir_use_cpu: bool = bool(cfg.training.use_cpu)
+        base_device_id: int | None = cfg.training.device_id
+        self.nanobeir_device_id: int | None = (
+            None if base_device_id is None else int(base_device_id)
+        )
+        self._nanobeir_val_counter: int = 0
+        self._nanobeir_cache: SparseEncoderCache | None = None
+        self._nanobeir_cache_device: torch.device | None = None
+        self._nanobeir_evaluator: SparseNanoBEIREvaluator | None = None
+        self._nanobeir_evaluator_datasets: list[str] = []
+        self._nanobeir_evaluator_batch_size: int = int(self.nanobeir_batch_size)
+        if nanobeir_cfg is not None:
+            self.nanobeir_enabled = bool(nanobeir_cfg.enabled)
+            run_every_val_value: int = int(nanobeir_cfg.run_every_n_val)
+            self.nanobeir_run_every_n_val = run_every_val_value
+            batch_size_value: int = int(nanobeir_cfg.batch_size)
+            self.nanobeir_batch_size = batch_size_value
+            self.nanobeir_save_json = bool(nanobeir_cfg.save_json)
+            use_cpu_value: bool = bool(
+                getattr(nanobeir_cfg, "use_cpu", self.nanobeir_use_cpu)
+            )
+            self.nanobeir_use_cpu = use_cpu_value
+            device_id_value: int | None = getattr(
+                nanobeir_cfg, "device_id", self.nanobeir_device_id
+            )
+            self.nanobeir_device_id = (
+                None if device_id_value is None else int(device_id_value)
+            )
+            dataset_name: str
+            dataset_names: list[str] = []
+            for dataset_name in nanobeir_cfg.datasets:
+                dataset_names.append(str(dataset_name))
+            self.nanobeir_dataset_names = dataset_names
+
+        self._nanobeir_evaluator_batch_size = int(self.nanobeir_batch_size)
+
+        if self.nanobeir_enabled and not self.nanobeir_dataset_names:
+            log_if_rank_zero(
+                logger,
+                "NanoBEIR evaluation enabled but no datasets provided; disabling.",
+                level="warning",
+            )
+            self.nanobeir_enabled = False
 
     def _training_step_shared(
         self,
@@ -254,7 +305,7 @@ class SPLADETrainingModule(L.LightningModule):
         self.val_metric_collection.to(self.device)
 
     def _lambda_schedule_multiplier(self) -> float:
-        schedule_steps: int | None = getattr(self.reg_cfg, "schedule_steps", 0)
+        schedule_steps: int | None = self.reg_cfg.schedule_steps
         if schedule_steps is None:
             return 1.0
         schedule_steps = int(schedule_steps)
@@ -316,6 +367,106 @@ class SPLADETrainingModule(L.LightningModule):
             )
             self.val_metric_collection.append(scores, targets, indexes)
 
+    def _resolve_nanobeir_device(self) -> torch.device:
+        use_cpu: bool = bool(self.nanobeir_use_cpu)
+        if use_cpu:
+            return torch.device("cpu")
+        device_id: int | None = self.nanobeir_device_id
+        if torch.cuda.is_available():
+            if device_id is None:
+                return torch.device("cuda")
+            return torch.device(f"cuda:{int(device_id)}")
+        return torch.device("cpu")
+
+    def _should_run_nanobeir_eval(self) -> bool:
+        if not self.nanobeir_enabled:
+            return False
+        if self.trainer.sanity_checking:
+            return False
+        if not self.nanobeir_dataset_names:
+            return False
+        run_every_val: int = int(self.nanobeir_run_every_n_val)
+        if run_every_val <= 0:
+            return False
+        self._nanobeir_val_counter += 1
+        return self._nanobeir_val_counter % run_every_val == 0
+
+    def _nanobeir_barrier(self) -> None:
+        world_size: int = int(self.trainer.world_size)
+        if world_size <= 1:
+            return
+        strategy: Any = self.trainer.strategy
+        barrier_fn: Any = getattr(strategy, "barrier", None)
+        if callable(barrier_fn):
+            barrier_fn()
+            return
+        distributed_available: bool = (
+            torch.distributed.is_available() and torch.distributed.is_initialized()
+        )
+        if not distributed_available:
+            return
+        torch.distributed.barrier()
+
+    def _run_nanobeir_eval(self) -> None:
+        device: torch.device = self._resolve_nanobeir_device()
+        cache: SparseEncoderCache | None = self._nanobeir_cache
+        cache_device: torch.device | None = self._nanobeir_cache_device
+        if cache is None or cache_device != device:
+            # Rebuild the encoder when no cache exists or device changes.
+            cache = build_sparse_encoder_cache(
+                cfg=self.cfg, model=self.model, device=device
+            )
+            self._nanobeir_cache = cache
+            self._nanobeir_cache_device = device
+        else:
+            # Update weights in-place to avoid reloading HF modules each validation.
+            update_sparse_encoder_cache(cache=cache, model=self.model, device=device)
+        sparse_encoder: SparseEncoder = cache.sparse_encoder
+
+        evaluator: SparseNanoBEIREvaluator
+        evaluator_datasets: list[str] = self._nanobeir_evaluator_datasets
+        evaluator_batch_size: int = self._nanobeir_evaluator_batch_size
+        if (
+            self._nanobeir_evaluator is None
+            or evaluator_datasets != self.nanobeir_dataset_names
+            or evaluator_batch_size != self.nanobeir_batch_size
+        ):
+            evaluator = SparseNanoBEIREvaluator(
+                dataset_names=self.nanobeir_dataset_names,
+                batch_size=self.nanobeir_batch_size,
+            )
+            self._nanobeir_evaluator = evaluator
+            self._nanobeir_evaluator_datasets = list(self.nanobeir_dataset_names)
+            self._nanobeir_evaluator_batch_size = int(self.nanobeir_batch_size)
+        else:
+            evaluator = self._nanobeir_evaluator
+        with torch.no_grad():
+            results: dict[str, Any] = evaluator(sparse_encoder)
+        metric_name: str
+        metric_value: Any
+        logged_metrics: dict[str, float] = {}
+        for metric_name, metric_value in results.items():
+            log_if_rank_zero(logger, f"NanoBEIR {metric_name}: {metric_value}")
+            try:
+                metric_float: float = float(metric_value)
+            except (TypeError, ValueError):
+                continue
+            logged_metrics[f"val_nanobeir_{metric_name}"] = metric_float
+        if logged_metrics:
+            self.log_dict(
+                logged_metrics,
+                sync_dist=False,
+                prog_bar=False,
+                rank_zero_only=True,
+            )
+        if self.nanobeir_save_json:
+            output_path: str = os.path.join(
+                self.cfg.log_dir, f"nanobeir_metrics_step{int(self.global_step)}.json"
+            )
+            with open(output_path, "w", encoding="utf-8") as json_file:
+                json.dump(results, json_file, indent=2)
+            log_if_rank_zero(logger, f"Saved NanoBEIR metrics to {output_path}")
+
     def forward(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         q: torch.Tensor = self.model.encode_queries(
             batch["query_input_ids"], batch["query_attention_mask"]
@@ -362,37 +513,54 @@ class SPLADETrainingModule(L.LightningModule):
         )
 
     def on_validation_epoch_end(self) -> None:
-        if self.val_metric_collection is None:
-            return
-        has_data: bool = self.val_metric_collection.gather(
-            world_size=self.trainer.world_size,
-            all_gather_fn=self.all_gather if self.trainer.world_size > 1 else None,
-        )
-        if not has_data:
-            log_if_rank_zero(
-                logger, "No predictions accumulated during validation.", level="warning"
+        should_run_nanobeir: bool = self._should_run_nanobeir_eval()
+        if self.val_metric_collection is not None:
+            has_data: bool = self.val_metric_collection.gather(
+                world_size=self.trainer.world_size,
+                all_gather_fn=self.all_gather if self.trainer.world_size > 1 else None,
             )
-            return
+            if not has_data:
+                log_if_rank_zero(
+                    logger,
+                    "No predictions accumulated during validation.",
+                    level="warning",
+                )
+            else:
+                metrics: dict[str, torch.Tensor] = self.val_metric_collection.compute()
+                filtered_metrics: dict[str, torch.Tensor] = {
+                    f"val_{name}": value
+                    for name, value in metrics.items()
+                    if name.startswith(("nDCG_", "MRR_", "Recall_"))
+                }
+                if filtered_metrics:
+                    self.log_dict(
+                        filtered_metrics,
+                        sync_dist=True,
+                        prog_bar=False,
+                        rank_zero_only=True,
+                    )
+                self.val_metric_collection.reset()
 
-        metrics: dict[str, torch.Tensor] = self.val_metric_collection.compute()
-        filtered_metrics: dict[str, torch.Tensor] = {
-            f"val_{name}": value
-            for name, value in metrics.items()
-            if name.startswith(("nDCG_", "MRR_", "Recall_"))
-        }
-        if filtered_metrics:
-            self.log_dict(
-                filtered_metrics,
-                sync_dist=True,
-                prog_bar=False,
-                rank_zero_only=True,
-            )
-        self.val_metric_collection.reset()
+        if should_run_nanobeir:
+            if self.trainer.is_global_zero:
+                nanobeir_error: Exception | None = None
+                try:
+                    self._run_nanobeir_eval()
+                except Exception as exc:
+                    nanobeir_error = exc
+                    self._nanobeir_cache = None
+                    self._nanobeir_cache_device = None
+                    self._nanobeir_evaluator = None
+                    self._nanobeir_evaluator_datasets = []
+                    log_if_rank_zero(
+                        logger,
+                        f"NanoBEIR evaluation failed: {nanobeir_error}",
+                        level="warning",
+                    )
+            self._nanobeir_barrier()
 
     def configure_optimizers(self) -> torch.optim.Optimizer | dict[str, Any]:
-        optimizer_name: str = str(
-            getattr(self.cfg.training, "optimizer", "adamw")
-        ).lower()
+        optimizer_name: str = str(self.cfg.training.optimizer).lower()
         optimizer_cls: type[torch.optim.Optimizer]
         if optimizer_name == "adamw":
             optimizer_cls = torch.optim.AdamW

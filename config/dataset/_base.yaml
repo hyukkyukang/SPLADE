@@ -3,6 +3,7 @@ name: base
 type: custom
 
 split: train
+corpus_split: null
 
 max_query_length: 256
 max_doc_length: 256
