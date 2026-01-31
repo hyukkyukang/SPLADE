@@ -17,14 +17,14 @@ defaults:
   - override hydra/job_logging: colorlog_custom
 
 nanobeir:
-  enabled: false
+  enabled: true
   run_every_n_val: 1
   datasets: [msmarco, nfcorpus, nq]
   batch_size: ${testing.batch_size}
   use_cpu: ${training.use_cpu}
   device_id: ${training.device_id}
   cache_dir: null
-  save_json: false
+  save_json: true
 
 hydra:
   output_subdir: null
