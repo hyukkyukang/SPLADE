@@ -154,6 +154,22 @@ class SPLADETrainingModule(L.LightningModule):
             )
             self.nanobeir_enabled = False
 
+    def _compute_rep_magnitude(
+        self, reps: torch.Tensor, row_mask: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        # Track L2 norm to capture sparse output scale.
+        reps_fp32: torch.Tensor = reps.float()
+        per_row_norm: torch.Tensor = torch.linalg.vector_norm(
+            reps_fp32, ord=2, dim=-1
+        )
+        if row_mask is None:
+            return per_row_norm.mean()
+        mask: torch.Tensor = row_mask.to(dtype=torch.bool)
+        mask_float: torch.Tensor = mask.to(dtype=per_row_norm.dtype)
+        denom: torch.Tensor = mask_float.sum().clamp(min=1.0)
+        masked_sum: torch.Tensor = (per_row_norm * mask_float).sum()
+        return masked_sum / denom
+
     def _training_step_shared(
         self,
         batch: dict[str, torch.Tensor],
@@ -183,6 +199,13 @@ class SPLADETrainingModule(L.LightningModule):
         pos_mask: torch.Tensor = batch["pos_mask"]
         doc_mask: torch.Tensor = batch["doc_mask"]
         teacher_scores: torch.Tensor = batch["teacher_scores"]
+        # Compute magnitudes for logging purposes only.
+        q_rep_magnitude: torch.Tensor = self._compute_rep_magnitude(q_reps)
+        flat_doc_reps_for_mag: torch.Tensor = doc_reps.view(-1, doc_reps.shape[-1])
+        flat_doc_mask_for_mag: torch.Tensor = doc_mask.view(-1)
+        doc_rep_magnitude: torch.Tensor = self._compute_rep_magnitude(
+            flat_doc_reps_for_mag, flat_doc_mask_for_mag
+        )
         lambda_scale_value: float = self._lambda_schedule_multiplier()
         lambda_scale: torch.Tensor = torch.tensor(
             lambda_scale_value, device=q_reps.device, dtype=q_reps.dtype
@@ -218,6 +241,8 @@ class SPLADETrainingModule(L.LightningModule):
             "loss": loss,
             "reg_query_lambda": reg_query_lambda,
             "reg_doc_lambda": reg_doc_lambda,
+            "q_rep_magnitude": q_rep_magnitude,
+            "doc_rep_magnitude": doc_rep_magnitude,
         }
         if self.loss_type == "pairwise":
             metrics["pairwise_loss"] = pairwise_loss
@@ -292,6 +317,20 @@ class SPLADETrainingModule(L.LightningModule):
             self.log(
                 "train_reg_doc_lambda",
                 detached_metrics["reg_doc_lambda"],
+                on_step=True,
+                on_epoch=True,
+            )
+        if "q_rep_magnitude" in detached_metrics:
+            self.log(
+                "train_q_rep_magnitude",
+                detached_metrics["q_rep_magnitude"],
+                on_step=True,
+                on_epoch=True,
+            )
+        if "doc_rep_magnitude" in detached_metrics:
+            self.log(
+                "train_doc_rep_magnitude",
+                detached_metrics["doc_rep_magnitude"],
                 on_step=True,
                 on_epoch=True,
             )
@@ -511,6 +550,26 @@ class SPLADETrainingModule(L.LightningModule):
             sync_dist=True,
             batch_size=batch_size,
         )
+        if "q_rep_magnitude" in metrics:
+            self.log(
+                "val_q_rep_magnitude",
+                metrics["q_rep_magnitude"].detach(),
+                on_step=False,
+                on_epoch=True,
+                prog_bar=False,
+                sync_dist=True,
+                batch_size=batch_size,
+            )
+        if "doc_rep_magnitude" in metrics:
+            self.log(
+                "val_doc_rep_magnitude",
+                metrics["doc_rep_magnitude"].detach(),
+                on_step=False,
+                on_epoch=True,
+                prog_bar=False,
+                sync_dist=True,
+                batch_size=batch_size,
+            )
 
     def on_validation_epoch_end(self) -> None:
         should_run_nanobeir: bool = self._should_run_nanobeir_eval()
