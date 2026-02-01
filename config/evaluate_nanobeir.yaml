@@ -16,6 +16,7 @@ nanobeir:
   batch_size: ${testing.batch_size}
   cache_dir: null
   save_json: false
+  use_huggingface_model: false
 
 hydra:
   output_subdir: null

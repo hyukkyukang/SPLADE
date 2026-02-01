@@ -1,0 +1,9 @@
+# @package model
+defaults:
+  - _base
+
+name: splade_v2_hf
+huggingface_name: naver/splade_v2_max
+query_pooling: max
+doc_pooling: max
+sparse_activation: log1p_relu

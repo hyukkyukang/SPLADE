@@ -1,0 +1,8 @@
+# NanoBEIR eval config for official SPLADE v2 (Hugging Face).
+defaults:
+  - evaluate_nanobeir
+  - override model: splade_v2_hf
+  - _self_
+
+nanobeir:
+  use_huggingface_model: true

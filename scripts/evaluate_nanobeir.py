@@ -13,7 +13,10 @@ from config.path import ABS_CONFIG_DIR
 from src.utils import log_if_rank_zero, set_seed
 from src.utils.logging import get_logger, setup_tqdm_friendly_logging
 from src.utils.script_setup import configure_script_environment
-from src.utils.sparse_encoder import build_sparse_encoder_from_checkpoint
+from src.utils.sparse_encoder import (
+    build_sparse_encoder_from_checkpoint,
+    build_sparse_encoder_from_huggingface,
+)
 
 logger: logging.Logger = get_logger("scripts.evaluate_nanobeir", __file__)
 
@@ -50,11 +53,6 @@ def main(cfg: DictConfig) -> None:
     set_seed(cfg.seed)
     log_if_rank_zero(logger, f"Random seed set to: {cfg.seed}")
 
-    checkpoint_path_value: str | None = cfg.testing.checkpoint_path
-    if not checkpoint_path_value:
-        raise ValueError("testing.checkpoint_path must be set for NanoBEIR eval.")
-    checkpoint_path: str = str(checkpoint_path_value)
-
     # Normalize dataset names to strings for the evaluator.
     dataset_names: list[str] = []
     dataset_name: str
@@ -65,15 +63,43 @@ def main(cfg: DictConfig) -> None:
 
     batch_size: int = int(cfg.nanobeir.batch_size)
     save_json: bool = bool(cfg.nanobeir.save_json)
+    use_huggingface_model: bool = bool(cfg.nanobeir.use_huggingface_model)
 
     # Resolve device before model instantiation to keep tensors aligned.
     device: torch.device = _resolve_device(cfg)
     log_if_rank_zero(logger, f"Using device: {device}")
 
-    # Convert the Lightning checkpoint into a SparseEncoder for NanoBEIR.
-    sparse_encoder: SparseEncoder = build_sparse_encoder_from_checkpoint(
-        cfg=cfg, checkpoint_path=checkpoint_path, device=device
-    )
+    checkpoint_path_value: str | None = cfg.testing.checkpoint_path
+    sparse_encoder: SparseEncoder
+    if use_huggingface_model:
+        # Build from Hugging Face weights when no checkpoint override is desired.
+        hf_model_name: str = str(cfg.model.huggingface_name)
+        if not hf_model_name:
+            raise ValueError(
+                "model.huggingface_name must be set when using Hugging Face "
+                "weights for NanoBEIR evaluation."
+            )
+        if checkpoint_path_value:
+            log_if_rank_zero(
+                logger,
+                "Ignoring testing.checkpoint_path because "
+                "nanobeir.use_huggingface_model=true.",
+            )
+        log_if_rank_zero(
+            logger, f"Loading Hugging Face model weights: {hf_model_name}"
+        )
+        sparse_encoder = build_sparse_encoder_from_huggingface(cfg=cfg, device=device)
+    else:
+        if not checkpoint_path_value:
+            raise ValueError(
+                "testing.checkpoint_path must be set for NanoBEIR eval when "
+                "nanobeir.use_huggingface_model=false."
+            )
+        checkpoint_path: str = str(checkpoint_path_value)
+        # Convert the Lightning checkpoint into a SparseEncoder for NanoBEIR.
+        sparse_encoder = build_sparse_encoder_from_checkpoint(
+            cfg=cfg, checkpoint_path=checkpoint_path, device=device
+        )
 
     # Run NanoBEIR proxy evaluation and collect metrics.
     evaluator: SparseNanoBEIREvaluator = SparseNanoBEIREvaluator(

@@ -197,6 +197,16 @@ def build_sparse_encoder_from_checkpoint(
     return _build_sparse_encoder_from_mlm(cfg, mlm_transformer, device)
 
 
+def build_sparse_encoder_from_huggingface(
+    cfg: DictConfig,
+    device: torch.device,
+) -> SparseEncoder:
+    """Build a SentenceTransformers SparseEncoder from a Hugging Face model."""
+    # Use the Hugging Face weights directly without checkpoint overrides.
+    mlm_transformer: MLMTransformer = _build_mlm_transformer(cfg)
+    return _build_sparse_encoder_from_mlm(cfg, mlm_transformer, device)
+
+
 def build_sparse_encoder_from_model(
     cfg: DictConfig,
     model: torch.nn.Module,
