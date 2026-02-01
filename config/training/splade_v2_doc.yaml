@@ -1,0 +1,15 @@
+# @package training
+defaults:
+  - splade_v2
+
+name: splade_v2_doc
+
+# SPLADE-doc uses document-only training; keep query regularization disabled.
+max_steps: 50000
+
+regularization:
+  query_weight: 0.0
+  doc_weight: 0.0001
+  type: flops
+  paper_faithful: true
+  schedule_steps: 50000

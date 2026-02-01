@@ -26,6 +26,10 @@ def resolve_model_dtype(dtype_name: str, use_cpu: bool) -> torch.dtype | None:
 def build_splade_model(cfg: DictConfig, *, use_cpu: bool) -> SpladeModel:
     """Build a SPLADE model from config with dtype handling."""
     dtype: torch.dtype | None = resolve_model_dtype(cfg.model.dtype, use_cpu)
+    # Detect SPLADE-doc mode via explicit flag or config name suffix.
+    name_value: str = str(cfg.model.name).lower()
+    doc_only_flag: bool = bool(getattr(cfg.model, "doc_only", False))
+    doc_only: bool = doc_only_flag or name_value.endswith(("_doc", "-doc"))
     return SpladeModel(
         model_name=cfg.model.huggingface_name,
         query_pooling=cfg.model.query_pooling,
@@ -34,6 +38,7 @@ def build_splade_model(cfg: DictConfig, *, use_cpu: bool) -> SpladeModel:
         attn_implementation=cfg.model.attn_implementation,
         dtype=dtype,
         normalize=cfg.model.normalize,
+        doc_only=doc_only,
     )
 
 

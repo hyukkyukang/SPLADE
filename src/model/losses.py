@@ -39,7 +39,9 @@ _MainLossFn = Callable[
     ],
     tuple[torch.Tensor, torch.Tensor, torch.Tensor],
 ]
-_DistillLossFn = Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]
+_DistillLossFn = Callable[
+    [torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor
+]
 _RegLossFn = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
 
 
@@ -63,7 +65,8 @@ class LossComputer(nn.Module):
         self.temperature: float = float(temperature)
         self.distill_enabled: bool = bool(distill_enabled)
         self.distill_weight: float = float(distill_weight)
-        self.distill_loss_type: str = str(distill_loss_type).lower()
+        # Normalize loss names to support both hyphen and underscore variants.
+        self.distill_loss_type: str = str(distill_loss_type).replace("-", "_").lower()
         self.reg_query_weight: float = float(reg_query_weight)
         self.reg_doc_weight: float = float(reg_doc_weight)
         self.reg_type: str = str(reg_type).lower()
@@ -193,21 +196,83 @@ class LossComputer(nn.Module):
         pairwise_loss: torch.Tensor = torch.zeros_like(in_batch_loss)
         return in_batch_loss, pairwise_loss, in_batch_loss
 
+    def _main_loss_in_batch_pairwise_nll(
+        self,
+        pairwise_scores: torch.Tensor,
+        q_reps: torch.Tensor,
+        doc_reps: torch.Tensor,
+        pos_mask: torch.Tensor,
+        doc_mask: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        _ = pairwise_scores
+        bsz: int
+        doc_count: int
+        rep_dim: int
+        bsz, doc_count, rep_dim = doc_reps.shape
+        if bsz == 0 or doc_count == 0:
+            empty_loss: torch.Tensor = q_reps.new_zeros(())
+            return empty_loss, empty_loss, empty_loss
+
+        pos_mask_bool: torch.Tensor = pos_mask & doc_mask
+        neg_mask_bool: torch.Tensor = (~pos_mask) & doc_mask
+        has_pos: torch.Tensor = pos_mask_bool.any(dim=1)
+        has_neg: torch.Tensor = neg_mask_bool.any(dim=1)
+        valid_rows: torch.Tensor = has_pos & has_neg
+        if not bool(valid_rows.any()):
+            empty_loss = q_reps.new_zeros(())
+            return empty_loss, empty_loss, empty_loss
+
+        pos_indices: torch.Tensor = pos_mask_bool.float().argmax(dim=1)
+        neg_indices: torch.Tensor = neg_mask_bool.float().argmax(dim=1)
+        row_indices: torch.Tensor = torch.arange(bsz, device=doc_reps.device)
+        # Match reference SPLADE++ behavior: one positive doc per query and one explicit negative.
+        pos_doc_reps: torch.Tensor = doc_reps[row_indices, pos_indices, :]
+        neg_doc_reps: torch.Tensor = doc_reps[row_indices, neg_indices, :]
+
+        device_type: str = str(q_reps.device.type)
+        q_reps_fp32: torch.Tensor = q_reps.float()
+        pos_doc_reps_fp32: torch.Tensor = pos_doc_reps.float()
+        neg_doc_reps_fp32: torch.Tensor = neg_doc_reps.float()
+        with torch.autocast(device_type=device_type, enabled=False):
+            in_batch_scores: torch.Tensor = torch.matmul(
+                q_reps_fp32, pos_doc_reps_fp32.transpose(0, 1)
+            )
+            neg_scores: torch.Tensor = torch.sum(
+                q_reps_fp32 * neg_doc_reps_fp32, dim=1, keepdim=True
+            )
+
+        scores: torch.Tensor = torch.cat([in_batch_scores, neg_scores], dim=1)
+        log_probs: torch.Tensor = F.log_softmax(scores, dim=1)
+        pos_log_probs: torch.Tensor = log_probs[row_indices, row_indices]
+        per_row_loss: torch.Tensor = -pos_log_probs
+        if bool(valid_rows.all()):
+            loss_value: torch.Tensor = per_row_loss.mean()
+        else:
+            valid_mask: torch.Tensor = valid_rows.to(dtype=per_row_loss.dtype)
+            denom: torch.Tensor = valid_mask.sum().clamp(min=1.0)
+            loss_value = (per_row_loss * valid_mask).sum() / denom
+
+        pairwise_loss: torch.Tensor = torch.zeros_like(loss_value)
+        return loss_value, pairwise_loss, loss_value
+
     def _distill_loss_noop(
         self,
         scores: torch.Tensor,
         teacher_scores: torch.Tensor,
+        pos_mask: torch.Tensor,
         doc_mask: torch.Tensor,
     ) -> torch.Tensor:
-        _ = teacher_scores, doc_mask
+        _ = teacher_scores, pos_mask, doc_mask
         return scores.new_zeros(())
 
     def _distill_loss_mse(
         self,
         scores: torch.Tensor,
         teacher_scores: torch.Tensor,
+        pos_mask: torch.Tensor,
         doc_mask: torch.Tensor,
     ) -> torch.Tensor:
+        _ = pos_mask
         mask: torch.Tensor = doc_mask & torch.isfinite(teacher_scores)
         mask_float: torch.Tensor = mask.to(dtype=scores.dtype)
         denom: torch.Tensor = mask_float.sum().clamp(min=1.0)
@@ -221,8 +286,10 @@ class LossComputer(nn.Module):
         self,
         scores: torch.Tensor,
         teacher_scores: torch.Tensor,
+        pos_mask: torch.Tensor,
         doc_mask: torch.Tensor,
     ) -> torch.Tensor:
+        _ = pos_mask
         mask: torch.Tensor = doc_mask & torch.isfinite(teacher_scores)
         mask_float: torch.Tensor = mask.to(dtype=scores.dtype)
         denom: torch.Tensor = mask_float.sum().clamp(min=1.0)
@@ -233,6 +300,41 @@ class LossComputer(nn.Module):
         kl: torch.Tensor = F.kl_div(student_log_probs, teacher_probs, reduction="none")
         loss_sum: torch.Tensor = (kl * mask_float).sum()
         return loss_sum / denom
+
+    def _distill_loss_margin_mse(
+        self,
+        scores: torch.Tensor,
+        teacher_scores: torch.Tensor,
+        pos_mask: torch.Tensor,
+        doc_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute margin-MSE over positive/negative score differences."""
+        valid_teacher: torch.Tensor = torch.isfinite(teacher_scores)
+        pos_valid: torch.Tensor = pos_mask & doc_mask
+        neg_valid: torch.Tensor = (~pos_mask) & doc_mask
+        has_pos: torch.Tensor = pos_valid.any(dim=1)
+        has_neg: torch.Tensor = neg_valid.any(dim=1)
+        valid_rows: torch.Tensor = has_pos & has_neg
+        if not bool(valid_rows.any()):
+            return scores.new_zeros(())
+
+        pos_indices: torch.Tensor = pos_valid.float().argmax(dim=1)
+        neg_indices: torch.Tensor = neg_valid.float().argmax(dim=1)
+        row_indices: torch.Tensor = torch.arange(
+            scores.shape[0], device=scores.device
+        )
+
+        student_pos: torch.Tensor = scores[row_indices, pos_indices]
+        student_neg: torch.Tensor = scores[row_indices, neg_indices]
+        safe_teacher: torch.Tensor = torch.where(
+            valid_teacher, teacher_scores, scores
+        )
+        teacher_pos: torch.Tensor = safe_teacher[row_indices, pos_indices]
+        teacher_neg: torch.Tensor = safe_teacher[row_indices, neg_indices]
+        margin_diff: torch.Tensor = (student_pos - student_neg) - (
+            teacher_pos - teacher_neg
+        )
+        return margin_diff[valid_rows].pow(2).mean()
 
     def _reg_loss_noop(
         self, reps: torch.Tensor, row_mask: torch.Tensor
@@ -272,6 +374,8 @@ class LossComputer(nn.Module):
             return self._main_loss_pairwise
         if loss_type == "in_batch":
             return self._main_loss_in_batch
+        if loss_type == "in_batch_pairwise_nll":
+            return self._main_loss_in_batch_pairwise_nll
         raise ValueError(f"Unsupported loss type: {loss_type}")
 
     def _resolve_distill_loss_fn(self, loss_type: str) -> _DistillLossFn:
@@ -279,6 +383,8 @@ class LossComputer(nn.Module):
             return self._distill_loss_mse
         if loss_type == "kl":
             return self._distill_loss_kl
+        if loss_type == "margin_mse":
+            return self._distill_loss_margin_mse
         raise ValueError(f"Unsupported distillation loss: {loss_type}")
 
     def _resolve_reg_loss_fn(self, reg_type: str, *, enabled: bool) -> _RegLossFn:
@@ -317,7 +423,7 @@ class LossComputer(nn.Module):
         )
 
         distill_loss: torch.Tensor = self._distill_loss_fn(
-            pairwise_scores, teacher_scores, doc_mask
+            pairwise_scores, teacher_scores, pos_mask, doc_mask
         )
         loss = loss + self.distill_weight * distill_loss
 

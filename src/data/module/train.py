@@ -6,6 +6,7 @@ from typing import Any
 import lightning as L
 import torch
 from datasets import IterableDataset
+from omegaconf import DictConfig
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from transformers import PreTrainedTokenizerBase
@@ -66,15 +67,19 @@ class TrainDataModule(L.LightningDataModule):
 
     def _build_dataset(
         self,
-        cfg,
+        cfg: DictConfig,
         require_teacher_scores: bool | None,
         load_teacher_scores: bool | None = None,
     ):
         if not cfg.use_hf:
-            raise ValueError(
-                "Local dataset files are no longer supported. "
-                "Please use HuggingFace datasets with dataset.use_hf=true."
-            )
+            dataset_name: str = str(cfg.name)
+            local_dataset_names: set[str] = {"msmarco_local_triplets"}
+            if dataset_name not in local_dataset_names:
+                raise ValueError(
+                    "Local dataset files are only supported for "
+                    f"{sorted(local_dataset_names)}. "
+                    "Please use HuggingFace datasets with dataset.use_hf=true."
+                )
         if load_teacher_scores is None:
             load_teacher_scores = bool(self.cfg.training.distill.enabled)
         dataset_builder = DATASET_REGISTRY[cfg.name]
@@ -120,7 +125,11 @@ class TrainDataModule(L.LightningDataModule):
             shuffle=shuffle,
             drop_last=drop_last,
         )
-        use_shuffle: bool = shuffle and sampler is None
+        inner_dataset: Any = getattr(dataset, "dataset", None)
+        is_iterable: bool = isinstance(dataset, IterableDataset) or isinstance(
+            inner_dataset, IterableDataset
+        )
+        use_shuffle: bool = shuffle and sampler is None and not is_iterable
 
         dataloader_kwargs: dict[str, Any] = {
             "dataset": dataset,
@@ -143,7 +152,7 @@ class TrainDataModule(L.LightningDataModule):
         return self._make_dataloader(
             dataset=dataset,
             batch_size=self.cfg.training.batch_size,
-            shuffle=False,
+            shuffle=True,
             drop_last=True,
         )
 

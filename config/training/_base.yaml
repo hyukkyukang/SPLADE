@@ -6,7 +6,9 @@ defaults:
 name: splade
 
 max_steps: 150000
+# Paper global batch size 124 = batch_size * num_devices * grad_accumulation.
 batch_size: 31
+global_batch_size_target: 124
 eval_batch_size: 31
 num_workers: 16
 prefetch_factor: 2

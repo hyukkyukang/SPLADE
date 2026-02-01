@@ -7,7 +7,7 @@ from typing import Any, Callable, TypeVar, cast
 
 import lightning as L
 import torch
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from sentence_transformers import SparseEncoder
 from sentence_transformers.sparse_encoder.evaluation import SparseNanoBEIREvaluator
 
@@ -17,8 +17,11 @@ from src.model.retriever.sparse.neural.splade import SpladeModel
 from src.utils.logging import log_if_rank_zero
 from src.utils.model_utils import build_splade_model
 from src.utils.sparse_encoder import (
+    DocOnlySparseEncoderAdapter,
     SparseEncoderCache,
+    build_doc_only_sparse_encoder_adapter,
     build_sparse_encoder_cache,
+    resolve_nanobeir_compatibility,
     update_sparse_encoder_cache,
 )
 
@@ -37,6 +40,11 @@ def _dynamo_disable(fn: _TCallable) -> _TCallable:
 class SPLADETrainingModule(L.LightningModule):
     def __init__(self, cfg: DictConfig) -> None:
         super().__init__()
+        hparams_container: dict[str, Any] = cast(
+            dict[str, Any], OmegaConf.to_container(cfg, resolve=True)
+        )
+        # Persist the resolved config in checkpoints for reproducible eval.
+        self.save_hyperparameters(hparams_container)
         self.cfg: DictConfig = cfg
         # Build the encoder with a dtype appropriate for the device.
         self.model: SpladeModel = build_splade_model(cfg, use_cpu=cfg.training.use_cpu)
@@ -118,6 +126,8 @@ class SPLADETrainingModule(L.LightningModule):
         self._nanobeir_val_counter: int = 0
         self._nanobeir_cache: SparseEncoderCache | None = None
         self._nanobeir_cache_device: torch.device | None = None
+        self._nanobeir_doc_only_encoder: DocOnlySparseEncoderAdapter | None = None
+        self._nanobeir_doc_only_device: torch.device | None = None
         self._nanobeir_evaluator: SparseNanoBEIREvaluator | None = None
         self._nanobeir_evaluator_datasets: list[str] = []
         self._nanobeir_evaluator_batch_size: int = int(self.nanobeir_batch_size)
@@ -145,6 +155,20 @@ class SPLADETrainingModule(L.LightningModule):
             self.nanobeir_dataset_names = dataset_names
 
         self._nanobeir_evaluator_batch_size = int(self.nanobeir_batch_size)
+
+        self.doc_only_enabled: bool = bool(getattr(self.model, "doc_only", False))
+
+        if self.nanobeir_enabled and not self.doc_only_enabled:
+            compatible: bool
+            reason: str | None
+            compatible, reason = resolve_nanobeir_compatibility(self.cfg)
+            if not compatible:
+                log_if_rank_zero(
+                    logger,
+                    f"NanoBEIR evaluation disabled; {reason}",
+                    level="warning",
+                )
+                self.nanobeir_enabled = False
 
         if self.nanobeir_enabled and not self.nanobeir_dataset_names:
             log_if_rank_zero(
@@ -343,6 +367,29 @@ class SPLADETrainingModule(L.LightningModule):
         # Ensure metric buffers live on the same device as predictions.
         self.val_metric_collection.to(self.device)
 
+    def on_fit_start(self) -> None:
+        global_target: int | None = getattr(
+            self.cfg.training, "global_batch_size_target", None
+        )
+        if global_target is None:
+            return
+        batch_size: int = int(self.cfg.training.batch_size)
+        grad_accumulation: int = int(self.cfg.training.grad_accumulation)
+        world_size: int = int(self.trainer.world_size) if self.trainer else 1
+        effective_batch_size: int = batch_size * grad_accumulation * world_size
+        if effective_batch_size != int(global_target):
+            log_if_rank_zero(
+                logger,
+                "Effective global batch size "
+                f"{effective_batch_size} does not match target {int(global_target)}.",
+                level="warning",
+            )
+        else:
+            log_if_rank_zero(
+                logger,
+                f"Effective global batch size matches target: {effective_batch_size}.",
+            )
+
     def _lambda_schedule_multiplier(self) -> float:
         schedule_steps: int | None = self.reg_cfg.schedule_steps
         if schedule_steps is None:
@@ -407,6 +454,14 @@ class SPLADETrainingModule(L.LightningModule):
             self.val_metric_collection.append(scores, targets, indexes)
 
     def _resolve_nanobeir_device(self) -> torch.device:
+        if self.doc_only_enabled:
+            if self.nanobeir_use_cpu:
+                log_if_rank_zero(
+                    logger,
+                    "NanoBEIR use_cpu ignored for SPLADE-doc; using training device.",
+                    level="warning",
+                )
+            return self.device
         use_cpu: bool = bool(self.nanobeir_use_cpu)
         if use_cpu:
             return torch.device("cpu")
@@ -448,19 +503,38 @@ class SPLADETrainingModule(L.LightningModule):
 
     def _run_nanobeir_eval(self) -> None:
         device: torch.device = self._resolve_nanobeir_device()
-        cache: SparseEncoderCache | None = self._nanobeir_cache
-        cache_device: torch.device | None = self._nanobeir_cache_device
-        if cache is None or cache_device != device:
-            # Rebuild the encoder when no cache exists or device changes.
-            cache = build_sparse_encoder_cache(
-                cfg=self.cfg, model=self.model, device=device
+        sparse_encoder: SparseEncoder | DocOnlySparseEncoderAdapter
+        if self.doc_only_enabled:
+            doc_cache: DocOnlySparseEncoderAdapter | None = (
+                self._nanobeir_doc_only_encoder
             )
-            self._nanobeir_cache = cache
-            self._nanobeir_cache_device = device
+            doc_cache_device: torch.device | None = self._nanobeir_doc_only_device
+            if doc_cache is None or doc_cache_device != device:
+                doc_cache = build_doc_only_sparse_encoder_adapter(
+                    cfg=self.cfg,
+                    model=self.model,
+                    device=device,
+                    batch_size=self.nanobeir_batch_size,
+                )
+                self._nanobeir_doc_only_encoder = doc_cache
+                self._nanobeir_doc_only_device = device
+            sparse_encoder = doc_cache
         else:
-            # Update weights in-place to avoid reloading HF modules each validation.
-            update_sparse_encoder_cache(cache=cache, model=self.model, device=device)
-        sparse_encoder: SparseEncoder = cache.sparse_encoder
+            cache: SparseEncoderCache | None = self._nanobeir_cache
+            cache_device: torch.device | None = self._nanobeir_cache_device
+            if cache is None or cache_device != device:
+                # Rebuild the encoder when no cache exists or device changes.
+                cache = build_sparse_encoder_cache(
+                    cfg=self.cfg, model=self.model, device=device
+                )
+                self._nanobeir_cache = cache
+                self._nanobeir_cache_device = device
+            else:
+                # Update weights in-place to avoid reloading HF modules each validation.
+                update_sparse_encoder_cache(
+                    cache=cache, model=self.model, device=device
+                )
+            sparse_encoder = cache.sparse_encoder
 
         evaluator: SparseNanoBEIREvaluator
         evaluator_datasets: list[str] = self._nanobeir_evaluator_datasets
@@ -609,6 +683,8 @@ class SPLADETrainingModule(L.LightningModule):
                     nanobeir_error = exc
                     self._nanobeir_cache = None
                     self._nanobeir_cache_device = None
+                    self._nanobeir_doc_only_encoder = None
+                    self._nanobeir_doc_only_device = None
                     self._nanobeir_evaluator = None
                     self._nanobeir_evaluator_datasets = []
                     log_if_rank_zero(

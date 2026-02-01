@@ -5,6 +5,6 @@ defaults:
 distill:
   enabled: true
   weight: 1.0
-  loss: mse
+  loss: margin_mse
   teacher_score_key: teacher_scores
   fail_on_missing: true

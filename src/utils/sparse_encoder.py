@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any, Iterable, Sequence
 
+import numpy as np
 import torch
 from omegaconf import DictConfig
 from sentence_transformers import SparseEncoder
 from sentence_transformers.models import Normalize
 from sentence_transformers.sparse_encoder.models import MLMTransformer, SpladePooling
 from src.utils.model_utils import resolve_model_dtype
+from src.utils.transformers import build_tokenizer
+from transformers import PreTrainedTokenizerBase
 
 logger: logging.Logger = logging.getLogger("src.utils.sparse_encoder")
 
@@ -22,6 +25,226 @@ class SparseEncoderCache:
     sparse_encoder: SparseEncoder
 
 
+class _ModelCardDataStub:
+    """Minimal model card interface for evaluation hooks."""
+
+    def set_evaluation_metrics(
+        self,
+        evaluator: Any,
+        metrics: dict[str, Any],
+        epoch: int = 0,
+        step: int = 0,
+    ) -> None:
+        _ = evaluator, metrics, epoch, step
+
+
+class DocOnlySparseEncoderAdapter:
+    """Adapter to evaluate SPLADE-doc models with NanoBEIR evaluators."""
+
+    def __init__(
+        self,
+        model: torch.nn.Module,
+        tokenizer: PreTrainedTokenizerBase,
+        *,
+        device: torch.device,
+        batch_size: int,
+        max_query_length: int,
+        max_doc_length: int,
+    ) -> None:
+        self.model: torch.nn.Module = model
+        self.tokenizer: PreTrainedTokenizerBase = tokenizer
+        self.device: torch.device = device
+        self.batch_size: int = int(batch_size)
+        self.max_query_length: int = int(max_query_length)
+        self.max_doc_length: int = int(max_doc_length)
+        self.similarity_fn_name: str = "dot"
+        self.model_card_data: _ModelCardDataStub = _ModelCardDataStub()
+
+    @staticmethod
+    def sparsity(embeddings: torch.Tensor) -> dict[str, float]:
+        """Proxy to SparseEncoder.sparsity for evaluator stats."""
+        return SparseEncoder.sparsity(embeddings)
+
+    @staticmethod
+    def similarity(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+        """Compute dot-product scores for dense or sparse tensors."""
+        if a.is_sparse:
+            a = a.to_dense()
+        if b.is_sparse:
+            b = b.to_dense()
+        return torch.mm(a, b.transpose(0, 1))
+
+    def encode(
+        self,
+        sentences: str | Sequence[str] | np.ndarray,
+        *,
+        is_query: bool | None = None,
+        prompt_name: str | None = None,
+        prompt: str | None = None,
+        batch_size: int | None = None,
+        show_progress_bar: bool = False,
+        convert_to_sparse_tensor: bool = True,
+        save_to_cpu: bool = True,
+        max_active_dims: int | None = None,
+        **kwargs: Any,
+    ) -> torch.Tensor:
+        _ = prompt_name, prompt, kwargs
+        if is_query:
+            return self.encode_query(
+                sentences,
+                batch_size=batch_size,
+                show_progress_bar=show_progress_bar,
+                convert_to_sparse_tensor=convert_to_sparse_tensor,
+                save_to_cpu=save_to_cpu,
+                max_active_dims=max_active_dims,
+            )
+        return self.encode_document(
+            sentences,
+            batch_size=batch_size,
+            show_progress_bar=show_progress_bar,
+            convert_to_sparse_tensor=convert_to_sparse_tensor,
+            save_to_cpu=save_to_cpu,
+            max_active_dims=max_active_dims,
+        )
+
+    def encode_query(
+        self,
+        sentences: str | Sequence[str] | np.ndarray,
+        *,
+        prompt_name: str | None = None,
+        prompt: str | None = None,
+        batch_size: int | None = None,
+        show_progress_bar: bool = False,
+        convert_to_sparse_tensor: bool = True,
+        save_to_cpu: bool = True,
+        max_active_dims: int | None = None,
+        **kwargs: Any,
+    ) -> torch.Tensor:
+        _ = prompt_name, prompt, kwargs
+        return self._encode_texts(
+            sentences=sentences,
+            max_length=self.max_query_length,
+            batch_size=batch_size,
+            show_progress_bar=show_progress_bar,
+            convert_to_sparse_tensor=convert_to_sparse_tensor,
+            save_to_cpu=save_to_cpu,
+            max_active_dims=max_active_dims,
+            encode_fn=self.model.encode_queries,
+        )
+
+    def encode_document(
+        self,
+        sentences: str | Sequence[str] | np.ndarray,
+        *,
+        prompt_name: str | None = None,
+        prompt: str | None = None,
+        batch_size: int | None = None,
+        show_progress_bar: bool = False,
+        convert_to_sparse_tensor: bool = True,
+        save_to_cpu: bool = True,
+        max_active_dims: int | None = None,
+        **kwargs: Any,
+    ) -> torch.Tensor:
+        _ = prompt_name, prompt, kwargs
+        return self._encode_texts(
+            sentences=sentences,
+            max_length=self.max_doc_length,
+            batch_size=batch_size,
+            show_progress_bar=show_progress_bar,
+            convert_to_sparse_tensor=convert_to_sparse_tensor,
+            save_to_cpu=save_to_cpu,
+            max_active_dims=max_active_dims,
+            encode_fn=self.model.encode_docs,
+        )
+
+    def _encode_texts(
+        self,
+        *,
+        sentences: str | Sequence[str] | np.ndarray,
+        max_length: int,
+        batch_size: int | None,
+        show_progress_bar: bool,
+        convert_to_sparse_tensor: bool,
+        save_to_cpu: bool,
+        max_active_dims: int | None,
+        encode_fn: Any,
+    ) -> torch.Tensor:
+        text_list: list[str]
+        if isinstance(sentences, str):
+            text_list = [sentences]
+        elif isinstance(sentences, np.ndarray):
+            text_list = [str(item) for item in sentences.tolist()]
+        else:
+            text_list = [str(item) for item in sentences]
+
+        if not text_list:
+            vocab_size: int = int(self.model.encoder.mlm.config.vocab_size)
+            empty: torch.Tensor = torch.empty(
+                (0, vocab_size), dtype=self.model.encoder.mlm.dtype, device=self.device
+            )
+            return empty
+
+        batch_size_value: int = int(batch_size or self.batch_size)
+        batches: Iterable[list[str]] = _batch_texts(
+            text_list, batch_size_value, show_progress_bar
+        )
+        outputs: list[torch.Tensor] = []
+        self.model.eval()
+        with torch.no_grad():
+            for batch in batches:
+                tokens: dict[str, torch.Tensor] = self.tokenizer(
+                    batch,
+                    padding=True,
+                    truncation=True,
+                    max_length=int(max_length),
+                    return_tensors="pt",
+                )
+                input_ids: torch.Tensor = tokens["input_ids"].to(self.device)
+                attention_mask: torch.Tensor = tokens["attention_mask"].to(self.device)
+                batch_reps: torch.Tensor = encode_fn(input_ids, attention_mask)
+                outputs.append(batch_reps)
+
+        embeddings: torch.Tensor = torch.cat(outputs, dim=0)
+        if max_active_dims is not None:
+            embeddings = _prune_to_max_active_dims(embeddings, int(max_active_dims))
+        if convert_to_sparse_tensor:
+            embeddings = embeddings.to_sparse()
+        if save_to_cpu:
+            embeddings = embeddings.to(device=torch.device("cpu"))
+        return embeddings
+
+
+def _batch_texts(
+    texts: list[str], batch_size: int, show_progress_bar: bool
+) -> Iterable[list[str]]:
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive.")
+    indices: range = range(0, len(texts), batch_size)
+    if show_progress_bar:
+        try:
+            from tqdm.auto import tqdm
+
+            indices = tqdm(indices, desc="Encoding", leave=False)
+        except ImportError:  # pragma: no cover - tqdm is optional
+            pass
+    for start in indices:
+        yield texts[start : start + batch_size]
+
+
+def _prune_to_max_active_dims(
+    embeddings: torch.Tensor, max_active_dims: int
+) -> torch.Tensor:
+    if max_active_dims <= 0 or embeddings.numel() == 0:
+        return embeddings
+    top_k: int = min(int(max_active_dims), int(embeddings.shape[1]))
+    values: torch.Tensor
+    indices: torch.Tensor
+    values, indices = torch.topk(embeddings, top_k, dim=1)
+    pruned: torch.Tensor = torch.zeros_like(embeddings)
+    pruned.scatter_(1, indices, values)
+    return pruned
+
+
 def _strip_prefix(value: str, prefixes: Iterable[str]) -> str | None:
     """Return value with the first matching prefix stripped."""
     prefix: str
@@ -29,6 +252,46 @@ def _strip_prefix(value: str, prefixes: Iterable[str]) -> str | None:
         if value.startswith(prefix):
             return value[len(prefix) :]
     return None
+
+
+def resolve_nanobeir_compatibility(cfg: DictConfig) -> tuple[bool, str | None]:
+    """Check if the config is compatible with NanoBEIR SparseEncoder evaluation."""
+    query_pooling: str = str(cfg.model.query_pooling)
+    doc_pooling: str = str(cfg.model.doc_pooling)
+    if query_pooling != doc_pooling:
+        return (
+            False,
+            f"query_pooling must match doc_pooling (got {query_pooling} vs {doc_pooling}).",
+        )
+    sparse_activation: str = str(cfg.model.sparse_activation)
+    if sparse_activation != "log1p_relu":
+        return (
+            False,
+            f"sparse_activation must be log1p_relu (got {sparse_activation}).",
+        )
+    return True, None
+
+
+def build_doc_only_sparse_encoder_adapter(
+    cfg: DictConfig,
+    model: torch.nn.Module,
+    *,
+    device: torch.device,
+    batch_size: int,
+) -> DocOnlySparseEncoderAdapter:
+    """Build a NanoBEIR adapter for SPLADE-doc query encoding."""
+    tokenizer: PreTrainedTokenizerBase = build_tokenizer(
+        str(cfg.model.huggingface_name)
+    )
+    max_length: int = int(cfg.model.max_input_length)
+    return DocOnlySparseEncoderAdapter(
+        model=model,
+        tokenizer=tokenizer,
+        device=device,
+        batch_size=int(batch_size),
+        max_query_length=max_length,
+        max_doc_length=max_length,
+    )
 
 
 def _extract_mlm_state_dict(
@@ -142,28 +405,15 @@ def _build_sparse_encoder_from_mlm(
     device: torch.device,
 ) -> SparseEncoder:
     """Build a SparseEncoder module stack from an MLMTransformer."""
-    query_pooling: str = str(cfg.model.query_pooling)
-    doc_pooling: str = str(cfg.model.doc_pooling)
-    if query_pooling != doc_pooling:
-        raise ValueError("NanoBEIR evaluation requires query_pooling == doc_pooling.")
+    compatible: bool
+    reason: str | None
+    compatible, reason = resolve_nanobeir_compatibility(cfg)
+    if not compatible:
+        raise ValueError(f"NanoBEIR evaluation incompatible: {reason}")
 
-    sparse_activation: str = str(cfg.model.sparse_activation)
-    activation_function: str
-    if sparse_activation == "log1p_relu":
-        # SentenceTransformers SpladePooling applies log1p after ReLU.
-        activation_function = "relu"
-    elif sparse_activation == "relu":
-        raise ValueError(
-            "Sparse activation 'relu' is not supported because "
-            "SentenceTransformers SpladePooling always applies log1p."
-        )
-    elif sparse_activation == "softplus":
-        raise ValueError(
-            "Sparse activation 'softplus' is not supported because "
-            "SentenceTransformers SpladePooling always applies log1p."
-        )
-    else:
-        raise ValueError(f"Unsupported sparse_activation: {sparse_activation}")
+    doc_pooling: str = str(cfg.model.doc_pooling)
+    # SentenceTransformers SpladePooling applies log1p after ReLU.
+    activation_function: str = "relu"
 
     splade_pooling: SpladePooling = SpladePooling(
         pooling_strategy=doc_pooling,

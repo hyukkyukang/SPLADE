@@ -1,0 +1,16 @@
+# @package dataset
+defaults:
+  - _base@_here_
+
+name: msmarco_local_triplets
+type: msmarco_local_triplets
+split: train
+
+use_hf: false
+local_triplets_dir: data/msmarco/triplets
+
+max_query_length: 256
+max_doc_length: 256
+max_padding: true
+num_negatives: 1
+num_positives: 1
