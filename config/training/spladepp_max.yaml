@@ -1,0 +1,15 @@
+# @package training
+defaults:
+  - _base
+
+name: spladepp_max
+
+loss:
+  type: in_batch_pairwise_nll
+
+regularization:
+  query_weight: 0.0003
+  doc_weight: 0.0001
+  type: flops
+  paper_faithful: true
+  schedule_steps: 50000

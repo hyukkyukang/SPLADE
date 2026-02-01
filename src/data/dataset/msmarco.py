@@ -863,8 +863,23 @@ class MSMARCO(BaseDataset):
         total_shards, shard_index = self._get_shard_context()
         if total_shards <= 1:
             return dataset
+        capped_total_shards: int = total_shards
+        capped_index: int = shard_index
+        if isinstance(dataset, IterableDataset):
+            dataset_shards: Any = getattr(dataset, "num_shards", None)
+            if isinstance(dataset_shards, int) and dataset_shards > 0:
+                if dataset_shards < total_shards:
+                    capped_total_shards = dataset_shards
+                    capped_index = shard_index % capped_total_shards
+                    log_if_rank_zero(
+                        logger,
+                        "Capping streaming dataset shards from "
+                        f"{total_shards} to {capped_total_shards} "
+                        "to avoid empty shards.",
+                        level="warning",
+                    )
         return dataset.shard(
-            num_shards=total_shards, index=shard_index, contiguous=True
+            num_shards=capped_total_shards, index=capped_index, contiguous=True
         )
 
     def _apply_hf_sample_window(self, dataset: Any) -> Any:

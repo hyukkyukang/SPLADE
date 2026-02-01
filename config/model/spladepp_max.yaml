@@ -2,9 +2,8 @@
 defaults:
   - _base
 
-name: splade_v2_doc
+name: spladepp_max
 huggingface_name: distilbert-base-uncased
 query_pooling: max
 doc_pooling: max
 sparse_activation: log1p_relu
-doc_only: true

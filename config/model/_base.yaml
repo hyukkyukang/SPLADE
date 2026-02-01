@@ -13,6 +13,7 @@ query_pooling: sum
 doc_pooling: max
 sparse_activation: log1p_relu
 normalize: false
+doc_only: false
 
 # retrieval index
 index_path: null

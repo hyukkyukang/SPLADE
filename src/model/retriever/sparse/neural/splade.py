@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import torch
 from torch import nn
@@ -116,6 +116,7 @@ class SpladeModel(nn.Module):
         attn_implementation: Optional[str] = None,
         dtype: Optional[torch.dtype] = None,
         normalize: bool = False,
+        doc_only: bool = False,
     ) -> None:
         super().__init__()
         # Build encoder shared by query and document pooling.
@@ -140,6 +141,19 @@ class SpladeModel(nn.Module):
             persistent=False,
         )
         self.normalize: bool = normalize
+        self.doc_only: bool = bool(doc_only)
+        exclude_token_ids: torch.Tensor = self._build_query_exclude_token_ids()
+        vocab_size: int = int(self.encoder.mlm.config.vocab_size)
+        exclude_mask: torch.Tensor = self._build_query_exclude_mask(
+            exclude_token_ids, vocab_size
+        )
+        self.register_buffer(
+            "_query_exclude_token_ids", exclude_token_ids, persistent=False
+        )
+        self.register_buffer("_query_exclude_mask", exclude_mask, persistent=False)
+        self._query_encode_fn: Callable[
+            [torch.Tensor, torch.Tensor], torch.Tensor
+        ] = self._encode_query_terms if self.doc_only else self._encode_query_mlm
 
     # --- Protected methods ---
     @staticmethod
@@ -150,14 +164,78 @@ class SpladeModel(nn.Module):
             return 1.0
         raise ValueError(f"Unsupported pooling: {pooling}")
 
-    # --- Public methods ---
-    def encode_queries(
+    def _build_query_exclude_token_ids(self) -> torch.Tensor:
+        """Collect special token IDs to exclude from query bag-of-words."""
+        config: Any = self.encoder.mlm.config
+        candidate_ids: list[int] = []
+        attr_name: str
+        for attr_name in (
+            "pad_token_id",
+            "cls_token_id",
+            "sep_token_id",
+            "bos_token_id",
+            "eos_token_id",
+        ):
+            value: Any = getattr(config, attr_name, None)
+            if value is None:
+                continue
+            token_id: int = int(value)
+            if token_id >= 0:
+                candidate_ids.append(token_id)
+        unique_ids: list[int] = sorted(set(candidate_ids))
+        return torch.tensor(unique_ids, dtype=torch.long)
+
+    def _build_query_exclude_mask(
+        self, exclude_ids: torch.Tensor, vocab_size: int
+    ) -> torch.Tensor:
+        """Build a vocab-sized mask for excluded query tokens."""
+        if int(exclude_ids.numel()) == 0:
+            return torch.empty((0,), dtype=torch.bool)
+        mask: torch.Tensor = torch.zeros(int(vocab_size), dtype=torch.bool)
+        mask[exclude_ids] = True
+        return mask
+
+    def _encode_query_terms(
         self, input_ids: torch.Tensor, attention_mask: torch.Tensor
     ) -> torch.Tensor:
+        """Encode queries as a bag-of-words over input tokens."""
+        batch_size: int = int(input_ids.shape[0])
+        vocab_size: int = int(self.encoder.mlm.config.vocab_size)
+        device: torch.device = input_ids.device
+        dtype: torch.dtype = self.encoder.mlm.dtype
+
+        token_ids: torch.Tensor = input_ids.to(dtype=torch.long)
+        # Mask out padding and special tokens before counting terms.
+        token_mask: torch.Tensor = attention_mask.to(dtype=torch.bool)
+        exclude_mask: torch.Tensor = self._query_exclude_mask
+        if int(exclude_mask.numel()) > 0:
+            exclude_mask = exclude_mask.to(device=device)
+            token_mask = token_mask & ~exclude_mask[token_ids]
+        token_values: torch.Tensor = token_mask.to(dtype=dtype)
+        bow: torch.Tensor = torch.zeros(
+            (batch_size, vocab_size), dtype=dtype, device=device
+        )
+        # Accumulate term counts for each query in the batch.
+        bow.scatter_add_(1, token_ids, token_values)
+        return bow
+
+    def _encode_query_mlm(
+        self, input_ids: torch.Tensor, attention_mask: torch.Tensor
+    ) -> torch.Tensor:
+        """Encode queries using the MLM-based SPLADE encoder."""
         embeddings: torch.Tensor = self.encoder(
             input_ids=input_ids,
             attention_mask=attention_mask,
             pooling_mode=self._query_pooling_mode,
+        )
+        return embeddings
+
+    # --- Public methods ---
+    def encode_queries(
+        self, input_ids: torch.Tensor, attention_mask: torch.Tensor
+    ) -> torch.Tensor:
+        embeddings: torch.Tensor = self._query_encode_fn(
+            input_ids, attention_mask
         )
         if self.normalize:
             embeddings = F.normalize(embeddings, p=2, dim=-1)

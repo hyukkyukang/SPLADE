@@ -15,3 +15,4 @@ k_list: [1, 5, 10, 50, 100]
 save_run: false
 run_path: null
 checkpoint_path: null
+use_checkpoint_config: true

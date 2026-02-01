@@ -6,4 +6,3 @@ name: splade_v1_max
 query_pooling: max
 doc_pooling: max
 sparse_activation: log1p_relu
-# sparse_activation: log1p_softplus
