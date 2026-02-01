@@ -10,6 +10,13 @@ from omegaconf import DictConfig
 DDP_TIMEOUT_HOURS: int = 1
 
 
+def _resolve_static_graph(cfg_section: DictConfig) -> bool:
+    """Disable static_graph when gradient accumulation uses no_sync."""
+    grad_accumulation: int = int(getattr(cfg_section, "grad_accumulation", 1))
+    # Some PyTorch versions assert in DDP when no_sync is used with static graphs.
+    return grad_accumulation <= 1
+
+
 def get_cpu_trainer_kwargs(cfg_section: DictConfig) -> dict[str, Any]:
     """Build trainer kwargs for CPU execution."""
     strategy_name: str = str(cfg_section.strategy)
@@ -20,8 +27,10 @@ def get_cpu_trainer_kwargs(cfg_section: DictConfig) -> dict[str, Any]:
 
     if strategy_name == "ddp":
         if num_devices > 1:
+            use_static_graph: bool = _resolve_static_graph(cfg_section)
             kwargs["strategy"] = DDPStrategy(
-                timeout=timedelta(hours=DDP_TIMEOUT_HOURS), static_graph=True
+                timeout=timedelta(hours=DDP_TIMEOUT_HOURS),
+                static_graph=use_static_graph,
             )
         else:
             kwargs["strategy"] = "auto"
@@ -45,9 +54,10 @@ def get_gpu_trainer_kwargs(cfg_section: DictConfig) -> dict[str, Any]:
     kwargs: dict[str, Any] = {"accelerator": "cuda", "devices": num_devices}
 
     if strategy_name == "ddp":
+        use_static_graph: bool = _resolve_static_graph(cfg_section)
         kwargs["strategy"] = DDPStrategy(
             timeout=timedelta(hours=DDP_TIMEOUT_HOURS),
-            static_graph=True,
+            static_graph=use_static_graph,
             gradient_as_bucket_view=True,
         )
     elif strategy_name == "fsdp":
