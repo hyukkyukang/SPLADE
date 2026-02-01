@@ -18,6 +18,9 @@ faiss-cpu
 setuptools
 h5py
 
+# For validation
+sentence_transformers
+
 # For testing
 unittest-xml-reporting
 pytest
