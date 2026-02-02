@@ -1,0 +1,87 @@
+{
+  "settings": {
+    "device": "cuda",
+    "sample_count": 512,
+    "batch_size": 2,
+    "max_length": 64,
+    "sample_size_per_batch": 20000,
+    "seed": 13,
+    "msmarco_name": "sentence-transformers/msmarco",
+    "msmarco_query_subset": "queries",
+    "msmarco_fallback_subset": "triplets",
+    "msmarco_split": "train",
+    "msmarco_cache_dir": null,
+    "msmarco_text_column": null,
+    "msmarco_shuffle_buffer_size": 10000,
+    "msmarco_skip_samples": 0,
+    "msmarco_streaming": true
+  },
+  "models": {
+    "bert-base-uncased": {
+      "model_name": "bert-base-uncased",
+      "stats": {
+        "count": 146078292.0,
+        "mean": -6.9996059031139275,
+        "std": 3.6825780164367874,
+        "min": -28.622404098510742,
+        "max": 28.269306182861328,
+        "negative_fraction": 0.9826003305131744,
+        "zero_fraction": 0.0,
+        "quantiles": {
+          "0.01": -15.683300971984863,
+          "0.05": -13.222030639648438,
+          "0.50": -6.758898735046387,
+          "0.95": -1.620399832725525,
+          "0.99": 0.8070347905158997
+        },
+        "sample_count": 5120000
+      },
+      "sample_values": [],
+      "vocab_survival": {
+        "count": 512.0,
+        "mean": 3064.390625,
+        "std": 2253.6273767576317,
+        "min": 669.0,
+        "max": 20042.0,
+        "vocab_size": 30522.0,
+        "mean_fraction": 0.10039940452788153,
+        "std_fraction": 0.07383616331687412,
+        "min_fraction": 0.021918616080204442,
+        "max_fraction": 0.6566411113295328
+      }
+    },
+    "distilbert-base-uncased": {
+      "model_name": "distilbert-base-uncased",
+      "stats": {
+        "count": 146078292.0,
+        "mean": -5.836603283600824,
+        "std": 3.317282226616563,
+        "min": -23.066335678100586,
+        "max": 27.237991333007812,
+        "negative_fraction": 0.9731150334096185,
+        "zero_fraction": 0.0,
+        "quantiles": {
+          "0.01": -13.406965255737305,
+          "0.05": -11.346354484558105,
+          "0.50": -5.694216251373291,
+          "0.95": -0.8526841402053833,
+          "0.99": 1.3433409929275513
+        },
+        "sample_count": 5120000
+      },
+      "sample_values": [],
+      "vocab_survival": {
+        "count": 512.0,
+        "mean": 4050.16796875,
+        "std": 2038.0345289807406,
+        "min": 1298.0,
+        "max": 20743.0,
+        "vocab_size": 30522.0,
+        "mean_fraction": 0.13269667678232094,
+        "std_fraction": 0.06677264035714371,
+        "min_fraction": 0.04252670205097962,
+        "max_fraction": 0.6796081514972806
+      }
+    }
+  }
+}
