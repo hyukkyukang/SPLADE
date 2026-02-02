@@ -42,7 +42,7 @@ jobs:
 
             - name: build sphinx
               run: |
-                  cd docs 
+                  cd doc
                   sphinx-apidoc -o ./source ../src
                   make html
 
@@ -50,4 +50,4 @@ jobs:
               uses: peaceiris/actions-gh-pages@v3
               with:
                   github_token: ${{ secrets.GITHUB_TOKEN }}
-                  publish_dir: ./docs/build/html
+                  publish_dir: ./doc/build/html

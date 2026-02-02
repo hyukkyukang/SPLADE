@@ -1,6 +1,6 @@
 # NanoBEIR proxy evaluation config
 seed: 10
-log_dir_base: "logs"
+log_dir_base: "log"
 tag: null
 log_dir: ${tagged_log_dir:${log_dir_base},${tag}}
 root_dir_path: "."
