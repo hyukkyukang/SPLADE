@@ -16,3 +16,4 @@ indexes/
 *.ckpt
 
 /data/
+/reference_code/
