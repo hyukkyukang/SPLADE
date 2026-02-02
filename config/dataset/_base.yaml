@@ -14,6 +14,7 @@ num_positives: 1
 beir_dataset: null
 
 use_hf: true
+use_ir_datasets: true
 hf_name: null
 hf_subset: null
 hf_split: train

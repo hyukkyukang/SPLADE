@@ -1,8 +1,8 @@
 # @package encoding
 name: encoding_base
 
-batch_size: 32
-num_workers: 4
+batch_size: 256
+num_workers: 32
 
 precision: 16-mixed
 use_cpu: false
