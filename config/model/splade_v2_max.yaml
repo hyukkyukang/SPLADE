@@ -2,7 +2,7 @@
 defaults:
   - _base
 
-name: spladepp_max
+name: splade_v2_max
 huggingface_name: distilbert-base-uncased
 query_pooling: max
 doc_pooling: max

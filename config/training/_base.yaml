@@ -1,7 +1,7 @@
 # @package training
 defaults:
   # Select optimizer via `optimizer@training=adam|adamw` to keep weight_decay in sync.
-  - /optimizer@_global_.training: adamw
+  - /optimizer@_global_.training: adam
 
 name: splade
 

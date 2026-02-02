@@ -1,6 +1,6 @@
 # @package training
 defaults:
-  - splade_v2
+  - splade_v2_max
 
 distill:
   enabled: true

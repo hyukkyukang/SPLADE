@@ -1,9 +1,0 @@
-# @package model
-defaults:
-  - _base
-
-name: splade_v2
-huggingface_name: distilbert-base-uncased
-query_pooling: max
-doc_pooling: max
-sparse_activation: log1p_relu
