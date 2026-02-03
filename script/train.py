@@ -112,12 +112,8 @@ def main(cfg: DictConfig) -> None:
 
     wandb_cfg: DictConfig = cfg.training.wandb
     # Use the training config name for clearer W&B run identification.
-    training_name: str = str(training_cfg.name)
-    # Append the tag suffix when provided to group runs by tag.
     tag_value: str | None = normalize_tag(cfg.tag)
-    wandb_run_name: str = (
-        f"{training_name}-{tag_value}" if tag_value is not None else training_name
-    )
+    wandb_run_name: str = str(training_cfg.name) if tag_value is None else tag_value
     csv_logger: CSVLogger = CSVLogger(save_dir=cfg.log_dir, name="lightning_logs")
     is_debug_tag: bool = tag_value is not None and tag_value.lower() == "debug"
     lightning_loggers: list[Logger] = [csv_logger]
