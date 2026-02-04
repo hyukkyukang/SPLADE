@@ -1,6 +1,6 @@
 import logging
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List
 
 import lightning as L
 import numpy as np
@@ -19,9 +19,24 @@ from src.model.pl_module.utils import (
     finalize_retrieval_metrics,
 )
 from src.model.retriever.sparse.neural.splade import SpladeModel
+from src.utils.logging import log_if_rank_zero
 from src.utils.model_utils import resolve_tagged_output_dir
 
 logger: logging.Logger = logging.getLogger("RetrievalLightningModule")
+
+
+def _resolve_cudagraph_mark_step() -> Callable[[], None] | None:
+    if not hasattr(torch, "compiler"):
+        return None
+    compiler_mod = torch.compiler
+    if not hasattr(compiler_mod, "cudagraph_mark_step_begin"):
+        return None
+    mark_step_fn = compiler_mod.cudagraph_mark_step_begin
+    return mark_step_fn if callable(mark_step_fn) else None
+
+
+def _build_compile_kwargs(mode: str) -> dict[str, Any]:
+    return {"mode": mode}
 
 
 class RetrievalLightningModule(L.LightningModule):
@@ -35,6 +50,8 @@ class RetrievalLightningModule(L.LightningModule):
         self.save_hyperparameters(cfg)
 
         self.model: SpladeModel = self._load_model()
+        self._torch_compile_mark_step: Callable[[], None] | None = None
+        self._setup_torch_compile()
 
         self._k_list: List[int] = resolve_k_list(self.cfg.testing.k_list)
         self._k_max: int = max(self._k_list)
@@ -62,6 +79,41 @@ class RetrievalLightningModule(L.LightningModule):
             checkpoint_path=checkpoint_path,
             logger=logger,
         )
+
+    def _setup_torch_compile(self) -> dict[str, Any]:
+        compile_enabled: bool = bool(self.cfg.testing.get("torch_compile", False))
+        compile_available: bool = hasattr(torch, "compile")
+        self._torch_compile_mark_step = None
+        if compile_enabled and not compile_available:
+            log_if_rank_zero(
+                logger,
+                "torch.compile is not available in this PyTorch build; continuing "
+                "without compilation.",
+                level="warning",
+            )
+            return {}
+        if not compile_enabled or not compile_available:
+            return {}
+        compile_mode_value: Any = self.cfg.testing.get("torch_compile_mode", "default")
+        compile_mode: str = str(compile_mode_value).lower()
+        valid_compile_modes: set[str] = {
+            "default",
+            "reduce-overhead",
+            "max-autotune",
+        }
+        if compile_mode not in valid_compile_modes:
+            raise ValueError(
+                "Unsupported torch.compile mode: "
+                f"{compile_mode_value!r}. Expected one of "
+                f"{sorted(valid_compile_modes)}."
+            )
+        compile_mode_kwargs: dict[str, Any] = _build_compile_kwargs(compile_mode)
+        if compile_mode in {"reduce-overhead", "max-autotune"}:
+            self._torch_compile_mark_step = _resolve_cudagraph_mark_step()
+        query_wrapper: torch.nn.Module = self.model._query_encoder_wrapper
+        query_encoder = torch.compile(query_wrapper, **compile_mode_kwargs)
+        self.model._query_encoder_fn = query_encoder
+        return compile_mode_kwargs
 
     def _load_index(self) -> InvertedIndex:
         index_dir_value: str | None = self.cfg.encoding.index_dir
@@ -116,14 +168,13 @@ class RetrievalLightningModule(L.LightningModule):
     ) -> None:
         _ = batch_idx
         if (
-            self._retriever is None
-            or self._index is None
+            self._index is None
             or self._doc_ids is None
             or self._score_buffer is None
             or self._seen_buffer is None
         ):
             raise ValueError(
-                "Retriever and index must be initialized in on_test_start."
+                "Index and scoring buffers must be initialized in on_test_start."
             )
 
         relevance_judgments_list: List[Dict[str, int]] = batch["relevance_judgments"]
@@ -131,6 +182,8 @@ class RetrievalLightningModule(L.LightningModule):
         query_attention_mask: torch.Tensor = batch["query_attention_mask"].to(
             self.device
         )
+        if self._torch_compile_mark_step is not None:
+            self._torch_compile_mark_step()
         query_reps: torch.Tensor = self.model.encode_queries(
             query_input_ids, query_attention_mask
         )

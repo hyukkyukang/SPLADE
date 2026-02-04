@@ -7,7 +7,7 @@ root_dir_path: "."
 
 # Defaults
 defaults:
-  - model: splade_v1
+  - model: splade_v2_max
   - dataset: msmarco
   - encoding: default
   - _self_

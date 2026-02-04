@@ -27,7 +27,6 @@ torch_compile_mode: max-autotune
 strategy: ddp
 static_graph: true
 num_devices: null
-device_id: 0
 sparse_top_k: 0
 sparse_min_weight: 0.0
 

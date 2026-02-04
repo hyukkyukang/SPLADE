@@ -1,6 +1,6 @@
 # @package dataset
 defaults:
-  - _base@_here_
+  - /dataset/beir/_base@_here_
 
-name: beir_quora
+name: quora
 beir_dataset: quora

@@ -4,12 +4,13 @@ defaults:
 
 name: beir_base
 type: beir
-split: test
+# Hyukkyu/beir-* has things in train split, but it's actually test split.
+split: train
 corpus_split: train
 
 beir_dataset: null
 
-hf_name: BeIR/${dataset.beir_dataset}
+hf_name: Hyukkyu/beir-${dataset.beir_dataset}-qrels
 
 # Column names for query/corpus datasets.
 query_id_column: _id

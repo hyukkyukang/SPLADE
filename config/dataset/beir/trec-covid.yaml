@@ -1,6 +1,6 @@
 # @package dataset
 defaults:
-  - _base@_here_
+  - /dataset/beir/_base@_here_
 
-name: beir_trec-covid
+name: trec-covid
 beir_dataset: trec-covid

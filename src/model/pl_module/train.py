@@ -166,10 +166,6 @@ class SPLADETrainingModule(L.LightningModule):
         self.nanobeir_save_json = bool(nanobeir_cfg.save_json)
         self.nanobeir_dataset_names = [str(name) for name in nanobeir_cfg.datasets]
         self.nanobeir_use_cpu = bool(nanobeir_cfg.use_cpu)
-        base_device_id: int | None = cfg.training.device_id
-        self.nanobeir_device_id = (
-            None if base_device_id is None else int(base_device_id)
-        )
         self._nanobeir_val_counter = 0
         self._nanobeir_cache = None
         self._nanobeir_cache_device = None
@@ -178,10 +174,6 @@ class SPLADETrainingModule(L.LightningModule):
         self._nanobeir_evaluator = None
         self._nanobeir_evaluator_datasets = []
         self._nanobeir_evaluator_batch_size = int(self.nanobeir_batch_size)
-        device_id_value: int | None = nanobeir_cfg.device_id
-        self.nanobeir_device_id = (
-            None if device_id_value is None else int(device_id_value)
-        )
         self.doc_only_enabled = bool(self._doc_only_flag)
 
         if self.nanobeir_enabled and not self.doc_only_enabled:
@@ -483,11 +475,8 @@ class SPLADETrainingModule(L.LightningModule):
         use_cpu: bool = bool(self.nanobeir_use_cpu)
         if use_cpu:
             return torch.device("cpu")
-        device_id: int | None = self.nanobeir_device_id
         if torch.cuda.is_available():
-            if device_id is None:
-                return torch.device("cuda")
-            return torch.device(f"cuda:{int(device_id)}")
+            return torch.device("cuda")
         return torch.device("cpu")
 
     def _should_run_nanobeir_eval(self) -> bool:

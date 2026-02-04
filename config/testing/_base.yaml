@@ -2,21 +2,24 @@
 name: default
 
 batch_size: 32
-per_device_batch_size: null
-num_workers: 4
+num_workers: 2
 max_padding: true
 
-precision: 16-mixed
+precision: bf16-mixed
 use_cpu: false
+torch_compile: true
+# Options: default, reduce-overhead, and max-autotune.
+torch_compile_mode: default
 strategy: ddp
 static_graph: true
 num_devices: null
-device_id: 0
 sparse_top_k: 4096
 sparse_min_weight: 0.0
 
 k_list: [1, 5, 10, 50, 100]
 save_run: false
 run_path: null
+# Optional: set to a Hugging Face model repo ID or local path to use HF weights.
+hf_model_path: null
 checkpoint_path: null
 use_checkpoint_config: true

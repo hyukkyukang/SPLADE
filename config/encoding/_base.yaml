@@ -13,7 +13,6 @@ use_cpu: false
 strategy: ddp
 static_graph: true
 num_devices: null
-device_id: 0
 
 checkpoint_path: null
 # Directories for saving encoded shards and index.

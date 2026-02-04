@@ -56,12 +56,7 @@ def get_gpu_trainer_kwargs(cfg_section: DictConfig) -> dict[str, Any]:
     elif strategy_name == "deepspeed":
         kwargs["strategy"] = DeepSpeedStrategy()
     elif strategy_name == "single":
-        device_id: int = int(cfg_section.device_id)
-        kwargs = {
-            "accelerator": "cuda",
-            "devices": [device_id],
-            "strategy": "auto",
-        }
+        kwargs = {"accelerator": "cuda", "devices": 1, "strategy": "auto"}
     else:
         raise ValueError(f"Invalid GPU strategy: {strategy_name}")
 

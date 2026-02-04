@@ -51,12 +51,7 @@ class RetrievalDataModule(L.LightningDataModule):
             if torch.distributed.is_available() and torch.distributed.is_initialized()
             else None
         )
-        per_device_batch_size: int | None = self.cfg.testing.per_device_batch_size
-        batch_size: int = int(
-            per_device_batch_size
-            if per_device_batch_size is not None
-            else self.cfg.testing.batch_size
-        )
+        batch_size: int = int(self.cfg.testing.batch_size)
         dataloader_kwargs: dict[str, Any] = {
             "dataset": self.dataset,
             "batch_size": batch_size,

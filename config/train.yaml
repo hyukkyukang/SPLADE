@@ -34,7 +34,6 @@ nanobeir:
   datasets: [msmarco, nfcorpus, nq]
   batch_size: ${testing.batch_size}
   use_cpu: ${training.use_cpu}
-  device_id: ${training.device_id}
   cache_dir: null
   save_json: true
 

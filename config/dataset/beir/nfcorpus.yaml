@@ -1,6 +1,6 @@
 # @package dataset
 defaults:
-  - _base@_here_
+  - /dataset/beir/_base@_here_
 
-name: beir_nfcorpus
+name: nfcorpus
 beir_dataset: nfcorpus

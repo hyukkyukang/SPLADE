@@ -23,6 +23,12 @@ hf_data_files: null
 query_corpus_hf_name: null
 query_corpus_hf_cache_dir: null
 query_corpus_hf_data_files: null
+qrels_hf_name: null
+qrels_hf_subset: null
+qrels_hf_split: null
+qrels_hf_cache_dir: null
+qrels_hf_data_files: null
+load_corpus_in_memory: false
 local_triplets_dir: null
 
 # Column names for query/corpus datasets.

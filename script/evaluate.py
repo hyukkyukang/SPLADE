@@ -42,7 +42,7 @@ from src.utils.trainer import (
 logger: logging.Logger = get_logger(__name__, __file__)
 
 configure_script_environment(
-    load_env=False,
+    load_env=True,
     set_tokenizers_parallelism=True,
     set_matmul_precision=True,
     suppress_lightning_tips=True,
@@ -57,11 +57,8 @@ def _resolve_device(cfg: DictConfig) -> torch.device:
     if use_cpu:
         return torch.device("cpu")
 
-    device_id: int | None = cfg.testing.device_id
     if torch.cuda.is_available():
-        if device_id is None:
-            return torch.device("cuda")
-        return torch.device(f"cuda:{int(device_id)}")
+        return torch.device("cuda")
     return torch.device("cpu")
 
 
@@ -72,6 +69,42 @@ def _initialize_run(cfg: DictConfig, *, suppress_lightning_tips: bool) -> None:
     os.makedirs(cfg.log_dir, exist_ok=True)
     set_seed(cfg.seed)
     log_if_rank_zero(logger, f"Random seed set to: {cfg.seed}")
+
+
+def _normalize_optional_path(value: Any) -> str | None:
+    if value is None:
+        return None
+    text: str = str(value).strip()
+    return text if text else None
+
+
+def _resolve_model_source(cfg: DictConfig) -> DictConfig:
+    testing_cfg: DictConfig = cfg.testing
+    hf_model_path: str | None = _normalize_optional_path(
+        getattr(testing_cfg, "hf_model_path", None)
+    )
+    checkpoint_path: str | None = _normalize_optional_path(
+        getattr(testing_cfg, "checkpoint_path", None)
+    )
+
+    if hf_model_path:
+        if checkpoint_path:
+            raise ValueError(
+                "Provide either testing.hf_model_path or "
+                "testing.checkpoint_path, not both."
+            )
+        cfg.model.huggingface_name = hf_model_path
+        if hasattr(cfg, "nanobeir"):
+            cfg.nanobeir.use_huggingface_model = True
+        log_if_rank_zero(logger, f"Using Hugging Face model: {hf_model_path}")
+        return cfg
+
+    if not checkpoint_path:
+        raise ValueError(
+            "testing.checkpoint_path must be set unless "
+            "testing.hf_model_path is provided."
+        )
+    return cfg
 
 
 def _run_standard_eval(cfg: DictConfig) -> None:
@@ -111,30 +144,28 @@ def _run_standard_eval(cfg: DictConfig) -> None:
         **trainer_kwargs,
     )
 
-    results: list[dict[str, float]] = trainer.test(
-        model=eval_module, datamodule=data_module
-    )
-    if results:
-        metrics: dict[str, float] = results[0]
-        for name, value in metrics.items():
-            log_if_rank_zero(
-                logger,
-                f"{str(cfg.dataset.name)} {name}: {value:.4f}",
-            )
+    trainer.test(model=eval_module, datamodule=data_module)
 
 
 def _run_nanobeir_eval(cfg: DictConfig) -> None:
     _initialize_run(cfg, suppress_lightning_tips=False)
 
-    checkpoint_path_value: str | None = cfg.testing.checkpoint_path
-    if not checkpoint_path_value:
-        raise ValueError("testing.checkpoint_path must be set for NanoBEIR eval.")
-    checkpoint_path: str = str(checkpoint_path_value)
-    cfg = apply_checkpoint_model_config(
-        cfg,
-        checkpoint_path=checkpoint_path,
-        logger=logger,
+    checkpoint_path_value: str | None = _normalize_optional_path(
+        cfg.testing.checkpoint_path
     )
+    use_huggingface_model: bool = bool(cfg.nanobeir.use_huggingface_model)
+    if not checkpoint_path_value and not use_huggingface_model:
+        raise ValueError(
+            "testing.checkpoint_path must be set for NanoBEIR eval "
+            "unless nanobeir.use_huggingface_model=true."
+        )
+    if checkpoint_path_value and not use_huggingface_model:
+        checkpoint_path: str = str(checkpoint_path_value)
+        cfg = apply_checkpoint_model_config(
+            cfg,
+            checkpoint_path=checkpoint_path,
+            logger=logger,
+        )
 
     # Normalize dataset names to strings for the evaluator.
     dataset_names: list[str] = []
@@ -146,13 +177,11 @@ def _run_nanobeir_eval(cfg: DictConfig) -> None:
 
     batch_size: int = int(cfg.nanobeir.batch_size)
     save_json: bool = bool(cfg.nanobeir.save_json)
-    use_huggingface_model: bool = bool(cfg.nanobeir.use_huggingface_model)
 
     # Resolve device before model instantiation to keep tensors aligned.
     device: torch.device = _resolve_device(cfg)
     log_if_rank_zero(logger, f"Using device: {device}")
 
-    checkpoint_path_value: str | None = cfg.testing.checkpoint_path
     sparse_encoder: SparseEncoder
     if use_huggingface_model:
         # Build from Hugging Face weights when no checkpoint override is desired.
@@ -178,37 +207,37 @@ def _run_nanobeir_eval(cfg: DictConfig) -> None:
             )
         checkpoint_path = str(checkpoint_path_value)
 
-    doc_only_enabled: bool = (
-        bool(cfg.model.doc_only) if hasattr(cfg.model, "doc_only") else False
-    )
-    if doc_only_enabled:
-        model: Any = build_splade_model(cfg, use_cpu=cfg.testing.use_cpu)
-        missing: list[str]
-        unexpected: list[str]
-        missing, unexpected = load_splade_checkpoint(
-            model, checkpoint_path, logger=logger
+        doc_only_enabled: bool = (
+            bool(cfg.model.doc_only) if hasattr(cfg.model, "doc_only") else False
         )
-        log_if_rank_zero(
-            logger,
-            f"Loaded checkpoint. Missing: {len(missing)}, unexpected: {len(unexpected)}",
-        )
-        sparse_encoder = build_doc_only_sparse_encoder_adapter(
-            cfg=cfg,
-            model=model,
-            device=device,
-            batch_size=batch_size,
-        )
-    else:
-        compatible: bool
-        reason: str | None
-        compatible, reason = resolve_nanobeir_compatibility(cfg)
-        if not compatible:
-            raise ValueError(f"NanoBEIR evaluation incompatible: {reason}")
+        if doc_only_enabled:
+            model: Any = build_splade_model(cfg, use_cpu=cfg.testing.use_cpu)
+            missing: list[str]
+            unexpected: list[str]
+            missing, unexpected = load_splade_checkpoint(
+                model, checkpoint_path, logger=logger
+            )
+            log_if_rank_zero(
+                logger,
+                f"Loaded checkpoint. Missing: {len(missing)}, unexpected: {len(unexpected)}",
+            )
+            sparse_encoder = build_doc_only_sparse_encoder_adapter(
+                cfg=cfg,
+                model=model,
+                device=device,
+                batch_size=batch_size,
+            )
+        else:
+            compatible: bool
+            reason: str | None
+            compatible, reason = resolve_nanobeir_compatibility(cfg)
+            if not compatible:
+                raise ValueError(f"NanoBEIR evaluation incompatible: {reason}")
 
-        # Convert the Lightning checkpoint into a SparseEncoder for NanoBEIR.
-        sparse_encoder = build_sparse_encoder_from_checkpoint(
-            cfg=cfg, checkpoint_path=checkpoint_path, device=device
-        )
+            # Convert the Lightning checkpoint into a SparseEncoder for NanoBEIR.
+            sparse_encoder = build_sparse_encoder_from_checkpoint(
+                cfg=cfg, checkpoint_path=checkpoint_path, device=device
+            )
 
     # Run NanoBEIR proxy evaluation and collect metrics.
     evaluator: SparseNanoBEIREvaluator = SparseNanoBEIREvaluator(
@@ -272,10 +301,12 @@ def _is_nanobeir_run(cfg: DictConfig) -> bool:
 
 @hydra.main(version_base=None, config_path=ABS_CONFIG_DIR, config_name="evaluate")
 def main(cfg: DictConfig) -> None:
+    cfg = _resolve_model_source(cfg)
     if _is_nanobeir_run(cfg):
         _run_nanobeir_eval(cfg)
     else:
         _run_standard_eval(cfg)
+    log_if_rank_zero(logger, "Evaluation complete")
 
 
 if __name__ == "__main__":

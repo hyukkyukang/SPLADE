@@ -1,0 +1,14 @@
+# @package dataset
+defaults:
+  - /dataset/_base@_here_
+
+name: hyukkyu_msmarco
+type: beir
+
+hf_name: Hyukkyu/beir-msmarco
+hf_subset: null
+split: train
+
+qrels_hf_name: Hyukkyu/beir-msmarco-qrels
+qrels_hf_subset: null
+qrels_hf_split: validation

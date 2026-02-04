@@ -2,10 +2,11 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator, Sequence
 
 import hydra
 import numpy as np
+from tqdm.auto import tqdm
 from omegaconf import DictConfig
 
 from config.path import ABS_CONFIG_DIR
@@ -31,6 +32,25 @@ configure_script_environment(
 )
 
 
+class _ShardProgress(Sequence[ShardInfo]):
+    """Iterable wrapper that shows progress for each shard pass."""
+
+    def __init__(
+        self, shards: Sequence[ShardInfo], *, desc: str = "Indexing shards"
+    ) -> None:
+        self._shards: list[ShardInfo] = list(shards)
+        self._desc: str = desc
+
+    def __iter__(self) -> Iterator[ShardInfo]:
+        return iter(tqdm(self._shards, desc=self._desc, unit="shard"))
+
+    def __len__(self) -> int:
+        return len(self._shards)
+
+    def __getitem__(self, idx: int) -> ShardInfo:
+        return self._shards[idx]
+
+
 @hydra.main(version_base=None, config_path=ABS_CONFIG_DIR, config_name="encode")
 def main(cfg: DictConfig) -> None:
     os.makedirs(cfg.log_dir, exist_ok=True)
@@ -52,9 +72,10 @@ def main(cfg: DictConfig) -> None:
     )
     index_path.mkdir(parents=True, exist_ok=True)
 
-    shard_infos: list[ShardInfo]
+    shard_infos: Sequence[ShardInfo]
     metadata: dict[str, Any]
     shard_infos, metadata = load_shard_manifest(encode_path)
+    shard_infos = _ShardProgress(shard_infos)
     vocab_size: int | None = None
     if metadata.get("vocab_size") is not None:
         vocab_size = int(metadata["vocab_size"])
