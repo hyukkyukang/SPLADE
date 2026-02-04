@@ -37,6 +37,20 @@ def _dynamo_disable(fn: _TCallable) -> _TCallable:
     return fn
 
 
+def _resolve_cudagraph_mark_step() -> Callable[[], None] | None:
+    if not hasattr(torch, "compiler"):
+        return None
+    compiler_mod = torch.compiler
+    if not hasattr(compiler_mod, "cudagraph_mark_step_begin"):
+        return None
+    mark_step_fn = compiler_mod.cudagraph_mark_step_begin
+    return mark_step_fn if callable(mark_step_fn) else None
+
+
+def _build_compile_kwargs(mode: str) -> dict[str, Any]:
+    return {"mode": mode}
+
+
 class SPLADETrainingModule(L.LightningModule):
     def __init__(self, cfg: DictConfig) -> None:
         super().__init__()
@@ -50,26 +64,10 @@ class SPLADETrainingModule(L.LightningModule):
         self.model: SpladeModel = build_splade_model(cfg, use_cpu=cfg.training.use_cpu)
         # Transformers from_pretrained defaults to eval; ensure training mode here.
         self.model.train()
-        compile_enabled: bool = bool(cfg.training.torch_compile)
+        self._doc_only_flag: bool = bool(self.model.doc_only)
         # Loss compilation is optional to avoid fragile Inductor/Triton paths.
         compile_loss: bool = bool(cfg.training.torch_compile_loss)
-        compile_available: bool = hasattr(torch, "compile")
-        if compile_enabled and not compile_available:
-            log_if_rank_zero(
-                logger,
-                "torch.compile is not available in this PyTorch build; continuing "
-                "without compilation.",
-                level="warning",
-            )
-        if compile_enabled and compile_available:
-            encoder_module: torch.nn.Module | None = (
-                self.model.encoder if hasattr(self.model, "encoder") else None
-            )
-            # Compile only the encoder to keep Lightning bookkeeping eager.
-            if encoder_module is not None:
-                self.model.encoder = torch.compile(encoder_module)
-            else:
-                self.model = torch.compile(self.model)
+        compile_mode_kwargs: dict[str, Any] = self._setup_torch_compile(cfg)
 
         self.temperature: float = float(cfg.training.temperature)
         self.distill_cfg: DictConfig = cfg.training.distill
@@ -97,13 +95,62 @@ class SPLADETrainingModule(L.LightningModule):
             reg_type=str(self.reg_cfg.type),
             reg_paper_faithful=bool(self.reg_cfg.paper_faithful),
         )
-        if compile_enabled and compile_available and compile_loss:
-            self.loss_computer = torch.compile(self.loss_computer)
+        if self._torch_compile_enabled and compile_loss:
+            self.loss_computer = torch.compile(
+                self.loss_computer, **compile_mode_kwargs
+            )
+        self._setup_eval_metrics(cfg)
 
-        self.val_metrics_cfg: DictConfig = cfg.training.validation_metrics
-        self.val_metrics_enabled: bool = bool(self.val_metrics_cfg.enabled)
-        self._val_query_offset: int = 0
-        self.val_metric_collection: RetrievalMetrics | None = None
+    def _setup_torch_compile(self, cfg: DictConfig) -> dict[str, Any]:
+        compile_enabled: bool = bool(cfg.training.torch_compile)
+        compile_available: bool = hasattr(torch, "compile")
+        self._torch_compile_enabled: bool = compile_enabled and compile_available
+        self._torch_compile_mark_step: Any | None = None
+        self._torch_compile_full_model: bool = False
+        if compile_enabled and not compile_available:
+            log_if_rank_zero(
+                logger,
+                "torch.compile is not available in this PyTorch build; continuing "
+                "without compilation.",
+                level="warning",
+            )
+            return {}
+        if not compile_enabled or not compile_available:
+            return {}
+        compile_mode_value: Any = cfg.training.torch_compile_mode
+        compile_mode: str = str(compile_mode_value).lower()
+        valid_compile_modes: set[str] = {
+            "default",
+            "reduce-overhead",
+            "max-autotune",
+        }
+        if compile_mode not in valid_compile_modes:
+            raise ValueError(
+                "Unsupported torch.compile mode: "
+                f"{compile_mode_value!r}. Expected one of "
+                f"{sorted(valid_compile_modes)}."
+            )
+        compile_mode_kwargs: dict[str, Any] = _build_compile_kwargs(compile_mode)
+        if compile_mode in {"reduce-overhead", "max-autotune"}:
+            self._torch_compile_mark_step = _resolve_cudagraph_mark_step()
+            # Compile the full model to avoid multi-call cudagraph overwrites.
+            self.model = torch.compile(self.model, **compile_mode_kwargs)
+            self._torch_compile_full_model = True
+            return compile_mode_kwargs
+        # Compile only the encoder wrappers to keep Lightning bookkeeping eager.
+        query_wrapper: torch.nn.Module = self.model._query_encoder_wrapper
+        doc_wrapper: torch.nn.Module = self.model._doc_encoder_wrapper
+        query_encoder = torch.compile(query_wrapper, **compile_mode_kwargs)
+        doc_encoder = torch.compile(doc_wrapper, **compile_mode_kwargs)
+        self.model._query_encoder_fn = query_encoder
+        self.model._doc_encoder_fn = doc_encoder
+        return compile_mode_kwargs
+
+    def _setup_eval_metrics(self, cfg: DictConfig) -> None:
+        self.val_metrics_cfg = cfg.training.validation_metrics
+        self.val_metrics_enabled = bool(self.val_metrics_cfg.enabled)
+        self._val_query_offset = 0
+        self.val_metric_collection = None
         if self.val_metrics_enabled:
             k_list: list[int] = resolve_k_list(self.val_metrics_cfg.k_list)
             self.val_metric_collection = RetrievalMetrics(
@@ -113,39 +160,29 @@ class SPLADETrainingModule(L.LightningModule):
             )
 
         nanobeir_cfg: DictConfig = cfg.nanobeir
-        self.nanobeir_enabled: bool = bool(nanobeir_cfg.enabled)
-        self.nanobeir_run_every_n_val: int = int(nanobeir_cfg.run_every_n_val)
-        self.nanobeir_batch_size: int = int(nanobeir_cfg.batch_size)
-        self.nanobeir_save_json: bool = bool(nanobeir_cfg.save_json)
-        self.nanobeir_dataset_names: list[str] = []
-        self.nanobeir_use_cpu: bool = bool(nanobeir_cfg.use_cpu)
+        self.nanobeir_enabled = bool(nanobeir_cfg.enabled)
+        self.nanobeir_run_every_n_val = int(nanobeir_cfg.run_every_n_val)
+        self.nanobeir_batch_size = int(nanobeir_cfg.batch_size)
+        self.nanobeir_save_json = bool(nanobeir_cfg.save_json)
+        self.nanobeir_dataset_names = [str(name) for name in nanobeir_cfg.datasets]
+        self.nanobeir_use_cpu = bool(nanobeir_cfg.use_cpu)
         base_device_id: int | None = cfg.training.device_id
-        self.nanobeir_device_id: int | None = (
+        self.nanobeir_device_id = (
             None if base_device_id is None else int(base_device_id)
         )
-        self._nanobeir_val_counter: int = 0
-        self._nanobeir_cache: SparseEncoderCache | None = None
-        self._nanobeir_cache_device: torch.device | None = None
-        self._nanobeir_doc_only_encoder: DocOnlySparseEncoderAdapter | None = None
-        self._nanobeir_doc_only_device: torch.device | None = None
-        self._nanobeir_evaluator: SparseNanoBEIREvaluator | None = None
-        self._nanobeir_evaluator_datasets: list[str] = []
-        self._nanobeir_evaluator_batch_size: int = int(self.nanobeir_batch_size)
+        self._nanobeir_val_counter = 0
+        self._nanobeir_cache = None
+        self._nanobeir_cache_device = None
+        self._nanobeir_doc_only_encoder = None
+        self._nanobeir_doc_only_device = None
+        self._nanobeir_evaluator = None
+        self._nanobeir_evaluator_datasets = []
+        self._nanobeir_evaluator_batch_size = int(self.nanobeir_batch_size)
         device_id_value: int | None = nanobeir_cfg.device_id
         self.nanobeir_device_id = (
             None if device_id_value is None else int(device_id_value)
         )
-        dataset_name: str
-        dataset_names: list[str] = []
-        for dataset_name in nanobeir_cfg.datasets:
-            dataset_names.append(str(dataset_name))
-        self.nanobeir_dataset_names = dataset_names
-
-        self._nanobeir_evaluator_batch_size = int(self.nanobeir_batch_size)
-
-        self.doc_only_enabled: bool = (
-            bool(self.model.doc_only) if hasattr(self.model, "doc_only") else False
-        )
+        self.doc_only_enabled = bool(self._doc_only_flag)
 
         if self.nanobeir_enabled and not self.doc_only_enabled:
             compatible: bool
@@ -191,9 +228,6 @@ class SPLADETrainingModule(L.LightningModule):
         dict[str, torch.Tensor]
         | tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]
     ):
-        q_reps: torch.Tensor = self.model.encode_queries(
-            batch["query_input_ids"], batch["query_attention_mask"]
-        )
         doc_input_ids: torch.Tensor = batch["doc_input_ids"]
         doc_attention_mask: torch.Tensor = batch["doc_attention_mask"]
 
@@ -204,7 +238,27 @@ class SPLADETrainingModule(L.LightningModule):
         flat_docs: torch.Tensor = doc_input_ids.view(bsz * doc_count, seq_len)
         flat_masks: torch.Tensor = doc_attention_mask.view(bsz * doc_count, seq_len)
 
-        flat_doc_reps: torch.Tensor = self.model.encode_docs(flat_docs, flat_masks)
+        q_reps: torch.Tensor
+        flat_doc_reps: torch.Tensor
+        if self._torch_compile_full_model:
+            if self._torch_compile_mark_step is not None:
+                self._torch_compile_mark_step()
+            q_reps, flat_doc_reps = self.model(
+                batch["query_input_ids"],
+                batch["query_attention_mask"],
+                flat_docs,
+                flat_masks,
+            )
+        else:
+            if self._torch_compile_mark_step is not None:
+                self._torch_compile_mark_step()
+            q_reps = self.model.encode_queries(
+                batch["query_input_ids"], batch["query_attention_mask"]
+            )
+            if self._torch_compile_mark_step is not None:
+                self._torch_compile_mark_step()
+            flat_doc_reps = self.model.encode_docs(flat_docs, flat_masks)
+
         doc_reps: torch.Tensor = flat_doc_reps.view(bsz, doc_count, -1)
 
         pos_mask: torch.Tensor = batch["pos_mask"]

@@ -84,7 +84,7 @@ def _build_progress_bar(training_cfg: DictConfig) -> RichProgressBar | None:
     progress_cfg: DictConfig | None = training_cfg.get("progress_bar")
     if progress_cfg is None or not bool(progress_cfg.enabled):
         return None
-    refresh_rate_value: int = int(progress_cfg.refresh_rate)
+    refresh_rate_value: float = float(progress_cfg.refresh_rate)
     return RichProgressBar(refresh_rate=refresh_rate_value)
 
 

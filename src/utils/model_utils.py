@@ -26,7 +26,7 @@ def build_splade_model(cfg: DictConfig, *, use_cpu: bool) -> SpladeModel:
     dtype: torch.dtype | None = resolve_model_dtype(cfg.model.dtype, use_cpu)
     # Detect SPLADE-doc mode via explicit flag or config name suffix.
     name_value: str = str(cfg.model.name).lower()
-    doc_only_flag: bool = bool(getattr(cfg.model, "doc_only", False))
+    doc_only_flag: bool = bool(cfg.model.doc_only)
     doc_only: bool = doc_only_flag or name_value.endswith(("_doc", "-doc"))
     return SpladeModel(
         model_name=cfg.model.huggingface_name,

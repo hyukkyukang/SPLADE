@@ -28,7 +28,15 @@ def log_if_rank_zero(logger: logging.Logger, message: str, level: str = "info") 
         >>> log_if_rank_zero(logger, "Training started")
         >>> log_if_rank_zero(logger, "Missing config", level="warning")
     """
-    getattr(logger, level)(message)
+    level_name: str = str(level).lower()
+    level_map: dict[str, int] = {
+        "debug": logging.DEBUG,
+        "info": logging.INFO,
+        "warning": logging.WARNING,
+        "error": logging.ERROR,
+        "critical": logging.CRITICAL,
+    }
+    logger.log(level_map.get(level_name, logging.INFO), message)
 
 
 def get_global_rank() -> int:

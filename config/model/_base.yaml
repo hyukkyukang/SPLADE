@@ -1,5 +1,5 @@
 name: splade
-huggingface_name: bert-base-uncased
+huggingface_name: distilbert-base-uncased
 huggingface_model_class: AutoModelForMaskedLM
 
 # encoder settings

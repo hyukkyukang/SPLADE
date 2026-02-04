@@ -102,6 +102,20 @@ class SpladeEncoder(nn.Module):
         return embeddings
 
 
+class _SpladeEncoderWrapper(nn.Module):
+    def __init__(self, encoder: SpladeEncoder, pooling_mode: torch.Tensor) -> None:
+        super().__init__()
+        self.encoder = encoder
+        self.register_buffer("_pooling_mode", pooling_mode, persistent=False)
+
+    def forward(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+        return self.encoder(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            pooling_mode=self._pooling_mode,
+        )
+
+
 class SpladeModel(nn.Module):
     # --- Special methods ---
     def __init__(
@@ -137,6 +151,14 @@ class SpladeModel(nn.Module):
             torch.tensor(self._resolve_pooling_mode(doc_pooling)),
             persistent=False,
         )
+        self._query_encoder_wrapper: _SpladeEncoderWrapper = _SpladeEncoderWrapper(
+            self.encoder, self._query_pooling_mode
+        )
+        self._doc_encoder_wrapper: _SpladeEncoderWrapper = _SpladeEncoderWrapper(
+            self.encoder, self._doc_pooling_mode
+        )
+        self._query_encoder_fn: Callable[..., torch.Tensor] = self._query_encoder_wrapper
+        self._doc_encoder_fn: Callable[..., torch.Tensor] = self._doc_encoder_wrapper
         self.normalize: bool = normalize
         self.doc_only: bool = bool(doc_only)
         exclude_token_ids: torch.Tensor = self._build_query_exclude_token_ids()
@@ -165,18 +187,44 @@ class SpladeModel(nn.Module):
         """Collect special token IDs to exclude from query bag-of-words."""
         config: Any = self.encoder.mlm.config
         candidate_ids: list[int] = []
-        attr_name: str
-        for attr_name in (
-            "pad_token_id",
-            "cls_token_id",
-            "sep_token_id",
-            "bos_token_id",
-            "eos_token_id",
-        ):
-            value: Any = getattr(config, attr_name, None)
-            if value is None:
-                continue
+        try:
+            value: Any = config.pad_token_id
+        except AttributeError:
+            value = None
+        if value is not None:
             token_id: int = int(value)
+            if token_id >= 0:
+                candidate_ids.append(token_id)
+        try:
+            value = config.cls_token_id
+        except AttributeError:
+            value = None
+        if value is not None:
+            token_id = int(value)
+            if token_id >= 0:
+                candidate_ids.append(token_id)
+        try:
+            value = config.sep_token_id
+        except AttributeError:
+            value = None
+        if value is not None:
+            token_id = int(value)
+            if token_id >= 0:
+                candidate_ids.append(token_id)
+        try:
+            value = config.bos_token_id
+        except AttributeError:
+            value = None
+        if value is not None:
+            token_id = int(value)
+            if token_id >= 0:
+                candidate_ids.append(token_id)
+        try:
+            value = config.eos_token_id
+        except AttributeError:
+            value = None
+        if value is not None:
+            token_id = int(value)
             if token_id >= 0:
                 candidate_ids.append(token_id)
         unique_ids: list[int] = sorted(set(candidate_ids))
@@ -220,10 +268,8 @@ class SpladeModel(nn.Module):
         self, input_ids: torch.Tensor, attention_mask: torch.Tensor
     ) -> torch.Tensor:
         """Encode queries using the MLM-based SPLADE encoder."""
-        embeddings: torch.Tensor = self.encoder(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            pooling_mode=self._query_pooling_mode,
+        embeddings: torch.Tensor = self._query_encoder_fn(
+            input_ids=input_ids, attention_mask=attention_mask
         )
         return embeddings
 
@@ -239,10 +285,8 @@ class SpladeModel(nn.Module):
     def encode_docs(
         self, input_ids: torch.Tensor, attention_mask: torch.Tensor
     ) -> torch.Tensor:
-        embeddings: torch.Tensor = self.encoder(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            pooling_mode=self._doc_pooling_mode,
+        embeddings: torch.Tensor = self._doc_encoder_fn(
+            input_ids=input_ids, attention_mask=attention_mask
         )
         if self.normalize:
             embeddings = F.normalize(embeddings, p=2, dim=-1)

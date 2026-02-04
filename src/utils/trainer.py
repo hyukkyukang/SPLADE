@@ -10,7 +10,7 @@ DDP_TIMEOUT_HOURS: int = 1
 
 def _resolve_static_graph(cfg_section: DictConfig) -> bool:
     """Disable static_graph when gradient accumulation uses no_sync."""
-    grad_accumulation: int = int(getattr(cfg_section, "grad_accumulation", 1))
+    grad_accumulation: int = int(cfg_section.grad_accumulation)
     # Some PyTorch versions assert in DDP when no_sync is used with static graphs.
     return grad_accumulation <= 1
 

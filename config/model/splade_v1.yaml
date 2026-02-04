@@ -3,6 +3,7 @@ defaults:
   - _base
 
 name: splade_v1
+huggingface_name: bert-base-uncased
 query_pooling: sum
 doc_pooling: sum
 sparse_activation: log1p_relu
