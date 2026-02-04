@@ -50,6 +50,42 @@ def _strip_checkpoint_prefix(key: str, prefixes: Sequence[str]) -> str | None:
     return None
 
 
+def _strip_compiled_wrapper_segments(key: str) -> str:
+    """Remove torch.compile wrapper segments from a state dict key."""
+    # Handle nested optimized modules like encoder._orig_mod.(module.)*
+    cleaned: str = key.replace("._orig_mod.module.", ".")
+    cleaned = cleaned.replace("._orig_mod.", ".")
+    return cleaned
+
+
+def _expand_splade_encoder_aliases(state_dict: dict[str, Any]) -> dict[str, Any]:
+    """Ensure encoder weights are available under wrapper aliases."""
+    prefixes: tuple[str, ...] = (
+        "encoder.",
+        "_query_encoder_wrapper.encoder.",
+        "_doc_encoder_wrapper.encoder.",
+        "_query_encoder_fn.encoder.",
+        "_doc_encoder_fn.encoder.",
+    )
+    suffix_values: dict[str, Any] = {}
+    for key, value in state_dict.items():
+        for prefix in prefixes:
+            if key.startswith(prefix):
+                suffix: str = key[len(prefix) :]
+                if suffix not in suffix_values:
+                    suffix_values[suffix] = value
+                break
+    if not suffix_values:
+        return state_dict
+    expanded: dict[str, Any] = dict(state_dict)
+    for suffix, value in suffix_values.items():
+        for prefix in prefixes:
+            alias_key: str = prefix + suffix
+            if alias_key not in expanded:
+                expanded[alias_key] = value
+    return expanded
+
+
 def _normalize_checkpoint_state_dict(state_dict: dict[str, Any]) -> dict[str, Any]:
     prefixes: tuple[str, ...] = (
         "model._orig_mod.module.",
@@ -62,8 +98,20 @@ def _normalize_checkpoint_state_dict(state_dict: dict[str, Any]) -> dict[str, An
         stripped = _strip_checkpoint_prefix(key, prefixes)
         if stripped is None:
             continue
-        normalized[stripped] = value
-    return normalized or state_dict
+        normalized[_strip_compiled_wrapper_segments(stripped)] = value
+    if normalized:
+        return _expand_splade_encoder_aliases(normalized)
+
+    # Fall back to raw model state_dict, but clean compiled wrapper segments.
+    cleaned: dict[str, Any] = {}
+    changed: bool = False
+    for key, value in state_dict.items():
+        cleaned_key: str = _strip_compiled_wrapper_segments(key)
+        if cleaned_key != key:
+            changed = True
+        cleaned[cleaned_key] = value
+    cleaned_or_original: dict[str, Any] = cleaned if changed else state_dict
+    return _expand_splade_encoder_aliases(cleaned_or_original)
 
 
 def load_splade_checkpoint(

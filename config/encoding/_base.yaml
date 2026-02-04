@@ -2,7 +2,7 @@
 name: encoding_base
 
 batch_size: 512
-num_workers: 32
+num_workers: 10
 prefetch_factor: 4
 max_padding: true
 
