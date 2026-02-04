@@ -7,8 +7,8 @@ import lightning as L
 from omegaconf import DictConfig
 
 from config.path import ABS_CONFIG_DIR
-from src.data.module.eval import EvalDataModule
-from src.model.module.eval import SPLADEEvaluationModule
+from src.data.pl_module import RerankingDataModule, RetrievalDataModule
+from src.model.pl_module import RerankingLightningModule, RetrievalLightningModule
 from src.utils import log_if_rank_zero, set_seed
 from src.utils.logging import (
     get_logger,
@@ -40,9 +40,18 @@ def main(cfg: DictConfig) -> None:
     set_seed(cfg.seed)
     log_if_rank_zero(logger, f"Random seed set to: {cfg.seed}")
 
-    eval_module: SPLADEEvaluationModule = SPLADEEvaluationModule(cfg=cfg)
+    eval_type: str = str(cfg.evaluation.type).lower()
+    eval_module: L.LightningModule
+    data_module: L.LightningDataModule
+    if eval_type == "retrieval":
+        eval_module = RetrievalLightningModule(cfg=cfg)
+        data_module = RetrievalDataModule(cfg=cfg)
+    elif eval_type == "reranking":
+        eval_module = RerankingLightningModule(cfg=cfg)
+        data_module = RerankingDataModule(cfg=cfg)
+    else:
+        raise ValueError(f"Unsupported evaluation.type: {eval_type}")
     eval_module.eval()
-    data_module: EvalDataModule = EvalDataModule(cfg=cfg)
 
     testing_cfg: DictConfig = cfg.testing
     trainer_kwargs: dict[str, Any] = (

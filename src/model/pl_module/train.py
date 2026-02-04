@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import json
 import logging
 import os
@@ -31,7 +29,9 @@ _TCallable = TypeVar("_TCallable", bound=Callable[..., Any])
 
 def _dynamo_disable(fn: _TCallable) -> _TCallable:
     """Keep logging helpers out of torch.compile graphs."""
-    disable_fn: Any = getattr(getattr(torch, "_dynamo", None), "disable", None)
+    disable_fn: Any | None = None
+    if hasattr(torch, "_dynamo") and hasattr(torch._dynamo, "disable"):
+        disable_fn = torch._dynamo.disable
     if callable(disable_fn):
         return cast(_TCallable, disable_fn(fn))
     return fn
@@ -62,8 +62,8 @@ class SPLADETrainingModule(L.LightningModule):
                 level="warning",
             )
         if compile_enabled and compile_available:
-            encoder_module: torch.nn.Module | None = getattr(
-                self.model, "encoder", None
+            encoder_module: torch.nn.Module | None = (
+                self.model.encoder if hasattr(self.model, "encoder") else None
             )
             # Compile only the encoder to keep Lightning bookkeeping eager.
             if encoder_module is not None:
@@ -112,13 +112,13 @@ class SPLADETrainingModule(L.LightningModule):
                 sync_on_compute=False,
             )
 
-        nanobeir_cfg: DictConfig | None = getattr(cfg, "nanobeir", None)
-        self.nanobeir_enabled: bool = False
-        self.nanobeir_run_every_n_val: int = 1
-        self.nanobeir_batch_size: int = int(cfg.testing.batch_size)
-        self.nanobeir_save_json: bool = False
+        nanobeir_cfg: DictConfig = cfg.nanobeir
+        self.nanobeir_enabled: bool = bool(nanobeir_cfg.enabled)
+        self.nanobeir_run_every_n_val: int = int(nanobeir_cfg.run_every_n_val)
+        self.nanobeir_batch_size: int = int(nanobeir_cfg.batch_size)
+        self.nanobeir_save_json: bool = bool(nanobeir_cfg.save_json)
         self.nanobeir_dataset_names: list[str] = []
-        self.nanobeir_use_cpu: bool = bool(cfg.training.use_cpu)
+        self.nanobeir_use_cpu: bool = bool(nanobeir_cfg.use_cpu)
         base_device_id: int | None = cfg.training.device_id
         self.nanobeir_device_id: int | None = (
             None if base_device_id is None else int(base_device_id)
@@ -131,32 +131,21 @@ class SPLADETrainingModule(L.LightningModule):
         self._nanobeir_evaluator: SparseNanoBEIREvaluator | None = None
         self._nanobeir_evaluator_datasets: list[str] = []
         self._nanobeir_evaluator_batch_size: int = int(self.nanobeir_batch_size)
-        if nanobeir_cfg is not None:
-            self.nanobeir_enabled = bool(nanobeir_cfg.enabled)
-            run_every_val_value: int = int(nanobeir_cfg.run_every_n_val)
-            self.nanobeir_run_every_n_val = run_every_val_value
-            batch_size_value: int = int(nanobeir_cfg.batch_size)
-            self.nanobeir_batch_size = batch_size_value
-            self.nanobeir_save_json = bool(nanobeir_cfg.save_json)
-            use_cpu_value: bool = bool(
-                getattr(nanobeir_cfg, "use_cpu", self.nanobeir_use_cpu)
-            )
-            self.nanobeir_use_cpu = use_cpu_value
-            device_id_value: int | None = getattr(
-                nanobeir_cfg, "device_id", self.nanobeir_device_id
-            )
-            self.nanobeir_device_id = (
-                None if device_id_value is None else int(device_id_value)
-            )
-            dataset_name: str
-            dataset_names: list[str] = []
-            for dataset_name in nanobeir_cfg.datasets:
-                dataset_names.append(str(dataset_name))
-            self.nanobeir_dataset_names = dataset_names
+        device_id_value: int | None = nanobeir_cfg.device_id
+        self.nanobeir_device_id = (
+            None if device_id_value is None else int(device_id_value)
+        )
+        dataset_name: str
+        dataset_names: list[str] = []
+        for dataset_name in nanobeir_cfg.datasets:
+            dataset_names.append(str(dataset_name))
+        self.nanobeir_dataset_names = dataset_names
 
         self._nanobeir_evaluator_batch_size = int(self.nanobeir_batch_size)
 
-        self.doc_only_enabled: bool = bool(getattr(self.model, "doc_only", False))
+        self.doc_only_enabled: bool = (
+            bool(self.model.doc_only) if hasattr(self.model, "doc_only") else False
+        )
 
         if self.nanobeir_enabled and not self.doc_only_enabled:
             compatible: bool
@@ -183,9 +172,7 @@ class SPLADETrainingModule(L.LightningModule):
     ) -> torch.Tensor:
         # Track L2 norm to capture sparse output scale.
         reps_fp32: torch.Tensor = reps.float()
-        per_row_norm: torch.Tensor = torch.linalg.vector_norm(
-            reps_fp32, ord=2, dim=-1
-        )
+        per_row_norm: torch.Tensor = torch.linalg.vector_norm(reps_fp32, ord=2, dim=-1)
         if row_mask is None:
             return per_row_norm.mean()
         mask: torch.Tensor = row_mask.to(dtype=torch.bool)
@@ -367,29 +354,6 @@ class SPLADETrainingModule(L.LightningModule):
         # Ensure metric buffers live on the same device as predictions.
         self.val_metric_collection.to(self.device)
 
-    def on_fit_start(self) -> None:
-        global_target: int | None = getattr(
-            self.cfg.training, "global_batch_size_target", None
-        )
-        if global_target is None:
-            return
-        batch_size: int = int(self.cfg.training.batch_size)
-        grad_accumulation: int = int(self.cfg.training.grad_accumulation)
-        world_size: int = int(self.trainer.world_size) if self.trainer else 1
-        effective_batch_size: int = batch_size * grad_accumulation * world_size
-        if effective_batch_size != int(global_target):
-            log_if_rank_zero(
-                logger,
-                "Effective global batch size "
-                f"{effective_batch_size} does not match target {int(global_target)}.",
-                level="warning",
-            )
-        else:
-            log_if_rank_zero(
-                logger,
-                f"Effective global batch size matches target: {effective_batch_size}.",
-            )
-
     def _lambda_schedule_multiplier(self) -> float:
         schedule_steps: int | None = self.reg_cfg.schedule_steps
         if schedule_steps is None:
@@ -490,7 +454,9 @@ class SPLADETrainingModule(L.LightningModule):
         if world_size <= 1:
             return
         strategy: Any = self.trainer.strategy
-        barrier_fn: Any = getattr(strategy, "barrier", None)
+        barrier_fn: Any | None = (
+            strategy.barrier if hasattr(strategy, "barrier") else None
+        )
         if callable(barrier_fn):
             barrier_fn()
             return

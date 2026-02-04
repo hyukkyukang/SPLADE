@@ -7,8 +7,8 @@ import lightning as L
 from omegaconf import DictConfig
 
 from config.path import ABS_CONFIG_DIR
-from src.data.module.encode import EncodeDataModule
-from src.model.module.encode import SPLADEEncodeModule
+from src.data.pl_module import EncodeDataModule
+from src.model.pl_module import SPLADEEncodeModule
 from src.utils import log_if_rank_zero, set_seed
 from src.utils.logging import get_logger, setup_tqdm_friendly_logging
 from src.utils.script_setup import configure_script_environment

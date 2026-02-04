@@ -9,7 +9,7 @@ root_dir_path: "."
 defaults:
   - _self_
   - model: splade_v1
-  - dataset: msmarco_hf_train
+  - dataset: msmarco
   - training: splade_v1
   - testing: default
   # The following overrides are necessary to make the logging colorized.

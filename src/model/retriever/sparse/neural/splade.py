@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from typing import Any, Callable, Optional
 
 import torch
@@ -7,9 +5,8 @@ from torch import nn
 from torch.nn import functional as F
 from transformers import AutoModelForMaskedLM
 
-from src.model.retriever.base import BaseRetriever
-from src.model.retriever.registry import RETRIEVER_REGISTRY
 from src.utils.logging import suppress_output_if_not_rank_zero
+
 
 class _Log1pRelu(nn.Module):
     def forward(self, logits: torch.Tensor) -> torch.Tensor:
@@ -151,9 +148,9 @@ class SpladeModel(nn.Module):
             "_query_exclude_token_ids", exclude_token_ids, persistent=False
         )
         self.register_buffer("_query_exclude_mask", exclude_mask, persistent=False)
-        self._query_encode_fn: Callable[
-            [torch.Tensor, torch.Tensor], torch.Tensor
-        ] = self._encode_query_terms if self.doc_only else self._encode_query_mlm
+        self._query_encode_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = (
+            self._encode_query_terms if self.doc_only else self._encode_query_mlm
+        )
 
     # --- Protected methods ---
     @staticmethod
@@ -234,9 +231,7 @@ class SpladeModel(nn.Module):
     def encode_queries(
         self, input_ids: torch.Tensor, attention_mask: torch.Tensor
     ) -> torch.Tensor:
-        embeddings: torch.Tensor = self._query_encode_fn(
-            input_ids, attention_mask
-        )
+        embeddings: torch.Tensor = self._query_encode_fn(input_ids, attention_mask)
         if self.normalize:
             embeddings = F.normalize(embeddings, p=2, dim=-1)
         return embeddings
@@ -263,9 +258,3 @@ class SpladeModel(nn.Module):
         q: torch.Tensor = self.encode_queries(query_input_ids, query_attention_mask)
         d: torch.Tensor = self.encode_docs(doc_input_ids, doc_attention_mask)
         return q, d
-
-
-# Register SPLADE under the canonical config name.
-@RETRIEVER_REGISTRY.register("splade")
-class SPLADE(BaseRetriever):
-    """SPLADE retriever registered for config usage."""

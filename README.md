@@ -1,6 +1,7 @@
 # SPLADE
 
-Training + evaluation repo for SPLADE v1/v2 variants with BEIR support.
+Training + evaluation repo for SPLADE v1/v2 sparse retrieval with BEIR and
+NanoBEIR support.
 
 ## Setup
 
@@ -8,85 +9,133 @@ Training + evaluation repo for SPLADE v1/v2 variants with BEIR support.
 pip install -r requirements.txt
 ```
 
-## Datasets (Hugging Face Hub)
+## Configuration
 
-This repo is configured to use Hugging Face Hub datasets for training, evaluation, and indexing.
-All dataset selection happens via config (e.g., `dataset.hf_name`, `dataset.hf_subset`, `dataset.hf_split`).
+All entrypoints use Hydra configs under `config/`.
+
+- Override config groups: `model=splade_v2_doc`, `dataset=beir/trec-covid`,
+  `training=splade_v2_max`.
+- Override parameters: `training.use_cpu=true`,
+  `testing.checkpoint_path=...`, `encoding.checkpoint_path=...`.
+- Logs go to `log/` by default; set `tag=...` to create per-run log dirs.
+
+Datasets default to the Hugging Face Hub; dataset configs live in
+`config/dataset/`.
 
 ## Train
 
-```
-python scripts/train.py training=splade_v1 model=splade_v1
-```
-
-Use Hugging Face MS MARCO (sentence-transformers/msmarco):
+Train a SPLADE model and write checkpoints/logs:
 
 ```
-python scripts/train.py \
-  dataset@train_dataset=msmarco_hf_train \
-  dataset@val_dataset=msmarco_hf_val
+python script/train.py training=splade_v1 model=splade_v1
 ```
 
-Use MiniLM distillation score dataset for training (triplets with scores):
+Use MS MARCO (HF Hub) for both train/val:
 
 ```
-python scripts/train.py \
-  dataset@train_dataset=msmarco_minilm_scores \
-  training.distill.enabled=true
+python script/train.py \
+  dataset@train_dataset=msmarco \
+  dataset@val_dataset=msmarco
 ```
 
-Enable BEIR sampled evaluation per epoch:
+Disable W&B logging (optional):
 
 ```
-python scripts/train.py \
-  training.beir_eval.enabled=true \
-  training.beir_eval.datasets='[trec-covid, nfcorpus]' \
-  training.beir_eval.sample_size=128
+python script/train.py training.wandb.mode=disabled
 ```
 
-## Evaluate (full BEIR / MS MARCO)
+## Encode corpus
+
+Encode documents into sparse shards (for retrieval indexing):
 
 ```
-python scripts/evaluation.py \
-  testing.checkpoint_path=logs/checkpoints/last.ckpt \
-  dataset=beir/trec-covid
+python script/encode.py \
+  encoding.checkpoint_path=log/checkpoints/last.ckpt \
+  dataset=beir/trec-covid \
+  model.encode_path=log/encode
 ```
 
-Datasets are loaded from the Hub by default, so no local file paths are required.
+## Build inverted index
+
+Build a sparse inverted index from encoded shards:
+
+```
+python script/index.py \
+  model.encode_path=log/encode \
+  model.index_path=log/index
+```
+
+## Evaluate (retrieval / reranking)
+
+Index-based retrieval evaluation:
+
+```
+python script/evaluate.py \
+  evaluation.type=retrieval \
+  testing.checkpoint_path=log/checkpoints/last.ckpt \
+  dataset=beir/trec-covid \
+  model.index_path=log/index
+```
+
+Reranking evaluation (no index required):
+
+```
+python script/evaluate.py \
+  evaluation.type=reranking \
+  testing.checkpoint_path=log/checkpoints/last.ckpt \
+  dataset=beir/msmarco
+```
 
 ## Evaluate (NanoBEIR proxy)
 
-Use NanoBEIR for quick retrieval checks without full-corpus encoding:
+Quick proxy evaluation without full-corpus encoding:
 
 ```
-python scripts/evaluate_nanobeir.py \
-  testing.checkpoint_path=logs/checkpoints/last.ckpt
-```
-
-Override datasets or write a JSON summary:
-
-```
-python scripts/evaluate_nanobeir.py \
-  testing.checkpoint_path=logs/checkpoints/last.ckpt \
+python script/evaluate_nanobeir.py \
+  testing.checkpoint_path=log/checkpoints/last.ckpt \
   nanobeir.datasets='[msmarco, nfcorpus, nq]' \
   nanobeir.save_json=true
 ```
 
-## Encode corpus (sparse vectors)
+Use HF weights instead of a checkpoint:
 
 ```
-python scripts/encode.py \
-  encoding.checkpoint_path=logs/checkpoints/last.ckpt \
-  dataset=beir/trec-covid \
-  model.encode_path=logs/encode
+python script/evaluate_nanobeir.py \
+  nanobeir.use_huggingface_model=true \
+  model.huggingface_name=naver/splade_v2_max
 ```
 
-## Build an inverted index
+## Preprocess
+
+Mine hard negatives with a trained checkpoint:
 
 ```
-python scripts/index.py \
-  model.encode_path=logs/encode \
-  model.index_path=logs/index
+python script/preprocess/mine_hard_negatives.py \
+  mining.checkpoint_path=log/checkpoints/last.ckpt \
+  mining.output_dir=data/hard_negatives \
+  mining.output_format=triplet
+```
+
+Score candidate pairs with a cross-encoder:
+
+```
+python script/preprocess/score_cross_encoder.py \
+  dataset@score_dataset=msmarco \
+  scoring.model_name=cross-encoder/ms-marco-MiniLM-L-12-v2
+```
+
+## Experiments and utilities
+
+Logit distribution experiment (writes JSON + PNG):
+
+```
+python script/experiment/logit_stats.py --output_dir script/experiment/output
+```
+
+GPU burn utility:
+
+```
+python script/etc/gpu_burn.py --devices all --dtype float16
 ```
 
 ## Docker
@@ -98,6 +147,6 @@ docker run --gpus all -v "$PWD:/workspace" -it splade-repro bash
 
 ## Config toggles
 
-- Paper-faithful vs normal: `training.regularization.paper_faithful=true|false`
-- SPLADE v1 vs v2: `training=splade_v1` or `training=splade_v2`
+- Paper-faithful regularization: `training.regularization.paper_faithful=true|false`
+- SPLADE variants: `training=splade_v1|splade_v2_max|splade_v2_doc`
 - Distillation: `training.distill.enabled=true`

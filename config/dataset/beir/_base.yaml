@@ -5,9 +5,8 @@ defaults:
 name: beir_base
 type: beir
 split: test
+corpus_split: train
 
 beir_dataset: null
 
-use_hf: true
 hf_name: BeIR/${dataset.beir_dataset}
-hf_split: ${dataset.split}

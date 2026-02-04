@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import argparse
 import json
 import logging
@@ -151,9 +149,7 @@ def _load_hf_dataset(
     )
 
 
-def _resolve_text_column(
-    column_names: Sequence[str], preferred: str | None
-) -> str:
+def _resolve_text_column(column_names: Sequence[str], preferred: str | None) -> str:
     """Resolve the query text column from dataset columns."""
     column_set: set[str] = set(column_names)
     if preferred is not None:
@@ -240,9 +236,7 @@ def _load_msmarco_queries(
     dataset: Dataset | IterableDataset
     dataset_source: str = f"{hf_name}:{query_subset}"
     try:
-        dataset = _load_hf_dataset(
-            hf_name, query_subset, split, cache_dir, streaming
-        )
+        dataset = _load_hf_dataset(hf_name, query_subset, split, cache_dir, streaming)
     except Exception as exc:  # pylint: disable=broad-except
         if fallback_subset is None:
             raise
@@ -300,7 +294,9 @@ def _sample_logits(
     if total_logits == 0 or sample_size <= 0:
         return np.empty((0,), dtype=np.float32)
     effective_size: int = min(sample_size, total_logits)
-    perm: torch.Tensor = torch.randperm(total_logits, generator=generator)[:effective_size]
+    perm: torch.Tensor = torch.randperm(total_logits, generator=generator)[
+        :effective_size
+    ]
     sample_values: torch.Tensor = logits_flat[perm]
     return sample_values.numpy()
 
@@ -351,7 +347,9 @@ def _compute_model_logits_stats(
 
             stats.update(valid_logits)
             sample_chunk: np.ndarray = _sample_logits(
-                valid_logits, sample_size=sample_size_per_batch, generator=torch_generator
+                valid_logits,
+                sample_size=sample_size_per_batch,
+                generator=torch_generator,
             )
             sample_chunks.append(sample_chunk)
 
@@ -367,7 +365,9 @@ def _compute_model_logits_stats(
             batch_start = batch_end
 
     sample_values: np.ndarray = (
-        np.concatenate(sample_chunks) if sample_chunks else np.empty((0,), dtype=np.float32)
+        np.concatenate(sample_chunks)
+        if sample_chunks
+        else np.empty((0,), dtype=np.float32)
     )
     survival_payload: dict[str, float] = vocab_survival_stats.finalize()
     vocab_size_value: float = float(vocab_size)
@@ -416,7 +416,9 @@ def _plot_histogram(
     if not model_results:
         return
     sample_arrays: list[np.ndarray] = [
-        result.sample_values for result in model_results if result.sample_values.size > 0
+        result.sample_values
+        for result in model_results
+        if result.sample_values.size > 0
     ]
     if not sample_arrays:
         return
@@ -564,9 +566,7 @@ def main() -> None:
     device: torch.device = _resolve_device(args.device)
     msmarco_cache_dir: str | None = _normalize_optional_str(args.msmarco_cache_dir)
     msmarco_text_column: str | None = _normalize_optional_str(args.msmarco_text_column)
-    msmarco_fallback: str | None = _normalize_optional_str(
-        args.msmarco_fallback_subset
-    )
+    msmarco_fallback: str | None = _normalize_optional_str(args.msmarco_fallback_subset)
     queries: list[str] = _load_msmarco_queries(
         hf_name=str(args.msmarco_name),
         query_subset=str(args.msmarco_query_subset),

@@ -98,9 +98,9 @@ def _load_yaml_config(config_path: str) -> DictConfig | None:
 
 def _extract_model_config(root_cfg: DictConfig) -> DictConfig | None:
     """Extract the model config from a training or W&B config."""
-    model_section: Any | None = getattr(root_cfg, "model", None)
-    if model_section is None:
+    if "model" not in root_cfg:
         return None
+    model_section: Any = root_cfg.model
     model_cfg: Any = model_section
     # W&B configs store the actual values under a `value` key.
     if OmegaConf.is_config(model_cfg) and "value" in model_cfg:
@@ -132,9 +132,7 @@ def _load_model_config_from_log_dir(log_dir: str) -> DictConfig | None:
     if hydra_cfg is not None:
         hydra_model_cfg: DictConfig | None = _extract_model_config(hydra_cfg)
         if hydra_model_cfg is not None:
-            log_if_rank_zero(
-                logger, f"Using model config from {hydra_config_path}."
-            )
+            log_if_rank_zero(logger, f"Using model config from {hydra_config_path}.")
             return hydra_model_cfg
 
     wandb_config_path: str | None = _find_latest_wandb_config_path(log_dir)
@@ -150,13 +148,9 @@ def _load_model_config_from_log_dir(log_dir: str) -> DictConfig | None:
     return wandb_model_cfg
 
 
-def _apply_checkpoint_model_config(
-    cfg: DictConfig, checkpoint_path: str
-) -> DictConfig:
+def _apply_checkpoint_model_config(cfg: DictConfig, checkpoint_path: str) -> DictConfig:
     """Override the model config with the checkpoint config when present."""
-    use_checkpoint_config: bool = bool(
-        getattr(cfg.testing, "use_checkpoint_config", True)
-    )
+    use_checkpoint_config: bool = bool(cfg.testing.use_checkpoint_config)
     if not use_checkpoint_config:
         return cfg
 
@@ -190,7 +184,9 @@ def _apply_checkpoint_model_config(
     model_name: str = str(merged_cfg.model.name)
     hf_name: str = str(merged_cfg.model.huggingface_name)
     source_label: str = model_cfg_source or "unknown"
-    log_if_rank_zero(logger, f"Using {source_label} model config: {model_name} ({hf_name}).")
+    log_if_rank_zero(
+        logger, f"Using {source_label} model config: {model_name} ({hf_name})."
+    )
     return merged_cfg
 
 
@@ -225,7 +221,6 @@ def main(cfg: DictConfig) -> None:
     device: torch.device = _resolve_device(cfg)
     log_if_rank_zero(logger, f"Using device: {device}")
 
-
     checkpoint_path_value: str | None = cfg.testing.checkpoint_path
     sparse_encoder: SparseEncoder
     if use_huggingface_model:
@@ -242,9 +237,7 @@ def main(cfg: DictConfig) -> None:
                 "Ignoring testing.checkpoint_path because "
                 "nanobeir.use_huggingface_model=true.",
             )
-        log_if_rank_zero(
-            logger, f"Loading Hugging Face model weights: {hf_model_name}"
-        )
+        log_if_rank_zero(logger, f"Loading Hugging Face model weights: {hf_model_name}")
         sparse_encoder = build_sparse_encoder_from_huggingface(cfg=cfg, device=device)
     else:
         if not checkpoint_path_value:
@@ -254,7 +247,9 @@ def main(cfg: DictConfig) -> None:
             )
         checkpoint_path: str = str(checkpoint_path_value)
 
-    doc_only_enabled: bool = bool(getattr(cfg.model, "doc_only", False))
+    doc_only_enabled: bool = (
+        bool(cfg.model.doc_only) if hasattr(cfg.model, "doc_only") else False
+    )
     if doc_only_enabled:
         model: Any = build_splade_model(cfg, use_cpu=cfg.testing.use_cpu)
         missing: list[str]

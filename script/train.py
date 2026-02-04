@@ -5,17 +5,24 @@ from typing import Any
 
 import hydra
 import lightning as L
-from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
+import torch
+from lightning.pytorch.callbacks import (
+    Callback,
+    LearningRateMonitor,
+    ModelCheckpoint,
+    RichProgressBar,
+)
 from lightning.pytorch.loggers import CSVLogger, Logger, WandbLogger
 from omegaconf import DictConfig, OmegaConf
 
 from config.path import ABS_CONFIG_DIR
-from src.data.module.train import TrainDataModule
-from src.model.module.train import SPLADETrainingModule
+from src.data.pl_module import TrainDataModule
+from src.model.pl_module import SPLADETrainingModule
 from src.utils import log_if_rank_zero, set_seed
 from src.utils.logging import (
     get_logger,
     suppress_accumulate_grad_stream_mismatch_warning,
+    suppress_litlogger_tip,
     setup_tqdm_friendly_logging,
 )
 from src.utils.script_setup import configure_script_environment, normalize_tag
@@ -72,10 +79,21 @@ def _resolve_checkpoint_dir(log_dir: str) -> str:
     return f"{base_dir}_{timestamp}"
 
 
+def _build_progress_bar(training_cfg: DictConfig) -> RichProgressBar | None:
+    """Build a RichProgressBar callback if enabled in the training config."""
+    progress_cfg: DictConfig | None = training_cfg.get("progress_bar")
+    if progress_cfg is None or not bool(progress_cfg.enabled):
+        return None
+    refresh_rate_value: int = int(progress_cfg.refresh_rate)
+    return RichProgressBar(refresh_rate=refresh_rate_value)
+
+
 @hydra.main(version_base=None, config_path=ABS_CONFIG_DIR, config_name="train")
 def main(cfg: DictConfig) -> None:
     setup_tqdm_friendly_logging()
     suppress_accumulate_grad_stream_mismatch_warning()
+    # Silence the Lightning litlogger suggestion printed during trainer init.
+    suppress_litlogger_tip()
     os.makedirs(cfg.log_dir, exist_ok=True)
 
     set_seed(cfg.seed)
@@ -136,6 +154,13 @@ def main(cfg: DictConfig) -> None:
     gradient_clip_val: float = (
         max(float(max_grad_norm_value), 0.0) if max_grad_norm_value is not None else 0.0
     )
+    progress_bar: RichProgressBar | None = _build_progress_bar(training_cfg)
+    callbacks: list[Callback] = [
+        checkpoint_callback,
+        LearningRateMonitor(logging_interval="step"),
+    ]
+    if progress_bar is not None:
+        callbacks.append(progress_bar)
 
     trainer: L.Trainer = L.Trainer(
         deterministic=False,
@@ -147,7 +172,7 @@ def main(cfg: DictConfig) -> None:
         log_every_n_steps=cfg.training.log_every_n_steps,
         default_root_dir=cfg.log_dir,
         logger=lightning_loggers,
-        callbacks=[checkpoint_callback, LearningRateMonitor(logging_interval="step")],
+        callbacks=callbacks,
         gradient_clip_val=gradient_clip_val,
         **trainer_kwargs,
     )

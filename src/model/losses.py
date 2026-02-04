@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from typing import Callable
 
 import torch
@@ -73,7 +71,9 @@ class LossComputer(nn.Module):
         self.reg_paper_faithful: bool = bool(reg_paper_faithful)
         self._neg_inf: torch.Tensor
         self.register_buffer(
-            "_neg_inf", torch.tensor(float("-inf"), dtype=torch.float32), persistent=False
+            "_neg_inf",
+            torch.tensor(float("-inf"), dtype=torch.float32),
+            persistent=False,
         )
         self._main_loss_fn: _MainLossFn = self._resolve_main_loss_fn(self.loss_type)
         self._distill_loss_fn: _DistillLossFn = (
@@ -256,26 +256,23 @@ class LossComputer(nn.Module):
         has_pos: torch.Tensor = pos_valid.any(dim=1)
         has_neg: torch.Tensor = neg_valid.any(dim=1)
         valid_rows: torch.Tensor = has_pos & has_neg
-        if not bool(valid_rows.any()):
-            return scores.new_zeros(())
+        valid_rows_float: torch.Tensor = valid_rows.to(dtype=scores.dtype)
+        valid_count: torch.Tensor = valid_rows_float.sum().clamp(min=1.0)
 
         pos_indices: torch.Tensor = pos_valid.float().argmax(dim=1)
         neg_indices: torch.Tensor = neg_valid.float().argmax(dim=1)
-        row_indices: torch.Tensor = torch.arange(
-            scores.shape[0], device=scores.device
-        )
+        row_indices: torch.Tensor = torch.arange(scores.shape[0], device=scores.device)
 
         student_pos: torch.Tensor = scores[row_indices, pos_indices]
         student_neg: torch.Tensor = scores[row_indices, neg_indices]
-        safe_teacher: torch.Tensor = torch.where(
-            valid_teacher, teacher_scores, scores
-        )
+        safe_teacher: torch.Tensor = torch.where(valid_teacher, teacher_scores, scores)
         teacher_pos: torch.Tensor = safe_teacher[row_indices, pos_indices]
         teacher_neg: torch.Tensor = safe_teacher[row_indices, neg_indices]
         margin_diff: torch.Tensor = (student_pos - student_neg) - (
             teacher_pos - teacher_neg
         )
-        return margin_diff[valid_rows].pow(2).mean()
+        loss_values: torch.Tensor = margin_diff.pow(2) * valid_rows_float
+        return loss_values.sum() / valid_count
 
     def _reg_loss_noop(
         self, reps: torch.Tensor, row_mask: torch.Tensor
@@ -283,9 +280,7 @@ class LossComputer(nn.Module):
         _ = row_mask
         return reps.new_zeros(())
 
-    def _reg_loss_l1(
-        self, reps: torch.Tensor, row_mask: torch.Tensor
-    ) -> torch.Tensor:
+    def _reg_loss_l1(self, reps: torch.Tensor, row_mask: torch.Tensor) -> torch.Tensor:
         mask: torch.Tensor = row_mask.to(dtype=torch.bool)
         mask_float: torch.Tensor = mask.to(dtype=reps.dtype)
         row_count: torch.Tensor = mask_float.sum().clamp(min=1.0)

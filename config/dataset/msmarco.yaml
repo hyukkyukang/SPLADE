@@ -1,0 +1,14 @@
+# @package dataset
+defaults:
+  - _base@_here_
+
+name: msmarco
+type: msmarco
+split: train
+
+hf_name: sentence-transformers/msmarco
+hf_subset: triplets
+hf_cache_dir: null
+hf_max_samples: null
+hf_skip_samples: 0
+

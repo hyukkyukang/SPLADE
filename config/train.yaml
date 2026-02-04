@@ -7,14 +7,28 @@ root_dir_path: "."
 
 # Defaults
 defaults:
-  - _self_
   - model: splade_v1
-  - dataset@train_dataset: msmarco_minilm_scores
-  - dataset@val_dataset: msmarco_hf_val
+  - dataset@train_dataset: msmarco
+  - dataset@val_dataset: msmarco
   - training: splade_v1
   - testing: default
   # The following overrides are necessary to make the logging colorized.
   - override hydra/job_logging: colorlog_custom
+  - _self_
+
+train_dataset:
+  name: msmarco_train
+  hf_skip_samples: ${training.val_sample_size}
+  hf_max_samples: null
+  # Keep fixed padding to reduce torch.compile recompiles.
+  max_padding: true
+
+val_dataset:
+  name: msmarco_val
+  hf_max_samples: ${training.val_sample_size}
+  hf_skip_samples: 0
+  # Keep fixed padding to reduce torch.compile recompiles.
+  max_padding: true
 
 nanobeir:
   enabled: true

@@ -190,8 +190,16 @@ def main(cfg: DictConfig) -> None:
 
     score_dataset_cfg: DictConfig = cfg.score_dataset
     score_dataset: Dataset = _load_dataset_from_config(score_dataset_cfg)
-    text_name: str = str(score_dataset_cfg.hf_text_name or score_dataset_cfg.hf_name)
-    text_cache_dir: str | None = score_dataset_cfg.hf_cache_dir
+    text_name: str = str(
+        score_dataset_cfg.query_corpus_hf_name
+        if score_dataset_cfg.query_corpus_hf_name is not None
+        else score_dataset_cfg.hf_name
+    )
+    text_cache_dir: str | None = (
+        score_dataset_cfg.query_corpus_hf_cache_dir
+        if score_dataset_cfg.query_corpus_hf_cache_dir is not None
+        else score_dataset_cfg.hf_cache_dir
+    )
     query_dataset: Dataset = load_dataset(
         text_name, "queries", split="train", cache_dir=text_cache_dir
     )

@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import logging
 from pathlib import Path
 from typing import Any, Sequence
@@ -10,9 +8,8 @@ from omegaconf import DictConfig
 from transformers import PreTrainedTokenizerBase
 
 from src.indexing.sparse_index import SparseShardWriter
+from src.model.pl_module.utils import build_splade_model_with_checkpoint
 from src.model.retriever.sparse.neural.splade import SpladeModel
-from src.utils import log_if_rank_zero
-from src.utils.model_utils import build_splade_model, load_splade_checkpoint
 from src.utils.transformers import build_tokenizer
 
 logger: logging.Logger = logging.getLogger("SPLADEEncodeModule")
@@ -33,19 +30,13 @@ class SPLADEEncodeModule(L.LightningModule):
 
     # --- Protected methods ---
     def _load_model(self) -> SpladeModel:
-        model: SpladeModel = build_splade_model(
-            self.cfg, use_cpu=bool(self.cfg.encoding.use_cpu)
-        )
         checkpoint_path: str | None = self.cfg.encoding.checkpoint_path
-        if checkpoint_path:
-            missing: list[str]
-            unexpected: list[str]
-            missing, unexpected = load_splade_checkpoint(model, checkpoint_path)
-            log_if_rank_zero(
-                logger,
-                f"Loaded checkpoint. Missing: {len(missing)}, unexpected: {len(unexpected)}",
-            )
-        return model
+        return build_splade_model_with_checkpoint(
+            cfg=self.cfg,
+            use_cpu=bool(self.cfg.encoding.use_cpu),
+            checkpoint_path=checkpoint_path,
+            logger=logger,
+        )
 
     def _resolve_exclude_token_ids(self) -> list[int]:
         configured_ids: Sequence[int] | None = self.cfg.model.exclude_token_ids

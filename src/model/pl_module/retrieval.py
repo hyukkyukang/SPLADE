@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import logging
 from pathlib import Path
 from typing import Any, Dict, List
@@ -8,9 +6,7 @@ import lightning as L
 import numpy as np
 import torch
 from omegaconf import DictConfig
-from transformers import PreTrainedTokenizerBase
 
-from src.data.dataclass import Query
 from src.indexing.sparse_index import (
     InvertedIndex,
     load_inverted_index,
@@ -18,17 +14,19 @@ from src.indexing.sparse_index import (
     sparsify_query_vector,
 )
 from src.metric.retrieval import RetrievalMetrics, resolve_k_list
-from src.model.retriever.sparse.neural.splade import SPLADE, SpladeModel
-from src.utils.logging import log_if_rank_zero
-from src.utils.model_utils import build_splade_model, load_splade_checkpoint
-from src.utils.transformers import build_tokenizer
+from src.model.pl_module.utils import (
+    build_splade_model_with_checkpoint,
+    finalize_retrieval_metrics,
+)
+from src.model.retriever.sparse.neural.splade import SpladeModel
 
-logger: logging.Logger = logging.getLogger("SPLADEEvaluationModule")
+logger: logging.Logger = logging.getLogger("RetrievalLightningModule")
 
 
-class SPLADEEvaluationModule(L.LightningModule):
-    """LightningModule for GenZ-style retrieval evaluation."""
+class RetrievalLightningModule(L.LightningModule):
+    """LightningModule for index-based retrieval evaluation."""
 
+    # --- Special methods ---
     def __init__(self, cfg: DictConfig) -> None:
         super().__init__()
         self.automatic_optimization: bool = False
@@ -36,11 +34,6 @@ class SPLADEEvaluationModule(L.LightningModule):
         self.save_hyperparameters(cfg)
 
         self.model: SpladeModel = self._load_model()
-        # Build tokenizer once for retriever setup.
-        self._tokenizer: PreTrainedTokenizerBase = build_tokenizer(
-            self.cfg.model.huggingface_name
-        )
-        self._retriever: SPLADE | None = None
 
         self._k_list: List[int] = resolve_k_list(self.cfg.testing.k_list)
         self._k_max: int = max(self._k_list)
@@ -59,22 +52,15 @@ class SPLADEEvaluationModule(L.LightningModule):
         self._query_top_k: int | None = None
         self._local_query_offset: int = 0
 
+    # --- Protected methods ---
     def _load_model(self) -> SpladeModel:
-        model: SpladeModel = build_splade_model(
-            self.cfg, use_cpu=self.cfg.testing.use_cpu
-        )
-
         checkpoint_path: str | None = self.cfg.testing.checkpoint_path
-        if checkpoint_path:
-            missing: list[str]
-            unexpected: list[str]
-            missing, unexpected = load_splade_checkpoint(model, checkpoint_path)
-            log_if_rank_zero(
-                logger,
-                f"Loaded checkpoint. Missing: {len(missing)}, unexpected: {len(unexpected)}",
-            )
-
-        return model
+        return build_splade_model_with_checkpoint(
+            cfg=self.cfg,
+            use_cpu=bool(self.cfg.testing.use_cpu),
+            checkpoint_path=checkpoint_path,
+            logger=logger,
+        )
 
     def _load_index(self) -> InvertedIndex:
         index_path_value: str | None = self.cfg.model.index_path
@@ -103,20 +89,12 @@ class SPLADEEvaluationModule(L.LightningModule):
         self._score_buffer = np.zeros(int(doc_count), dtype=np.float32)
         self._seen_buffer = np.zeros(int(doc_count), dtype=np.uint8)
 
+    # --- Public methods ---
     def on_test_start(self) -> None:
         self._local_query_offset = 0
         self.metric_collection.reset()
         self.metric_collection.to(torch.device("cpu"))
-
-        if self._retriever is None:
-            self._retriever = SPLADE(
-                model=self.model,
-                tokenizer=self._tokenizer,
-                max_query_length=self.cfg.dataset.max_query_length,
-                max_doc_length=self.cfg.dataset.max_doc_length,
-                batch_size=self.cfg.testing.batch_size,
-                device=self.device,
-            )
+        self.model.eval()
 
         index: InvertedIndex = self._load_index()
         self._index = index
@@ -128,9 +106,8 @@ class SPLADEEvaluationModule(L.LightningModule):
         self,
         batch: Dict[str, Any],
         batch_idx: int,
-        dataloader_idx: int = 0,
     ) -> None:
-        _ = dataloader_idx
+        _ = batch_idx
         if (
             self._retriever is None
             or self._index is None
@@ -142,17 +119,14 @@ class SPLADEEvaluationModule(L.LightningModule):
                 "Retriever and index must be initialized in on_test_start."
             )
 
-        query_texts: List[str] = batch["query_text"]
-        qids: List[str] = batch["qid"]
         relevance_judgments_list: List[Dict[str, int]] = batch["relevance_judgments"]
-
-        queries: List[Query] = [
-            Query(query_id=str(qid), text=str(text))
-            for qid, text in zip(qids, query_texts)
-        ]
-        query_ids: List[str]
-        query_reps: torch.Tensor
-        query_ids, query_reps = self._retriever.encode_queries(queries)
+        query_input_ids: torch.Tensor = batch["query_input_ids"].to(self.device)
+        query_attention_mask: torch.Tensor = batch["query_attention_mask"].to(
+            self.device
+        )
+        query_reps: torch.Tensor = self.model.encode_queries(
+            query_input_ids, query_attention_mask
+        )
         # Score queries on CPU using the inverted index.
         query_reps_cpu: np.ndarray = query_reps.detach().cpu().float().numpy()
 
@@ -160,7 +134,8 @@ class SPLADEEvaluationModule(L.LightningModule):
         global_rank: int = int(self.trainer.global_rank)
         base_offset: int = self._local_query_offset
         # Track per-rank progress to keep unique global indexes across batches.
-        self._local_query_offset += len(query_ids)
+        batch_size: int = int(query_input_ids.shape[0])
+        self._local_query_offset += batch_size
 
         for i, relevance_judgments in enumerate(relevance_judgments_list):
             query_vector: np.ndarray = query_reps_cpu[i]
@@ -223,17 +198,6 @@ class SPLADEEvaluationModule(L.LightningModule):
             self.metric_collection.append(score_tensor, label_tensor, indexes)
 
     def on_test_epoch_end(self) -> None:
-        has_data: bool = self.metric_collection.gather(
-            world_size=self.trainer.world_size,
-            all_gather_fn=self.all_gather if self.trainer.world_size > 1 else None,
+        finalize_retrieval_metrics(
+            metric_collection=self.metric_collection, module=self, logger=logger
         )
-        if not has_data:
-            log_if_rank_zero(
-                logger, "No predictions accumulated during testing.", level="warning"
-            )
-            return
-
-        if self.trainer.is_global_zero:
-            metrics: Dict[str, torch.Tensor] = self.metric_collection.compute()
-            self.log_dict(metrics, sync_dist=False, prog_bar=True, rank_zero_only=True)
-        self.metric_collection.reset()

@@ -8,7 +8,7 @@ root_dir_path: "."
 defaults:
   - _self_
   - model: splade_v1
-  - dataset@train_dataset: msmarco_hf_train
+  - dataset@train_dataset: msmarco
   - dataset@retrieval_dataset: beir/msmarco
   - testing: default
   - override hydra/job_logging: colorlog_custom

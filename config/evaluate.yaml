@@ -14,6 +14,10 @@ defaults:
   # The following overrides are necessary to make the logging colorized.
   - override hydra/job_logging: colorlog_custom
 
+evaluation:
+  # Supported values: retrieval, reranking.
+  type: retrieval
+
 hydra:
   output_subdir: null
   run:

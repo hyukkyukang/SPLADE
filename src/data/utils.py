@@ -1,15 +1,11 @@
-import hashlib
 import logging
-import os
-from typing import Any, Dict, List, Union
+from typing import Any
 
 import pyarrow as pa
-from datasets import config as datasets_config
-from torch.nn.utils.rnn import pad_sequence
 
 from src.utils.logging import log_if_rank_zero
 
-logger = logging.getLogger("DatasetUtils")
+logger: logging.Logger = logging.getLogger("src.data.utils")
 
 
 def resolve_dataset_column(dataset: Any, column_name: str) -> pa.Array:
@@ -19,17 +15,10 @@ def resolve_dataset_column(dataset: Any, column_name: str) -> pa.Array:
     Direct access via dataset.data.column() returns the underlying PyArrow table's
     column, which ignores any _indices from filtering. This function resolves the
     correct column values by applying _indices when present.
-
-    Args:
-        dataset: A HuggingFace Dataset
-        column_name: Name of the column to extract
-
-    Returns:
-        PyArrow Array with correct values matching the dataset's visible rows
     """
-    column: pa.ChunkedArray = dataset.data.column(column_name)
+    column: pa.Array | pa.ChunkedArray = dataset.data.column(column_name)
 
-    # Apply _indices if dataset was filtered
+    # Apply _indices if the dataset was filtered to preserve row alignment.
     if dataset._indices is not None:
         indices: pa.ChunkedArray = dataset._indices.column(0)
         column = column.take(indices)
@@ -38,23 +27,20 @@ def resolve_dataset_column(dataset: Any, column_name: str) -> pa.Array:
 
 
 def id_to_idx(
-    ids: Union[pa.Array, pa.ChunkedArray, List[str]], desc: str, enable_tqdm: bool
-) -> Dict[str, int]:
+    ids: pa.Array | pa.ChunkedArray | list[Any],
+    desc: str,
+    enable_tqdm: bool,
+) -> dict[str, int]:
     """
     Create a mapping from IDs to their indices.
 
     Uses PyArrow's native to_pylist() for fast batch conversion when available,
     avoiding slow element-by-element iteration that occurs with list().
-
-    Args:
-        ids: IDs as PyArrow Array/ChunkedArray (from HuggingFace datasets) or Python list
-        desc: Description for logging (kept for API compatibility, not used)
-        enable_tqdm: Whether to show progress (kept for API compatibility, not used)
-
-    Returns:
-        Dictionary mapping each ID to its index position.
     """
-    # Check if ids is a PyArrow array type for fast batch conversion
+    # Parameters are kept for API compatibility with older call sites.
+    _ = (desc, enable_tqdm)
+
+    ids_list: list[Any]
     if isinstance(ids, (pa.Array, pa.ChunkedArray)):
         ids_list = ids.to_pylist()
     else:
@@ -65,54 +51,7 @@ def id_to_idx(
             level="warning",
         )
         ids_list = list(ids)
-    return dict(zip(ids_list, range(len(ids_list))))
 
-
-def build_integer_id_cache_key(
-    hf_name: str,
-    hf_subset: str,
-    hf_split: str,
-    hf_skip_samples: int,
-    query_id_column: str,
-    corpus_id_column: str,
-    hf_max_samples: int | None,
-) -> str:
-    """
-    Build a deterministic cache key for integer-id preprocessing artifacts.
-    """
-    skip_samples_value: str = str(hf_skip_samples)
-    max_samples_value: str = "none" if hf_max_samples is None else str(hf_max_samples)
-    raw_key: str = "|".join(
-        [
-            hf_name,
-            hf_subset,
-            hf_split,
-            skip_samples_value,
-            query_id_column,
-            corpus_id_column,
-            max_samples_value,
-        ]
-    )
-    # Hash to keep the on-disk path short and stable.
-    digest: str = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()[:16]
-    return f"integer_ids_{digest}"
-
-
-def resolve_integer_id_cache_dir(
-    hf_cache_dir: str | None, integer_id_cache_dir: str | None
-) -> str:
-    """
-    Resolve the base directory for integer-id preprocessing artifacts.
-    """
-    # Prefer the explicit override, then the dataset cache, then HF defaults.
-    base_cache_dir_value: str | os.PathLike[str] = (
-        integer_id_cache_dir
-        if integer_id_cache_dir is not None
-        else (
-            hf_cache_dir
-            if hf_cache_dir is not None
-            else datasets_config.HF_DATASETS_CACHE
-        )
-    )
-    base_cache_dir: str = os.fspath(base_cache_dir_value)
-    return base_cache_dir
+    # Normalize IDs to strings for consistent lookup keys.
+    normalized_ids: list[str] = [str(value) for value in ids_list]
+    return dict(zip(normalized_ids, range(len(normalized_ids))))

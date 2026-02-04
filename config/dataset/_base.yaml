@@ -3,7 +3,8 @@ name: base
 type: custom
 
 split: train
-corpus_split: null
+corpus_split: ${.split}
+hf_split: ${.split}
 
 max_query_length: 256
 max_doc_length: 256
@@ -13,23 +14,13 @@ num_positives: 1
 
 beir_dataset: null
 
-use_hf: true
-use_ir_datasets: true
 hf_name: null
 hf_subset: null
-hf_split: train
 hf_cache_dir: null
 hf_max_samples: null
 hf_skip_samples: 0
-hf_text_name: null
 hf_data_files: null
-hf_teacher_name: null
-hf_teacher_subset: null
-hf_teacher_split: train
-hf_teacher_cache_dir: null
-hf_teacher_max_samples: null
-hf_teacher_data_files: null
-hf_streaming: false
-hf_shuffle_buffer_size: 10000
-use_integer_ids: false
-integer_id_cache_dir: null
+query_corpus_hf_name: null
+query_corpus_hf_cache_dir: null
+query_corpus_hf_data_files: null
+local_triplets_dir: null

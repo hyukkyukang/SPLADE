@@ -13,9 +13,8 @@ from omegaconf import DictConfig
 from transformers import PreTrainedTokenizerBase
 
 from config.path import ABS_CONFIG_DIR
-from src.data.dataset.msmarco import MSMARCO
-from src.data.dataset.retrieval import RetrievalDataset
 from src.data.dataclass import Document, Query
+from src.data.pd_module import RetrievalPDModule, TrainingPDModule
 from src.model.retriever.sparse.neural.splade import SpladeModel
 from src.utils import set_seed
 from src.utils.logging import get_logger, log_if_rank_zero
@@ -118,8 +117,12 @@ def _build_faiss_index(
         dimension, index_type, faiss.METRIC_INNER_PRODUCT
     )
     index: faiss.Index = faiss.IndexIDMap2(base_index)
-    gpu_resources_cls: Any = getattr(faiss, "StandardGpuResources", None)
-    index_cpu_to_gpu: Any = getattr(faiss, "index_cpu_to_gpu", None)
+    gpu_resources_cls: Any | None = (
+        faiss.StandardGpuResources if hasattr(faiss, "StandardGpuResources") else None
+    )
+    index_cpu_to_gpu: Any | None = (
+        faiss.index_cpu_to_gpu if hasattr(faiss, "index_cpu_to_gpu") else None
+    )
     if use_gpu and gpu_resources_cls is not None and index_cpu_to_gpu is not None:
         try:
             resources: Any = gpu_resources_cls()
@@ -282,8 +285,12 @@ def main(cfg: DictConfig) -> None:
     positives_by_qid: dict[str, set[str]]
     if settings.use_qrels:
         retrieval_cfg: DictConfig = cfg.retrieval_dataset
-        retrieval_dataset: RetrievalDataset = RetrievalDataset(
-            cfg=retrieval_cfg, global_cfg=cfg, tokenizer=tokenizer
+        retrieval_dataset: RetrievalPDModule = RetrievalPDModule(
+            cfg=retrieval_cfg,
+            tokenizer=tokenizer,
+            seed=int(cfg.seed),
+            load_teacher_scores=False,
+            require_teacher_scores=False,
         )
         retrieval_dataset.prepare_data()
         retrieval_dataset.setup()
@@ -302,33 +309,33 @@ def main(cfg: DictConfig) -> None:
         )
     else:
         train_cfg: DictConfig = cfg.train_dataset
-        msmarco_dataset: MSMARCO = MSMARCO(
+        train_dataset: TrainingPDModule = TrainingPDModule(
             cfg=train_cfg,
-            global_cfg=cfg,
             tokenizer=tokenizer,
+            seed=int(cfg.seed),
             load_teacher_scores=False,
             require_teacher_scores=False,
         )
-        msmarco_dataset.prepare_data()
-        msmarco_dataset.setup()
+        train_dataset.prepare_data()
+        train_dataset.setup()
         max_triplets: int | None = (
             None if train_cfg.hf_max_samples is None else int(train_cfg.hf_max_samples)
         )
         positives_by_qid = _build_positives_from_triplets(
-            msmarco_dataset.dataset, max_triplets
+            train_dataset.meta_dataset, max_triplets
         )
         query_max_length = int(train_cfg.max_query_length)
         doc_max_length = int(train_cfg.max_doc_length)
         query_iter = _iter_dataset_rows(
-            msmarco_dataset.query_dataset,
-            msmarco_dataset.query_id_column,
-            msmarco_dataset.query_text_column,
+            train_dataset.dataset.query_dataset,
+            train_dataset.dataset.query_id_column_name,
+            train_dataset.dataset.query_text_column_name,
             settings.max_queries,
         )
         corpus_iter = _iter_dataset_rows(
-            msmarco_dataset.corpus_dataset,
-            msmarco_dataset.corpus_id_column,
-            msmarco_dataset.corpus_text_column,
+            train_dataset.dataset.corpus_dataset,
+            train_dataset.dataset.corpus_id_column_name,
+            train_dataset.dataset.corpus_text_column_name,
             settings.max_docs,
         )
 

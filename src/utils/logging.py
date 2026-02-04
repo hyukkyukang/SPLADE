@@ -2,8 +2,9 @@ import argparse
 import logging
 import os
 import sys
+import time
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
-from typing import Any, Iterator, Optional, TextIO
+from typing import Any, Generator, Iterator, Optional, TextIO
 
 import torch
 from pytorch_lightning.utilities import rank_zero_only
@@ -257,18 +258,159 @@ def suppress_pytorch_lightning_tips() -> None:
     logging.getLogger("lightning.pytorch").setLevel(logging.WARNING)
 
 
+_LITLOGGER_TIP_PHRASES: tuple[str, ...] = ("💡 Tip", "litlogger")
+
+
+class _LitLoggerTipFilter(logging.Filter):
+    """Filter out the Lightning tip that mentions litlogger."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message: str = record.getMessage()
+        is_litlogger_tip: bool = all(
+            phrase in message for phrase in _LITLOGGER_TIP_PHRASES
+        )
+        return not is_litlogger_tip
+
+
+_LITLOGGER_TIP_FILTER: _LitLoggerTipFilter = _LitLoggerTipFilter()
+
+
+def _add_litlogger_tip_filter(logger: logging.Logger) -> None:
+    """Attach the litlogger tip filter when missing."""
+    if _LITLOGGER_TIP_FILTER not in logger.filters:
+        logger.addFilter(_LITLOGGER_TIP_FILTER)
+
+
+def suppress_litlogger_tip() -> None:
+    """Suppress the Lightning tip recommending litlogger."""
+    logger_names: tuple[str, ...] = (
+        "pytorch_lightning.utilities.rank_zero",
+        "lightning.pytorch.utilities.rank_zero",
+        "lightning.fabric.utilities.rank_zero",
+        "lightning_utilities.core.rank_zero",
+    )
+    for logger_name in logger_names:
+        logger: logging.Logger = logging.getLogger(logger_name)
+        _add_litlogger_tip_filter(logger)
+
+    rank_zero_module: Any | None
+    try:
+        import lightning_utilities.core.rank_zero as rank_zero_module
+    except ImportError:
+        rank_zero_module = None
+    if rank_zero_module is None:
+        return
+    rank_zero_logger: logging.Logger = rank_zero_module.log
+    _add_litlogger_tip_filter(rank_zero_logger)
+
+
 def suppress_dataloader_workers_warning() -> None:
     logging.getLogger("torch.utils.data").setLevel(logging.WARNING)
 
 
 def suppress_accumulate_grad_stream_mismatch_warning() -> None:
     """Disable the AccumulateGrad stream mismatch warning in PyTorch."""
-    graph_module: Any | None = getattr(torch.autograd, "graph", None)
+    graph_module: Any | None = (
+        torch.autograd.graph if hasattr(torch.autograd, "graph") else None
+    )
     if graph_module is None:
         return
-    set_warn_fn: Any | None = getattr(
-        graph_module, "set_warn_on_accumulate_grad_stream_mismatch", None
+    set_warn_fn: Any | None = (
+        graph_module.set_warn_on_accumulate_grad_stream_mismatch
+        if hasattr(graph_module, "set_warn_on_accumulate_grad_stream_mismatch")
+        else None
     )
     if callable(set_warn_fn):
         # Avoid spamming warnings for benign DDP/compile stream mismatches.
         set_warn_fn(False)
+
+
+@contextmanager
+def loading_status(
+    logger: logging.Logger,
+    subject: str,
+    *,
+    loading_msg: Optional[str] = None,
+    done_msg: Optional[str] = None,
+    only_once: bool = False,
+    rank_id: int = 0,
+    worker_id: int = 0,
+) -> Generator[None, None, None]:
+    """Context manager that logs loading status with elapsed time.
+
+    On enter, logs "Loading {subject}..." message.
+    On exit, logs "Done loading {subject} ({elapsed_time})" message.
+    Elapsed time is automatically formatted in a human-readable way.
+
+    Args:
+        logger: Logger instance for the status messages.
+        subject: Description of what is being loaded (e.g., "query dataset for X").
+        loading_msg: Custom loading message. Defaults to "Loading {subject}...".
+        done_msg: Custom completion message. Defaults to "Done loading {subject}".
+        only_once: If True, only show status on rank 0, worker 0.
+        rank_id: Current process rank ID (for distributed training).
+        worker_id: Current DataLoader worker ID.
+
+    Yields:
+        None: Control is yielded to the code block being wrapped.
+
+    Example:
+        >>> with loading_status(logger, "query dataset for BeIR/msmarco"):
+        ...     dataset = load_dataset("BeIR/msmarco", "queries", split="train")
+        # Logs: "[INFO] Loading query dataset for BeIR/msmarco..."
+        # Then: "[INFO] Done loading query dataset for BeIR/msmarco (2.34s)"
+    """
+    # Build messages
+    loading_text: str = loading_msg or f"Loading {subject}..."
+    done_text: str = done_msg or f"Done loading {subject}"
+
+    # Check if we should skip (only_once filtering)
+    should_skip: bool = only_once and (rank_id != 0 or worker_id != 0)
+    if should_skip:
+        yield
+        return
+
+    # Log "Loading..." message, run the operation, then log "Done..." with elapsed time
+    logger.info(loading_text)
+    start_time: float = time.time()
+    try:
+        yield
+    finally:
+        elapsed: float = time.time() - start_time
+        time_str: str = _format_elapsed_time(elapsed)
+        logger.info(f"{done_text} ({time_str})")
+
+
+def _format_elapsed_time(seconds: float) -> str:
+    """Format elapsed time in a human-readable way.
+
+    Automatically chooses the most appropriate format based on duration:
+    - Less than 1 minute: shows seconds (e.g., "2.34s")
+    - Less than 1 hour: shows minutes and seconds (e.g., "5m 23s")
+    - 1 hour or more: shows hours, minutes, and seconds (e.g., "1h 23m 45s")
+
+    Args:
+        seconds: Elapsed time in seconds.
+
+    Returns:
+        Human-readable time string.
+
+    Examples:
+        >>> _format_elapsed_time(2.345)
+        '2.35s'
+        >>> _format_elapsed_time(125.5)
+        '2m 5s'
+        >>> _format_elapsed_time(3725.0)
+        '1h 2m 5s'
+    """
+    if seconds < 60:
+        return f"{seconds:.2f}s"
+    elif seconds < 3600:
+        minutes: int = int(seconds // 60)
+        secs: int = int(seconds % 60)
+        return f"{minutes}m {secs}s"
+    else:
+        hours: int = int(seconds // 3600)
+        minutes: int = int((seconds % 3600) // 60)
+        secs: int = int(seconds % 60)
+        return f"{hours}h {minutes}m {secs}s"
