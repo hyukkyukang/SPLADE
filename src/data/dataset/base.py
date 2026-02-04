@@ -11,6 +11,14 @@ from omegaconf import DictConfig
 from torch.utils.data import get_worker_info
 
 from src.data.dataclass import MetaItem
+from src.data.dataset.utils import (
+    normalize_optional_str,
+    optional_cfg_str,
+    parse_inline_scores,
+    parse_triplet_line,
+    require_cfg_str,
+    sample_items,
+)
 from src.data.utils import id_to_idx, resolve_dataset_column
 from src.utils.logging import loading_status
 
@@ -35,21 +43,19 @@ class BaseDataset(abc.ABC):
         self.cfg: DictConfig = cfg
         self.name: str = str(self.cfg.name)
 
-        self.hf_name: str | None = self._normalize_optional_str(self.cfg.hf_name)
-        self.hf_subset: str | None = self._normalize_optional_str(self.cfg.hf_subset)
+        self.hf_name: str | None = normalize_optional_str(self.cfg.hf_name)
+        self.hf_subset: str | None = normalize_optional_str(self.cfg.hf_subset)
         self.hf_split: str = str(self.cfg.split)
-        self.hf_cache_dir: str | None = self._normalize_optional_str(
-            self.cfg.hf_cache_dir
-        )
+        self.hf_cache_dir: str | None = normalize_optional_str(self.cfg.hf_cache_dir)
         self.hf_max_samples: int | None = (
             None if self.cfg.hf_max_samples is None else int(self.cfg.hf_max_samples)
         )
         self.hf_skip_samples: int = int(self.cfg.hf_skip_samples)
         self.hf_data_files: Mapping[str, Any] | None = self.cfg.hf_data_files
-        self.query_corpus_hf_name: str | None = self._normalize_optional_str(
+        self.query_corpus_hf_name: str | None = normalize_optional_str(
             self.cfg.query_corpus_hf_name
         )
-        self.query_corpus_hf_cache_dir: str | None = self._normalize_optional_str(
+        self.query_corpus_hf_cache_dir: str | None = normalize_optional_str(
             self.cfg.query_corpus_hf_cache_dir
         )
         self.query_corpus_hf_data_files: Mapping[str, Any] | None = (
@@ -59,24 +65,36 @@ class BaseDataset(abc.ABC):
             self.hf_name is not None or self.query_corpus_hf_name is not None
         )
 
-        self.local_triplets_dir: str | None = self._normalize_optional_str(
+        self.local_triplets_dir: str | None = normalize_optional_str(
             self.cfg.local_triplets_dir
         )
 
-        # Column-name maps should be filled by child classes.
+        query_subset_name: str = require_cfg_str(self.cfg, "query_subset_name")
+        query_split_name: str = require_cfg_str(self.cfg, "query_split_name")
+        query_id_column: str = require_cfg_str(self.cfg, "query_id_column")
+        query_text_column: str = require_cfg_str(self.cfg, "query_text_column")
+        corpus_subset_name: str = require_cfg_str(self.cfg, "corpus_subset_name")
+        corpus_split_name: str = require_cfg_str(self.cfg, "corpus_split_name")
+        corpus_id_column: str = require_cfg_str(self.cfg, "corpus_id_column")
+        corpus_text_column: str = require_cfg_str(self.cfg, "corpus_text_column")
+        corpus_title_column: str | None = optional_cfg_str(
+            self.cfg, "corpus_title_column"
+        )
+
         self.query_column_names: dict[str, str] = {
-            QUERY_SUBSET_NAME_KEY: "",
-            QUERY_SPLIT_NAME_KEY: "",
-            QUERY_ID_COLUMN_KEY: "",
-            QUERY_TEXT_COLUMN_KEY: "",
+            QUERY_SUBSET_NAME_KEY: query_subset_name,
+            QUERY_SPLIT_NAME_KEY: query_split_name,
+            QUERY_ID_COLUMN_KEY: query_id_column,
+            QUERY_TEXT_COLUMN_KEY: query_text_column,
         }
         self.corpus_column_names: dict[str, str] = {
-            CORPUS_SUBSET_NAME_KEY: "",
-            CORPUS_SPLIT_NAME_KEY: "",
-            CORPUS_ID_COLUMN_KEY: "",
-            CORPUS_TEXT_COLUMN_KEY: "",
-            CORPUS_TITLE_COLUMN_KEY: "",
+            CORPUS_SUBSET_NAME_KEY: corpus_subset_name,
+            CORPUS_SPLIT_NAME_KEY: corpus_split_name,
+            CORPUS_ID_COLUMN_KEY: corpus_id_column,
+            CORPUS_TEXT_COLUMN_KEY: corpus_text_column,
         }
+        if corpus_title_column is not None:
+            self.corpus_column_names[CORPUS_TITLE_COLUMN_KEY] = corpus_title_column
 
     # --- Property methods ---
     @property
@@ -224,15 +242,6 @@ class BaseDataset(abc.ABC):
         if self.hf_name is None and self.query_corpus_hf_name is None:
             raise RuntimeError("HuggingFace datasets are disabled (hf_name is null).")
 
-    def _normalize_optional_str(self, value: Any) -> str | None:
-        if value is None:
-            return None
-        if isinstance(value, str):
-            normalized: str = value.strip().lower()
-            if normalized in {"", "none", "null"}:
-                return None
-        return str(value)
-
     def _load_hf_dataset(
         self,
         hf_name: str,
@@ -278,7 +287,7 @@ class BaseDataset(abc.ABC):
         rows: list[dict[str, Any]] = []
         with open(raw_path, "r", encoding="utf-8") as reader:
             for row_idx, line in enumerate(reader):
-                parsed: tuple[str, str, str, str] | None = self._parse_triplet_line(
+                parsed: tuple[str, str, str, str] | None = parse_triplet_line(
                     line, row_idx
                 )
                 if parsed is None:
@@ -298,52 +307,6 @@ class BaseDataset(abc.ABC):
                 )
         return Dataset.from_list(rows)
 
-    def _parse_triplet_line(
-        self, line: str, row_idx: int
-    ) -> tuple[str, str, str, str] | None:
-        stripped: str = line.strip()
-        if not stripped:
-            return None
-        parts: list[str] = stripped.split("\t")
-        if len(parts) == 3:
-            query_text: str
-            pos_text: str
-            neg_text: str
-            query_text, pos_text, neg_text = parts
-            qid: str = str(row_idx)
-        elif len(parts) == 4:
-            qid = parts[0].strip()
-            query_text = parts[1]
-            pos_text = parts[2]
-            neg_text = parts[3]
-        else:
-            return None
-        return qid.strip(), query_text.strip(), pos_text.strip(), neg_text.strip()
-
-    def _parse_inline_scores(
-        self, score_values: Any, doc_ids: list[str]
-    ) -> list[float] | None:
-        if score_values is None:
-            return None
-        if isinstance(score_values, (list, tuple)):
-            if len(score_values) == len(doc_ids):
-                return [float(score) for score in score_values]
-            return None
-        if isinstance(score_values, (int, float)):
-            if len(doc_ids) == 1:
-                return [float(score_values)]
-            return None
-        return None
-
-    def _sample_items(
-        self, items: list[Any], count: int, rng: random.Random
-    ) -> list[Any]:
-        if count <= 0:
-            return []
-        if len(items) <= count:
-            return items
-        return rng.sample(items, count)
-
     def _get_query_text_from_id(self, qid: str) -> str:
         return self.query_text(self.query_dataset_id_to_idx[qid])
 
@@ -359,7 +322,9 @@ class BaseDataset(abc.ABC):
         num_negatives: int,
         rng: random.Random,
     ) -> MetaItem:
-        score_values: Any | None = row.get("score") or row.get("scores")
+        score_values: Any | None = (
+            row.get("score") if "score" in row else row.get("scores")
+        )
         qid: str = ""
         pos_ids: list[str] = []
         neg_ids: list[str] = []
@@ -385,8 +350,10 @@ class BaseDataset(abc.ABC):
             neg_ids = [""]
         elif "query_id" in row and "positive_id" in row:
             qid = str(row["query_id"])
-            pos_ids = [str(row.get("positive_id") or "")]
-            neg_ids = [str(row.get("negative_id") or "")]
+            pos_id_value: Any | None = row.get("positive_id")
+            neg_id_value: Any | None = row.get("negative_id")
+            pos_ids = ["" if pos_id_value is None else str(pos_id_value)]
+            neg_ids = ["" if neg_id_value is None else str(neg_id_value)]
         elif "query_id" in row and "doc_ids" in row and "labels" in row:
             qid = str(row["query_id"])
             row_doc_ids = [str(doc_id) for doc_id in row["doc_ids"]]
@@ -397,8 +364,8 @@ class BaseDataset(abc.ABC):
             neg_ids = [
                 doc_id for doc_id, label in zip(row_doc_ids, labels) if label <= 0
             ]
-            pos_ids = self._sample_items(pos_ids, num_positives, rng)
-            neg_ids = self._sample_items(neg_ids, num_negatives, rng)
+            pos_ids = sample_items(pos_ids, num_positives, rng)
+            neg_ids = sample_items(neg_ids, num_negatives, rng)
             if isinstance(score_values, (list, tuple)) and len(score_values) == len(
                 row_doc_ids
             ):
@@ -413,7 +380,7 @@ class BaseDataset(abc.ABC):
 
         if pos_scores is None or neg_scores is None:
             doc_ids: list[str] = pos_ids + neg_ids
-            inline_scores: list[float] | None = self._parse_inline_scores(
+            inline_scores: list[float] | None = parse_inline_scores(
                 score_values, doc_ids
             )
             if inline_scores is not None and len(inline_scores) == len(doc_ids):

@@ -10,3 +10,10 @@ corpus_split: train
 beir_dataset: null
 
 hf_name: BeIR/${dataset.beir_dataset}
+
+# Column names for query/corpus datasets.
+query_id_column: _id
+query_text_column: text
+corpus_id_column: _id
+corpus_text_column: text
+corpus_title_column: title

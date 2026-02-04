@@ -24,3 +24,14 @@ query_corpus_hf_name: null
 query_corpus_hf_cache_dir: null
 query_corpus_hf_data_files: null
 local_triplets_dir: null
+
+# Column names for query/corpus datasets.
+query_subset_name: queries
+query_split_name: ${.split}
+query_id_column: _id
+query_text_column: text
+corpus_subset_name: corpus
+corpus_split_name: ${.corpus_split}
+corpus_id_column: _id
+corpus_text_column: text
+corpus_title_column: null

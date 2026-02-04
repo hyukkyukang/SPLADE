@@ -11,4 +11,15 @@ hf_subset: triplets
 hf_cache_dir: null
 hf_max_samples: null
 hf_skip_samples: 0
+hf_data_files: null
+
+query_corpus_hf_name: sentence-transformers/msmarco
+query_corpus_hf_cache_dir: null
+query_corpus_hf_data_files: null
+
+# Column names for query/corpus datasets.
+query_id_column: query_id
+query_text_column: query
+corpus_id_column: passage_id
+corpus_text_column: passage
 
