@@ -63,13 +63,21 @@ def main(cfg: DictConfig) -> None:
 
     value_dtype_name: str = str(metadata.get("value_dtype") or cfg.encoding.value_dtype)
     value_dtype: np.dtype = resolve_numpy_dtype(value_dtype_name)
+    index_value_dtype: np.dtype = value_dtype
+    if index_value_dtype == np.float16:
+        log_if_rank_zero(
+            logger,
+            "Index build does not support float16 with numba; using float32.",
+            level="warning",
+        )
+        index_value_dtype = np.dtype("float32")
 
     term_ptr: np.ndarray
     post_doc_ids: np.ndarray
     post_weights: np.ndarray
     doc_ids: list[str]
     term_ptr, post_doc_ids, post_weights, doc_ids = build_inverted_index_from_shards(
-        shard_infos, vocab_size=vocab_size, value_dtype=value_dtype
+        shard_infos, vocab_size=vocab_size, value_dtype=index_value_dtype
     )
 
     np.save(index_path / "term_ptr.npy", term_ptr)
@@ -83,7 +91,8 @@ def main(cfg: DictConfig) -> None:
         "vocab_size": vocab_size,
         "doc_count": len(doc_ids),
         "nnz": int(term_ptr[-1]),
-        "value_dtype": value_dtype_name,
+        "value_dtype": str(index_value_dtype),
+        "encoded_value_dtype": value_dtype_name,
         "encode_dir": str(encode_path),
         "top_k": metadata.get("top_k"),
         "min_weight": metadata.get("min_weight"),

@@ -16,4 +16,4 @@ normalize: false
 doc_only: false
 
 # retrieval index
-exclude_token_ids: null
+exclude_token_ids: []

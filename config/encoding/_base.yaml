@@ -6,7 +6,7 @@ num_workers: 10
 prefetch_factor: 4
 max_padding: true
 
-precision: 16-mixed
+precision: bf16-mixed
 torch_compile: true
 torch_compile_mode: default
 use_cpu: false
@@ -21,7 +21,7 @@ encode_dir: data/encoded
 index_dir: data/index
 
 shard_max_docs: 100_000
-value_dtype: float16
+value_dtype: float32
 async_write: true
 async_write_queue_size: 100
 sparse_top_k: 4096

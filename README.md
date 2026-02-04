@@ -91,7 +91,7 @@ python script/evaluate.py \
 Quick proxy evaluation without full-corpus encoding:
 
 ```
-python script/evaluate_nanobeir.py \
+python script/evaluate.py --benchmark nanobeir \
   testing.checkpoint_path=log/checkpoints/last.ckpt \
   nanobeir.datasets='[msmarco, nfcorpus, nq]' \
   nanobeir.save_json=true
@@ -100,7 +100,7 @@ python script/evaluate_nanobeir.py \
 Use HF weights instead of a checkpoint:
 
 ```
-python script/evaluate_nanobeir.py \
+python script/evaluate.py --benchmark nanobeir \
   nanobeir.use_huggingface_model=true \
   model.huggingface_name=naver/splade_v2_max
 ```

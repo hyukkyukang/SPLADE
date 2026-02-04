@@ -13,14 +13,27 @@ logger: logging.Logger = logging.getLogger("src.indexing.sparse_index")
 
 def resolve_numpy_dtype(dtype_name: str) -> np.dtype:
     """Resolve a numpy dtype from a string label."""
-    normalized: str = str(dtype_name).lower()
+    if isinstance(dtype_name, np.dtype):
+        return dtype_name
+    if isinstance(dtype_name, type) and issubclass(dtype_name, np.generic):
+        return np.dtype(dtype_name)
+
+    normalized: str = str(dtype_name).strip()
+    if normalized.startswith("<class '") and normalized.endswith("'>"):
+        normalized = normalized[len("<class '") : -2]
+    if normalized.startswith("numpy."):
+        normalized = normalized[len("numpy.") :]
+    normalized = normalized.lower()
     if normalized in {"float16", "fp16"}:
-        return np.float16
+        return np.dtype("float16")
     if normalized in {"float32", "fp32"}:
-        return np.float32
+        return np.dtype("float32")
     if normalized in {"float64", "fp64"}:
-        return np.float64
-    raise ValueError(f"Unsupported numpy dtype: {dtype_name}")
+        return np.dtype("float64")
+    try:
+        return np.dtype(normalized)
+    except TypeError as exc:  # pragma: no cover - invalid dtype strings
+        raise ValueError(f"Unsupported numpy dtype: {dtype_name}") from exc
 
 
 def resolve_torch_dtype(value_dtype: np.dtype) -> torch.dtype:
