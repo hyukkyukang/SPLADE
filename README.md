@@ -52,7 +52,7 @@ Encode documents into sparse shards (for retrieval indexing):
 python script/encode.py \
   encoding.checkpoint_path=log/checkpoints/last.ckpt \
   dataset=beir/trec-covid \
-  model.encode_path=log/encode
+  encoding.encode_dir=log/encode
 ```
 
 ## Build inverted index
@@ -61,8 +61,8 @@ Build a sparse inverted index from encoded shards:
 
 ```
 python script/index.py \
-  model.encode_path=log/encode \
-  model.index_path=log/index
+  encoding.encode_dir=log/encode \
+  encoding.index_dir=log/index
 ```
 
 ## Evaluate (retrieval / reranking)
@@ -74,7 +74,7 @@ python script/evaluate.py \
   evaluation.type=retrieval \
   testing.checkpoint_path=log/checkpoints/last.ckpt \
   dataset=beir/trec-covid \
-  model.index_path=log/index
+  encoding.index_dir=log/index
 ```
 
 Reranking evaluation (no index required):

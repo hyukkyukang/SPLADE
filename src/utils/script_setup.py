@@ -1,3 +1,4 @@
+import logging
 import os
 import warnings
 
@@ -61,6 +62,8 @@ def configure_script_environment(
     _register_tagged_log_dir_resolver()
     # Silence noisy FutureWarning messages from dependencies.
     warnings.simplefilter(action="ignore", category=FutureWarning)
+    # Route Python warnings through logging so Hydra formatting applies.
+    logging.captureWarnings(True)
     # Patch Hydra's argparser early for Python 3.14+ compatibility.
     patch_hydra_argparser_for_python314()
 

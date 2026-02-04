@@ -19,6 +19,7 @@ from src.model.pl_module.utils import (
     finalize_retrieval_metrics,
 )
 from src.model.retriever.sparse.neural.splade import SpladeModel
+from src.utils.model_utils import resolve_tagged_output_dir
 
 logger: logging.Logger = logging.getLogger("RetrievalLightningModule")
 
@@ -63,10 +64,16 @@ class RetrievalLightningModule(L.LightningModule):
         )
 
     def _load_index(self) -> InvertedIndex:
-        index_path_value: str | None = self.cfg.model.index_path
-        if not index_path_value:
-            raise ValueError("model.index_path must be set for index-based evaluation.")
-        index_path: Path = Path(index_path_value)
+        index_dir_value: str | None = self.cfg.encoding.index_dir
+        if not index_dir_value:
+            raise ValueError(
+                "encoding.index_dir must be set for index-based evaluation."
+            )
+        index_path: Path = resolve_tagged_output_dir(
+            index_dir_value,
+            model_name=str(self.cfg.model.name),
+            tag=self.cfg.tag,
+        )
         # Load memory-mapped postings for CPU scoring.
         index: InvertedIndex = load_inverted_index(index_path)
         return index

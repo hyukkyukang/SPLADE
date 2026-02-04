@@ -19,12 +19,14 @@ defaults:
 train_dataset:
   hf_skip_samples: ${training.val_sample_size}
   hf_max_samples: null
+  max_padding: ${training.max_padding}
 
 val_dataset:
   hf_name: sentence-transformers/msmarco
   hf_subset: triplets
   hf_max_samples: ${training.val_sample_size}
   hf_skip_samples: 0
+  max_padding: ${training.max_padding}
 
 nanobeir:
   enabled: true

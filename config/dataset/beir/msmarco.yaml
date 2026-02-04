@@ -3,4 +3,5 @@ defaults:
   - _base@_here_
 
 name: beir_msmarco
+type: beir
 beir_dataset: msmarco

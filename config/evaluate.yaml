@@ -9,10 +9,14 @@ root_dir_path: "."
 defaults:
   - _self_
   - model: splade_v1
+  - encoding: default
   - dataset: beir/msmarco
   - testing: default
   # The following overrides are necessary to make the logging colorized.
   - override hydra/job_logging: colorlog_custom
+
+dataset:
+  max_padding: ${testing.max_padding}
 
 evaluation:
   # Supported values: retrieval, reranking.

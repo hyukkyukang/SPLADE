@@ -1,3 +1,4 @@
+import torch
 from omegaconf import DictConfig
 from transformers import PreTrainedTokenizerBase
 
@@ -31,10 +32,16 @@ class EncodePDModule(PDModule):
             self.dataset.corpus_dataset[corpus_idx][self.dataset.corpus_id_column_name]
         )
         doc_text: str = self.dataset.corpus_text(corpus_idx)
+        doc_input_ids: torch.Tensor
+        doc_attention_mask: torch.Tensor
+        doc_input_ids, doc_attention_mask = self._tokenize_text(
+            doc_text, max_length=self.max_doc_length
+        )
         return EncodingDataItem(
             data_idx=int(idx),
             doc_id=doc_id,
-            doc_text=doc_text,
+            doc_input_ids=doc_input_ids,
+            doc_attention_mask=doc_attention_mask,
         )
 
     # --- Property methods ---
@@ -43,6 +50,8 @@ class EncodePDModule(PDModule):
         if self._collator is None:
             self._collator = UniversalCollator(
                 pad_token_id=self.tokenizer.pad_token_id,
+                max_padding=self.max_padding,
+                max_doc_length=self.max_doc_length,
             )
         return self._collator
 
@@ -51,15 +60,7 @@ class EncodePDModule(PDModule):
         if self._corpus_indices is not None:
             return self._corpus_indices
         dataset_len: int = int(len(self.dataset.corpus_dataset))
-        skip_samples: int = int(self.cfg.hf_skip_samples)
-        max_samples: int | None = (
-            None if self.cfg.hf_max_samples is None else int(self.cfg.hf_max_samples)
-        )
-        start_index: int = min(skip_samples, dataset_len)
-        end_index: int = dataset_len
-        if max_samples is not None:
-            end_index = min(start_index + max_samples, dataset_len)
-        self._corpus_indices = list(range(start_index, end_index))
+        self._corpus_indices = list(range(dataset_len))
         return self._corpus_indices
 
     # --- Public methods ---

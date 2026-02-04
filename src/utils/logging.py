@@ -88,18 +88,19 @@ def suppress_output_if_not_rank_zero() -> Iterator[None]:
 
 def get_logger(name: str, file_path: Optional[str] = None) -> logging.Logger:
     logger = logging.getLogger(name)
-    if logger.handlers:
-        return logger
 
-    level = os.environ.get("LOG_LEVEL", "INFO").upper()
-    formatter = logging.Formatter(
-        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-    )
-    handler = logging.StreamHandler()
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
-    logger.setLevel(level)
-    logger.propagate = False
+    # Ensure logs flow to Hydra's root handlers/formatters.
+    for handler in list(logger.handlers):
+        logger.removeHandler(handler)
+    logger.propagate = True
+
+    root_logger = logging.getLogger()
+    if not root_logger.handlers:
+        level = os.environ.get("LOG_LEVEL", "INFO").upper()
+        logging.basicConfig(
+            level=level,
+            format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        )
     return logger
 
 
@@ -266,31 +267,35 @@ def suppress_pytorch_lightning_tips() -> None:
     logging.getLogger("lightning.pytorch").setLevel(logging.WARNING)
 
 
-_LITLOGGER_TIP_PHRASES: tuple[str, ...] = ("💡 Tip", "litlogger")
+_LITLOGGER_TIP_PHRASES: tuple[str, ...] = ("💡 tip", "litlogger")
+_LITMODEL_TIP_PHRASES: tuple[str, ...] = ("💡 tip", "litmodel")
 
 
-class _LitLoggerTipFilter(logging.Filter):
-    """Filter out the Lightning tip that mentions litlogger."""
+class _LightningTipFilter(logging.Filter):
+    """Filter out Lightning tips that mention litlogger or litmodel."""
 
     def filter(self, record: logging.LogRecord) -> bool:
-        message: str = record.getMessage()
+        message: str = record.getMessage().lower()
         is_litlogger_tip: bool = all(
             phrase in message for phrase in _LITLOGGER_TIP_PHRASES
         )
-        return not is_litlogger_tip
+        is_litmodel_tip: bool = all(
+            phrase in message for phrase in _LITMODEL_TIP_PHRASES
+        )
+        return not (is_litlogger_tip or is_litmodel_tip)
 
 
-_LITLOGGER_TIP_FILTER: _LitLoggerTipFilter = _LitLoggerTipFilter()
+_LIGHTNING_TIP_FILTER: _LightningTipFilter = _LightningTipFilter()
 
 
-def _add_litlogger_tip_filter(logger: logging.Logger) -> None:
-    """Attach the litlogger tip filter when missing."""
-    if _LITLOGGER_TIP_FILTER not in logger.filters:
-        logger.addFilter(_LITLOGGER_TIP_FILTER)
+def _add_lightning_tip_filter(logger: logging.Logger) -> None:
+    """Attach the Lightning tip filter when missing."""
+    if _LIGHTNING_TIP_FILTER not in logger.filters:
+        logger.addFilter(_LIGHTNING_TIP_FILTER)
 
 
-def suppress_litlogger_tip() -> None:
-    """Suppress the Lightning tip recommending litlogger."""
+def suppress_lightning_recommendation_tips() -> None:
+    """Suppress the Lightning tips recommending litlogger or litmodels."""
     logger_names: tuple[str, ...] = (
         "pytorch_lightning.utilities.rank_zero",
         "lightning.pytorch.utilities.rank_zero",
@@ -299,7 +304,7 @@ def suppress_litlogger_tip() -> None:
     )
     for logger_name in logger_names:
         logger: logging.Logger = logging.getLogger(logger_name)
-        _add_litlogger_tip_filter(logger)
+        _add_lightning_tip_filter(logger)
 
     rank_zero_module: Any | None
     try:
@@ -309,7 +314,7 @@ def suppress_litlogger_tip() -> None:
     if rank_zero_module is None:
         return
     rank_zero_logger: logging.Logger = rank_zero_module.log
-    _add_litlogger_tip_filter(rank_zero_logger)
+    _add_lightning_tip_filter(rank_zero_logger)
 
 
 def suppress_dataloader_workers_warning() -> None:

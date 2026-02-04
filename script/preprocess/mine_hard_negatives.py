@@ -18,7 +18,11 @@ from src.data.pd_module import RetrievalPDModule, TrainingPDModule
 from src.model.retriever.sparse.neural.splade import SpladeModel
 from src.utils import set_seed
 from src.utils.logging import get_logger, log_if_rank_zero
-from src.utils.model_utils import build_splade_model, load_splade_checkpoint
+from src.utils.model_utils import (
+    apply_checkpoint_model_config,
+    build_splade_model,
+    load_splade_checkpoint,
+)
 from src.utils.script_setup import configure_script_environment
 from src.utils.transformers import build_tokenizer
 
@@ -261,6 +265,12 @@ def main(cfg: DictConfig) -> None:
     settings: MiningSettings = _parse_mining_settings(cfg)
     set_seed(int(cfg.seed))
 
+    cfg = apply_checkpoint_model_config(
+        cfg,
+        checkpoint_path=settings.checkpoint_path,
+        logger=logger,
+    )
+
     device: torch.device = _resolve_device(settings.use_cpu)
     tokenizer: PreTrainedTokenizerBase = build_tokenizer(cfg.model.huggingface_name)
     model: SpladeModel = build_splade_model(cfg, use_cpu=settings.use_cpu)
@@ -274,7 +284,7 @@ def main(cfg: DictConfig) -> None:
     missing_keys: list[str]
     unexpected_keys: list[str]
     missing_keys, unexpected_keys = load_splade_checkpoint(
-        model, settings.checkpoint_path
+        model, settings.checkpoint_path, logger=logger
     )
     log_if_rank_zero(
         logger,

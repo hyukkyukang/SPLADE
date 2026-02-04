@@ -4,12 +4,16 @@ name: default
 batch_size: 32
 per_device_batch_size: null
 num_workers: 4
+max_padding: true
 
 precision: 16-mixed
 use_cpu: false
 strategy: ddp
+static_graph: true
 num_devices: null
 device_id: 0
+sparse_top_k: 4096
+sparse_min_weight: 0.0
 
 k_list: [1, 5, 10, 50, 100]
 save_run: false

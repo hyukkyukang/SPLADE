@@ -25,7 +25,9 @@ def build_splade_model_with_checkpoint(
     if checkpoint_path:
         missing: list[str]
         unexpected: list[str]
-        missing, unexpected = load_splade_checkpoint(model, checkpoint_path)
+        missing, unexpected = load_splade_checkpoint(
+            model, checkpoint_path, logger=logger
+        )
         log_if_rank_zero(
             logger,
             f"Loaded checkpoint. Missing: {len(missing)}, unexpected: {len(unexpected)}",

@@ -111,7 +111,9 @@ class EncodingDataItem:
 
     data_idx: int
     doc_id: str
-    doc_text: str
+    # Shape: (seq_len,)
+    doc_input_ids: torch.Tensor
+    doc_attention_mask: torch.Tensor
 
 
 @dataclass(frozen=True)

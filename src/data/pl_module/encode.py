@@ -44,6 +44,9 @@ class EncodeDataModule(L.LightningDataModule):
 
     def predict_dataloader(self) -> DataLoader:
         num_workers: int = int(self.cfg.encoding.num_workers)
+        prefetch_factor: int | None = None
+        if num_workers > 0:
+            prefetch_factor = int(self.cfg.encoding.prefetch_factor)
         sampler: DistributedSampler | None = None
         if torch.distributed.is_available() and torch.distributed.is_initialized():
             sampler = DistributedSampler(self.dataset, shuffle=False)
@@ -58,4 +61,6 @@ class EncodeDataModule(L.LightningDataModule):
         if sampler is not None:
             dataloader_kwargs["sampler"] = sampler
             dataloader_kwargs["shuffle"] = False
+        if prefetch_factor is not None:
+            dataloader_kwargs["prefetch_factor"] = prefetch_factor
         return DataLoader(**dataloader_kwargs)

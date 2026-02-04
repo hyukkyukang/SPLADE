@@ -1,15 +1,28 @@
 # @package encoding
 name: encoding_base
 
-batch_size: 256
+batch_size: 512
 num_workers: 32
+prefetch_factor: 4
+max_padding: true
 
 precision: 16-mixed
+torch_compile: true
+torch_compile_mode: default
 use_cpu: false
 strategy: ddp
+static_graph: true
 num_devices: null
 device_id: 0
 
 checkpoint_path: null
-shard_max_docs: 10000
-value_dtype: float32
+# Directories for saving encoded shards and index.
+encode_dir: data/encoded
+index_dir: data/index
+
+shard_max_docs: 100_000
+value_dtype: float16
+async_write: true
+async_write_queue_size: 100
+sparse_top_k: 4096
+sparse_min_weight: 0.0

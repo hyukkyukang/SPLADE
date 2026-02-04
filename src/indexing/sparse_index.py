@@ -23,6 +23,160 @@ def resolve_numpy_dtype(dtype_name: str) -> np.dtype:
     raise ValueError(f"Unsupported numpy dtype: {dtype_name}")
 
 
+def resolve_torch_dtype(value_dtype: np.dtype) -> torch.dtype:
+    """Resolve a torch dtype from a numpy dtype."""
+    resolved: np.dtype = np.dtype(value_dtype)
+    if resolved == np.float16:
+        return torch.float16
+    if resolved == np.float32:
+        return torch.float32
+    if resolved == np.float64:
+        return torch.float64
+    raise ValueError(f"Unsupported torch dtype for numpy dtype: {resolved}")
+
+
+def sparsify_vector_gpu(
+    vector: torch.Tensor,
+    *,
+    exclude_token_ids: torch.Tensor | None,
+    min_weight: float,
+    top_k: int | None,
+    value_dtype: np.dtype,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Sparsify a single dense vector on the current device."""
+    local_vec: torch.Tensor = vector
+    if exclude_token_ids is not None and int(exclude_token_ids.numel()) > 0:
+        local_vec = local_vec.clone()
+        local_vec[exclude_token_ids] = 0.0
+
+    if min_weight > 0.0:
+        mask: torch.Tensor = local_vec > min_weight
+    else:
+        mask = local_vec > 0.0
+
+    if not bool(mask.any()):
+        empty_indices: np.ndarray = np.zeros((0,), dtype=np.int32)
+        empty_values: np.ndarray = np.zeros((0,), dtype=value_dtype)
+        return empty_indices, empty_values
+
+    indices: torch.Tensor = torch.nonzero(mask, as_tuple=False).squeeze(1)
+    if top_k is not None and int(indices.numel()) > int(top_k):
+        values_for_topk: torch.Tensor = local_vec[indices]
+        topk_values: torch.Tensor
+        topk_positions: torch.Tensor
+        topk_values, topk_positions = torch.topk(
+            values_for_topk, k=int(top_k), largest=True, sorted=False
+        )
+        indices = indices[topk_positions]
+        values: torch.Tensor = topk_values
+    else:
+        values = local_vec[indices]
+
+    if int(indices.numel()) > 1:
+        order: torch.Tensor = torch.argsort(indices)
+        indices = indices[order]
+        values = values[order]
+
+    indices_np: np.ndarray = indices.detach().cpu().numpy().astype(np.int32, copy=False)
+    values_np: np.ndarray = (
+        values.detach().cpu().numpy().astype(value_dtype, copy=False)
+    )
+    return indices_np, values_np
+
+
+def sparsify_batch_gpu_csr(
+    vectors: torch.Tensor,
+    *,
+    exclude_token_ids: torch.Tensor | None,
+    min_weight: float,
+    top_k: int | None,
+    value_dtype: np.dtype,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Sparsify a batch of dense vectors into CSR tensors on GPU."""
+    if vectors.ndim != 2:
+        raise ValueError("sparsify_batch_gpu_csr expects a 2D tensor.")
+
+    batch_size: int = int(vectors.shape[0])
+    vocab_size: int = int(vectors.shape[1])
+    if batch_size == 0:
+        indptr = torch.zeros((1,), dtype=torch.int64, device="cpu")
+        indices = torch.empty((0,), dtype=torch.int32, device="cpu")
+        values = torch.empty(
+            (0,), dtype=resolve_torch_dtype(value_dtype), device="cpu"
+        )
+        return indptr, indices, values
+
+    device: torch.device = vectors.device
+    threshold: float = float(min_weight) if min_weight > 0.0 else 0.0
+    exclude_ids: torch.Tensor | None = exclude_token_ids
+    if exclude_ids is not None and int(exclude_ids.numel()) > 0:
+        exclude_ids = exclude_ids.to(device=device)
+
+    if top_k is not None:
+        top_k_int: int = min(int(top_k), vocab_size)
+        if top_k_int <= 0:
+            indptr = torch.zeros((batch_size + 1,), dtype=torch.int64, device="cpu")
+            indices = torch.empty((0,), dtype=torch.int32, device="cpu")
+            values = torch.empty(
+                (0,), dtype=resolve_torch_dtype(value_dtype), device="cpu"
+            )
+            return indptr, indices, values
+
+        masked: torch.Tensor = vectors
+        if exclude_ids is not None:
+            masked = masked.clone()
+            masked.index_fill_(1, exclude_ids, float("-inf"))
+        topk_values: torch.Tensor
+        topk_indices: torch.Tensor
+        topk_values, topk_indices = torch.topk(
+            masked, k=top_k_int, dim=1, largest=True, sorted=False
+        )
+        valid_mask: torch.Tensor = topk_values > threshold
+        order: torch.Tensor = torch.argsort(topk_indices, dim=1)
+        sorted_indices: torch.Tensor = torch.gather(topk_indices, 1, order)
+        sorted_values: torch.Tensor = torch.gather(topk_values, 1, order)
+        sorted_valid: torch.Tensor = torch.gather(valid_mask, 1, order)
+        row_counts: torch.Tensor = sorted_valid.sum(dim=1, dtype=torch.int64)
+        indptr_gpu: torch.Tensor = torch.zeros(
+            (batch_size + 1,), dtype=torch.int64, device=device
+        )
+        indptr_gpu[1:] = torch.cumsum(row_counts, dim=0)
+        flat_indices: torch.Tensor = sorted_indices[sorted_valid]
+        flat_values: torch.Tensor = sorted_values[sorted_valid]
+    else:
+        mask: torch.Tensor = vectors > threshold
+        if exclude_ids is not None:
+            mask.index_fill_(1, exclude_ids, False)
+        if bool(mask.any()):
+            row_idx: torch.Tensor
+            col_idx: torch.Tensor
+            row_idx, col_idx = torch.nonzero(mask, as_tuple=True)
+            linear_idx: torch.Tensor = row_idx.to(torch.int64) * int(
+                vocab_size
+            ) + col_idx.to(torch.int64)
+            order = torch.argsort(linear_idx)
+            row_idx = row_idx[order]
+            col_idx = col_idx[order]
+            flat_values = vectors[row_idx, col_idx]
+            row_counts = torch.bincount(row_idx, minlength=batch_size)
+            flat_indices = col_idx
+        else:
+            flat_indices = torch.empty((0,), dtype=torch.long, device=device)
+            flat_values = torch.empty((0,), dtype=vectors.dtype, device=device)
+            row_counts = torch.zeros((batch_size,), dtype=torch.int64, device=device)
+
+        indptr_gpu = torch.zeros(
+            (batch_size + 1,), dtype=torch.int64, device=device
+        )
+        indptr_gpu[1:] = torch.cumsum(row_counts, dim=0)
+
+    torch_value_dtype: torch.dtype = resolve_torch_dtype(value_dtype)
+    indptr = indptr_gpu.to(device="cpu")
+    indices = flat_indices.to(dtype=torch.int32, device="cpu")
+    values = flat_values.to(dtype=torch_value_dtype, device="cpu")
+    return indptr, indices, values
+
+
 @dataclass(frozen=True)
 class ShardInfo:
     """File locations for a single sparse shard."""
@@ -209,6 +363,61 @@ class SparseShardWriter:
             values: np.ndarray
             indices, values = self._sparsify_vector(vector)
             self._append_doc(doc_id, indices, values)
+            if len(self._buffer_doc_ids) >= self.shard_max_docs:
+                self._flush()
+
+    def write_sparse_batch(
+        self,
+        doc_ids: Sequence[str],
+        indices_list: Sequence[np.ndarray],
+        values_list: Sequence[np.ndarray],
+    ) -> None:
+        if len(doc_ids) == 0:
+            return
+        if len(doc_ids) != len(indices_list) or len(doc_ids) != len(values_list):
+            raise ValueError("Sparse batch inputs must align with doc_ids length.")
+
+        for doc_id, indices, values in zip(doc_ids, indices_list, values_list):
+            self._append_doc(str(doc_id), indices, values)
+            if len(self._buffer_doc_ids) >= self.shard_max_docs:
+                self._flush()
+
+    def write_sparse_csr_batch(
+        self,
+        doc_ids: Sequence[str],
+        indptr: np.ndarray | torch.Tensor,
+        indices: np.ndarray | torch.Tensor,
+        values: np.ndarray | torch.Tensor,
+    ) -> None:
+        """Write a CSR batch (indptr/indices/values) for provided doc_ids."""
+        if len(doc_ids) == 0:
+            return
+
+        indptr_np: np.ndarray = (
+            indptr.detach().cpu().numpy() if isinstance(indptr, torch.Tensor) else indptr
+        )
+        indices_np: np.ndarray = (
+            indices.detach().cpu().numpy()
+            if isinstance(indices, torch.Tensor)
+            else indices
+        )
+        values_np: np.ndarray = (
+            values.detach().cpu().numpy()
+            if isinstance(values, torch.Tensor)
+            else values
+        )
+
+        indptr_np = indptr_np.astype(np.int64, copy=False)
+        indices_np = indices_np.astype(np.int32, copy=False)
+        values_np = values_np.astype(self.value_dtype, copy=False)
+
+        if indptr_np.shape[0] != len(doc_ids) + 1:
+            raise ValueError("CSR indptr length must equal doc_ids length + 1.")
+
+        for doc_idx, doc_id in enumerate(doc_ids):
+            start: int = int(indptr_np[doc_idx])
+            end: int = int(indptr_np[doc_idx + 1])
+            self._append_doc(str(doc_id), indices_np[start:end], values_np[start:end])
             if len(self._buffer_doc_ids) >= self.shard_max_docs:
                 self._flush()
 
@@ -542,5 +751,8 @@ __all__ = [
     "load_shard_manifest",
     "resolve_numpy_dtype",
     "score_query_postings",
+    "sparsify_batch_gpu_csr",
+    "sparsify_vector_gpu",
     "sparsify_query_vector",
+    "resolve_torch_dtype",
 ]

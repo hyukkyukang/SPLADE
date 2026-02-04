@@ -3,7 +3,7 @@ services:
         image: hyukkyukang/splade:latest
         container_name: SPLADE
 
-        shm_size: 24gb
+        shm_size: 128gb
         ulimits:
             memlock: -1
         stdin_open: true

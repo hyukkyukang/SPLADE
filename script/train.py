@@ -22,7 +22,7 @@ from src.utils import log_if_rank_zero, set_seed
 from src.utils.logging import (
     get_logger,
     suppress_accumulate_grad_stream_mismatch_warning,
-    suppress_litlogger_tip,
+    suppress_lightning_recommendation_tips,
     setup_tqdm_friendly_logging,
 )
 from src.utils.script_setup import configure_script_environment, normalize_tag
@@ -92,8 +92,8 @@ def _build_progress_bar(training_cfg: DictConfig) -> RichProgressBar | None:
 def main(cfg: DictConfig) -> None:
     setup_tqdm_friendly_logging()
     suppress_accumulate_grad_stream_mismatch_warning()
-    # Silence the Lightning litlogger suggestion printed during trainer init.
-    suppress_litlogger_tip()
+    # Silence Lightning recommendation tips printed during trainer init.
+    suppress_lightning_recommendation_tips()
     os.makedirs(cfg.log_dir, exist_ok=True)
 
     set_seed(cfg.seed)

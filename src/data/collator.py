@@ -281,5 +281,42 @@ class UniversalCollator:
 
     def _collate_encoding(self, batch: Sequence[EncodingDataItem]) -> dict[str, Any]:
         doc_ids: list[str] = [item.doc_id for item in batch]
-        doc_texts: list[str] = [item.doc_text for item in batch]
-        return {"doc_ids": doc_ids, "doc_texts": doc_texts}
+        if self.max_padding:
+            max_doc_length: int | None = self.max_doc_length
+            if max_doc_length is None or max_doc_length <= 0:
+                raise ValueError("max_padding requires a positive max_doc_length.")
+            batch_size: int = len(batch)
+            doc_input_ids: torch.Tensor = torch.full(
+                (batch_size, max_doc_length),
+                self.pad_token_id,
+                dtype=torch.long,
+            )
+            doc_attention_mask: torch.Tensor = torch.zeros(
+                (batch_size, max_doc_length), dtype=torch.long
+            )
+            for batch_idx, item in enumerate(batch):
+                doc_len: int = min(
+                    int(item.doc_input_ids.shape[0]), max_doc_length
+                )
+                if doc_len == 0:
+                    continue
+                doc_input_ids[batch_idx, :doc_len] = item.doc_input_ids[:doc_len]
+                doc_attention_mask[batch_idx, :doc_len] = item.doc_attention_mask[
+                    :doc_len
+                ]
+        else:
+            doc_input_ids = pad_sequence(
+                [item.doc_input_ids for item in batch],
+                batch_first=True,
+                padding_value=self.pad_token_id,
+            )
+            doc_attention_mask = pad_sequence(
+                [item.doc_attention_mask for item in batch],
+                batch_first=True,
+                padding_value=0,
+            )
+        return {
+            "doc_ids": doc_ids,
+            "doc_input_ids": doc_input_ids,
+            "doc_attention_mask": doc_attention_mask,
+        }

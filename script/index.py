@@ -16,6 +16,7 @@ from src.indexing.sparse_index import (
     resolve_numpy_dtype,
 )
 from src.utils.logging import get_logger, log_if_rank_zero
+from src.utils.model_utils import resolve_tagged_output_dir
 from src.utils.script_setup import configure_script_environment
 
 logger: logging.Logger = get_logger(__name__, __file__)
@@ -33,14 +34,22 @@ configure_script_environment(
 @hydra.main(version_base=None, config_path=ABS_CONFIG_DIR, config_name="encode")
 def main(cfg: DictConfig) -> None:
     os.makedirs(cfg.log_dir, exist_ok=True)
-    encode_path_value: str | None = cfg.model.encode_path
-    if encode_path_value is None:
-        raise ValueError("model.encode_path must be set for indexing.")
-    index_path_value: str | None = cfg.model.index_path
-    if index_path_value is None:
-        raise ValueError("model.index_path must be set for indexing.")
-    encode_path: Path = Path(encode_path_value)
-    index_path: Path = Path(index_path_value)
+    encode_dir_value: str | None = cfg.encoding.encode_dir
+    if encode_dir_value is None:
+        raise ValueError("encoding.encode_dir must be set for indexing.")
+    index_dir_value: str | None = cfg.encoding.index_dir
+    if index_dir_value is None:
+        raise ValueError("encoding.index_dir must be set for indexing.")
+    encode_path: Path = resolve_tagged_output_dir(
+        encode_dir_value,
+        model_name=str(cfg.model.name),
+        tag=cfg.tag,
+    )
+    index_path: Path = resolve_tagged_output_dir(
+        index_dir_value,
+        model_name=str(cfg.model.name),
+        tag=cfg.tag,
+    )
     index_path.mkdir(parents=True, exist_ok=True)
 
     shard_infos: list[ShardInfo]
@@ -75,7 +84,7 @@ def main(cfg: DictConfig) -> None:
         "doc_count": len(doc_ids),
         "nnz": int(term_ptr[-1]),
         "value_dtype": value_dtype_name,
-        "encode_path": str(encode_path),
+        "encode_dir": str(encode_path),
         "top_k": metadata.get("top_k"),
         "min_weight": metadata.get("min_weight"),
         "exclude_token_ids": metadata.get("exclude_token_ids"),
