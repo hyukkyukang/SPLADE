@@ -23,11 +23,16 @@ hf_data_files: null
 query_corpus_hf_name: null
 query_corpus_hf_cache_dir: null
 query_corpus_hf_data_files: null
+max_queries: null
 qrels_hf_name: null
 qrels_hf_subset: null
 qrels_hf_split: null
 qrels_hf_cache_dir: null
 qrels_hf_data_files: null
+use_qrels: true
+use_triplet_positives: false
+triplet_positive_cache_path: null
+triplet_positive_cache_overwrite: false
 load_corpus_in_memory: false
 local_triplets_dir: null
 

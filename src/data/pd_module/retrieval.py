@@ -1,6 +1,12 @@
-from typing import Any, Dict
+import logging
+import time
+from pathlib import Path
+from typing import Any, Dict, Iterable, Mapping
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 import torch
+from tqdm import tqdm
 from datasets import Dataset, load_dataset
 from omegaconf import DictConfig
 from transformers import PreTrainedTokenizerBase
@@ -8,6 +14,10 @@ from transformers import PreTrainedTokenizerBase
 from src.data.collator import UniversalCollator
 from src.data.dataclass import RetrievalDataItem
 from src.data.pd_module import PDModule
+from src.utils.dist import is_rank_zero, maybe_barrier
+from src.utils.logging import log_if_rank_zero
+
+logger: logging.Logger = logging.getLogger("RetrievalPDModule")
 
 
 class RetrievalPDModule(PDModule):
@@ -36,6 +46,21 @@ class RetrievalPDModule(PDModule):
             seed=seed,
             load_teacher_scores=load_teacher_scores,
             require_teacher_scores=require_teacher_scores,
+        )
+        self._use_qrels: bool = bool(getattr(self.cfg, "use_qrels", True))
+        self._use_triplet_positives: bool = bool(
+            getattr(self.cfg, "use_triplet_positives", False)
+        )
+        cache_path_value: str | None = self._normalize_optional_str(
+            getattr(self.cfg, "triplet_positive_cache_path", None)
+        )
+        self._triplet_positive_cache_path: str | None = cache_path_value
+        self._triplet_positive_cache_overwrite: bool = bool(
+            getattr(self.cfg, "triplet_positive_cache_overwrite", False)
+        )
+        max_queries_value: Any | None = getattr(self.cfg, "max_queries", None)
+        self._max_queries: int | None = (
+            None if max_queries_value is None else int(max_queries_value)
         )
         self.hf_name: str = (
             str(self.cfg.query_corpus_hf_name)
@@ -125,6 +150,105 @@ class RetrievalPDModule(PDModule):
             return
         self._query_id_to_idx = dict(self.dataset.query_dataset_id_to_idx)
         self._query_ids = list(self._query_id_to_idx.keys())
+        if self._max_queries is not None and self._max_queries > 0:
+            self._query_ids = self._query_ids[: self._max_queries]
+
+    def _resolve_triplet_positive_cache_path(
+        self, *, required: bool = False
+    ) -> Path | None:
+        cache_path_value: str | None = self._triplet_positive_cache_path
+        if cache_path_value is None:
+            if required:
+                raise ValueError(
+                    "dataset.triplet_positive_cache_path must be set when "
+                    "dataset.use_triplet_positives=true."
+                )
+            return None
+        return Path(cache_path_value)
+
+    def _load_triplet_positive_cache(
+        self, cache_path: Path
+    ) -> Dict[str, Dict[str, float]]:
+        table: pa.Table = pq.read_table(cache_path, columns=["qid", "doc_ids"])
+        qids: list[str] = [str(qid) for qid in table.column("qid").to_pylist()]
+        doc_ids_list: list[list[str] | None] = table.column("doc_ids").to_pylist()
+        positives: Dict[str, Dict[str, float]] = {}
+        for qid, doc_ids in zip(qids, doc_ids_list):
+            if not qid or not doc_ids:
+                continue
+            positives[qid] = {str(doc_id): 1.0 for doc_id in doc_ids}
+        return positives
+
+    def _write_triplet_positive_cache(
+        self, cache_path: Path, positives: Dict[str, Dict[str, float]]
+    ) -> None:
+        qids: list[str] = []
+        doc_ids_list: list[list[str]] = []
+        for qid in sorted(positives):
+            doc_map: Dict[str, float] = positives[qid]
+            if not doc_map:
+                continue
+            qids.append(str(qid))
+            doc_ids_list.append(sorted(str(doc_id) for doc_id in doc_map.keys()))
+        table: pa.Table = pa.Table.from_pydict(
+            {"qid": qids, "doc_ids": doc_ids_list},
+            schema=pa.schema(
+                [("qid", pa.string()), ("doc_ids", pa.list_(pa.string()))]
+            ),
+        )
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path: Path = cache_path.with_name(f"{cache_path.name}.tmp")
+        pq.write_table(table, tmp_path)
+        tmp_path.replace(cache_path)
+
+    @staticmethod
+    def _resolve_iterable_len(value: Iterable[Mapping[str, Any]]) -> int | None:
+        try:
+            return len(value)  # type: ignore[arg-type]
+        except (TypeError, AttributeError):
+            return None
+
+    def _build_positives_from_triplets(
+        self,
+        triplet_rows: Iterable[Mapping[str, Any]],
+        allowed_queries: set[str],
+        *,
+        enable_progress: bool,
+    ) -> tuple[Dict[str, Dict[str, float]], int, int]:
+        positives_by_qid: dict[str, set[str]] = {}
+        row_count: int = 0
+        positive_pairs: int = 0
+        iterator: Iterable[Mapping[str, Any]] = triplet_rows
+        if enable_progress:
+            total_rows: int | None = self._resolve_iterable_len(triplet_rows)
+            iterator = tqdm(
+                triplet_rows,
+                total=total_rows,
+                desc="Scanning triplet positives",
+                mininterval=30.0,
+            )
+        for raw_row in iterator:
+            row: Mapping[str, Any] = raw_row
+            row_count += 1
+            qid: str = str(
+                row.get("query_id") or row.get("qid") or row.get("_id") or ""
+            )
+            if not qid or qid not in allowed_queries:
+                continue
+            pos_id: str = str(
+                row.get("positive_id") or row.get("pos_id") or row.get("doc_pos_id") or ""
+            )
+            if not pos_id:
+                continue
+            doc_set: set[str] = positives_by_qid.setdefault(qid, set())
+            if pos_id not in doc_set:
+                doc_set.add(pos_id)
+                positive_pairs += 1
+        positives: Dict[str, Dict[str, float]] = {
+            qid: {doc_id: 1.0 for doc_id in doc_ids}
+            for qid, doc_ids in positives_by_qid.items()
+        }
+        return positives, row_count, positive_pairs
 
     def _load_hf_split(
         self, hf_name: str, config: str, split: str, cache_dir: str | None
@@ -169,10 +293,111 @@ class RetrievalPDModule(PDModule):
     # --- Public methods ---
     def prepare_data(self) -> None:
         _ = self.dataset.query_dataset
-        _ = self._load_qrels_dataset()
+        if self._use_qrels:
+            _ = self._load_qrels_dataset()
+            return
+        if not self._use_triplet_positives:
+            return
+
+        cache_path: Path = self._resolve_triplet_positive_cache_path(required=True)
+        if cache_path.exists() and not self._triplet_positive_cache_overwrite:
+            log_if_rank_zero(
+                logger, f"Triplet positives cache hit: {cache_path.as_posix()}"
+            )
+            return
+        if not is_rank_zero():
+            return
+
+        log_if_rank_zero(
+            logger,
+            "Scanning triplet metadata to build positives cache. This can take a "
+            "while on MSMARCO.",
+        )
+        log_if_rank_zero(
+            logger, f"Building triplet positives cache: {cache_path.as_posix()}"
+        )
+        try:
+            self.dataset.prepare_meta_dataset()
+        except NotImplementedError as exc:
+            raise ValueError(
+                "dataset.use_triplet_positives requires a dataset with "
+                "triplet metadata."
+            ) from exc
+        self._ensure_query_index()
+        allowed_queries: set[str] = set(self._query_ids)
+        start_time: float = time.perf_counter()
+        positives: Dict[str, Dict[str, float]]
+        row_count: int
+        positive_pairs: int
+        positives, row_count, positive_pairs = self._build_positives_from_triplets(
+            self.dataset.meta_dataset, allowed_queries, enable_progress=True
+        )
+        self._write_triplet_positive_cache(cache_path, positives)
+        elapsed: float = time.perf_counter() - start_time
+        log_if_rank_zero(
+            logger,
+            "Saved triplet positives cache to "
+            f"{cache_path.as_posix()} ({len(positives)} queries, "
+            f"{positive_pairs} positives from {row_count} rows in {elapsed:.1f}s).",
+        )
 
     def setup(self) -> None:
         self._ensure_query_index()
+        if not self._use_qrels:
+            self._qrels_dataset = None
+            if self._use_triplet_positives:
+                cache_path: Path = self._resolve_triplet_positive_cache_path(
+                    required=True
+                )
+                if not cache_path.exists():
+                    if is_rank_zero():
+                        log_if_rank_zero(
+                            logger,
+                            "Triplet positives cache missing; rebuilding at "
+                            f"{cache_path.as_posix()}.",
+                            level="warning",
+                        )
+                        try:
+                            self.dataset.prepare_meta_dataset()
+                        except NotImplementedError as exc:
+                            raise ValueError(
+                                "dataset.use_triplet_positives requires a dataset with "
+                                "triplet metadata."
+                            ) from exc
+                        allowed_queries: set[str] = set(self._query_ids)
+                        positives, row_count, positive_pairs = (
+                            self._build_positives_from_triplets(
+                                self.dataset.meta_dataset,
+                                allowed_queries,
+                                enable_progress=True,
+                            )
+                        )
+                        self._write_triplet_positive_cache(cache_path, positives)
+                        log_if_rank_zero(
+                            logger,
+                            "Saved triplet positives cache to "
+                            f"{cache_path.as_posix()} ({len(positives)} queries, "
+                            f"{positive_pairs} positives from {row_count} rows).",
+                        )
+                    maybe_barrier()
+                else:
+                    maybe_barrier()
+
+                if not cache_path.exists():
+                    raise ValueError(
+                        "Triplet positives cache missing after build: "
+                        f"{cache_path.as_posix()}."
+                    )
+                self._qrels = self._load_triplet_positive_cache(cache_path)
+                log_if_rank_zero(
+                    logger,
+                    "Loaded triplet positives cache from "
+                    f"{cache_path.as_posix()} ({len(self._qrels)} queries).",
+                )
+            else:
+                self._qrels = {}
+            return
+
         self._qrels_dataset = self._load_qrels_dataset()
 
         self._qrels = {}

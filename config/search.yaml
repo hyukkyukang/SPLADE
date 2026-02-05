@@ -1,0 +1,47 @@
+# Search entrypoint config
+seed: 10
+log_dir_base: "log"
+tag: null
+log_dir: ${tagged_log_dir:${log_dir_base},${tag}}
+root_dir_path: "."
+
+# Defaults
+defaults:
+  - model: splade_v1
+  - encoding: default
+  - dataset: msmarco
+  - testing: default
+  - _self_
+  # The following overrides are necessary to make the logging colorized.
+  - override hydra/job_logging: colorlog_custom
+
+dataset:
+  max_padding: ${testing.max_padding}
+  use_qrels: false
+  use_triplet_positives: true
+  triplet_positive_cache_path: data/cache/msmarco_triplet_positives.parquet
+
+testing:
+  k_list: [500]
+  save_run: true
+  run_path: ${log_dir}/search_results.jsonl
+
+search:
+  exclude_positives: true
+  include_query_text: false
+  merge_ranks: true
+  flush_every: 100
+
+hydra:
+  output_subdir: null
+  run:
+    dir: ${log_dir}
+  job_logging:
+    handlers:
+      console:
+        class: logging.StreamHandler
+        formatter: colorlog
+        stream: ext://sys.stdout
+      file:
+        class: logging.FileHandler
+        filename: ${log_dir}/search.log
