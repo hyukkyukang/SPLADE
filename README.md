@@ -65,6 +65,10 @@ python script/index.py \
   encoding.index_dir=log/index
 ```
 
+Block-Max WAND scoring requires bounds stored in the index. If you enable
+`testing.scoring_method=wand` or change `encoding.wand_block_size`, rebuild the
+index with `script/index.py`.
+
 ## Evaluate (retrieval / reranking)
 
 Index-based retrieval evaluation:
@@ -110,7 +114,7 @@ python script/evaluate.py --benchmark nanobeir \
 Mine hard negatives with a trained checkpoint:
 
 ```
-python script/preprocess/mine_hard_negatives.py \
+python script/preprocess/mine_hard_negative.py \
   mining.checkpoint_path=log/checkpoints/last.ckpt \
   mining.output_dir=data/hard_negatives \
   mining.output_format=triplet
@@ -150,3 +154,4 @@ docker run --gpus all -v "$PWD:/workspace" -it splade-repro bash
 - Paper-faithful regularization: `training.regularization.paper_faithful=true|false`
 - SPLADE variants: `training=splade_v1|splade_v2_max|splade_v2_doc`
 - Distillation: `training.distill.enabled=true`
+- Encode compilation: `encoding.torch_compile=true` (compiles encoder + sparsify core)

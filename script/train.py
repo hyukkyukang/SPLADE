@@ -18,18 +18,16 @@ from omegaconf import DictConfig, OmegaConf
 from config.path import ABS_CONFIG_DIR
 from src.data.pl_module import TrainDataModule
 from src.model.pl_module import SPLADETrainingModule
-from src.utils import log_if_rank_zero, set_seed
+from src.utils import log_if_rank_zero
 from src.utils.logging import (
     get_logger,
     suppress_accumulate_grad_stream_mismatch_warning,
-    suppress_lightning_recommendation_tips,
-    setup_tqdm_friendly_logging,
 )
-from src.utils.script_setup import configure_script_environment, normalize_tag
-from src.utils.trainer import (
-    get_cpu_trainer_kwargs,
-    get_gpu_trainer_kwargs,
-    resolve_precision,
+from src.utils.script_setup import (
+    configure_script_environment,
+    initialize_run,
+    normalize_tag,
+    resolve_trainer_settings,
 )
 
 logger: logging.Logger = get_logger(__name__, __file__)
@@ -90,23 +88,12 @@ def _build_progress_bar(training_cfg: DictConfig) -> RichProgressBar | None:
 
 @hydra.main(version_base=None, config_path=ABS_CONFIG_DIR, config_name="train")
 def main(cfg: DictConfig) -> None:
-    setup_tqdm_friendly_logging()
+    initialize_run(cfg, logger=logger, suppress_lightning_tips=True)
     suppress_accumulate_grad_stream_mismatch_warning()
-    # Silence Lightning recommendation tips printed during trainer init.
-    suppress_lightning_recommendation_tips()
-    os.makedirs(cfg.log_dir, exist_ok=True)
-
-    set_seed(cfg.seed)
-    log_if_rank_zero(logger, f"Random seed set to: {cfg.seed}")
 
     training_cfg: DictConfig = cfg.training
-    trainer_kwargs: dict[str, Any] = (
-        get_cpu_trainer_kwargs(training_cfg)
-        if training_cfg.use_cpu
-        else get_gpu_trainer_kwargs(training_cfg)
-    )
+    trainer_kwargs, precision = resolve_trainer_settings(training_cfg)
     _maybe_mark_ddp_launcher(training_cfg, trainer_kwargs)
-    precision: str = resolve_precision(training_cfg)
 
     model: SPLADETrainingModule = SPLADETrainingModule(cfg=cfg)
     data_module: TrainDataModule = TrainDataModule(cfg=cfg)

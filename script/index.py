@@ -13,6 +13,7 @@ from config.path import ABS_CONFIG_DIR
 from src.indexing.sparse_index import (
     ShardInfo,
     build_inverted_index_from_shards,
+    compute_term_and_block_max,
     load_shard_manifest,
     resolve_numpy_dtype,
 )
@@ -101,9 +102,19 @@ def main(cfg: DictConfig) -> None:
         shard_infos, vocab_size=vocab_size, value_dtype=index_value_dtype
     )
 
+    block_size_value: int = int(cfg.encoding.wand_block_size)
+    if block_size_value <= 0:
+        raise ValueError("encoding.wand_block_size must be a positive integer.")
+    term_max, block_max, block_ptr = compute_term_and_block_max(
+        term_ptr, post_weights, block_size_value
+    )
+
     np.save(index_path / "term_ptr.npy", term_ptr)
     np.save(index_path / "post_doc_ids.npy", post_doc_ids)
     np.save(index_path / "post_weights.npy", post_weights)
+    np.save(index_path / "term_max.npy", term_max)
+    np.save(index_path / "block_max.npy", block_max)
+    np.save(index_path / "block_ptr.npy", block_ptr)
 
     with (index_path / "doc_ids.json").open("w", encoding="utf-8") as doc_file:
         json.dump(doc_ids, doc_file)
@@ -118,6 +129,11 @@ def main(cfg: DictConfig) -> None:
         "top_k": metadata.get("top_k"),
         "min_weight": metadata.get("min_weight"),
         "exclude_token_ids": metadata.get("exclude_token_ids"),
+        "block_size": block_size_value,
+        "has_block_max": True,
+        "term_max_dtype": str(term_max.dtype),
+        "block_max_dtype": str(block_max.dtype),
+        "block_ptr_dtype": str(block_ptr.dtype),
     }
     with (index_path / "metadata.json").open("w", encoding="utf-8") as meta_file:
         json.dump(metadata_out, meta_file, indent=2)

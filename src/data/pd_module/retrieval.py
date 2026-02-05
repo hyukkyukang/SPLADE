@@ -14,6 +14,7 @@ from transformers import PreTrainedTokenizerBase
 from src.data.collator import UniversalCollator
 from src.data.dataclass import RetrievalDataItem
 from src.data.pd_module import PDModule
+from src.data.utils import resolve_dataset_column
 from src.utils.dist import is_rank_zero, maybe_barrier
 from src.utils.logging import log_if_rank_zero
 
@@ -47,18 +48,16 @@ class RetrievalPDModule(PDModule):
             load_teacher_scores=load_teacher_scores,
             require_teacher_scores=require_teacher_scores,
         )
-        self._use_qrels: bool = bool(getattr(self.cfg, "use_qrels", True))
-        self._use_triplet_positives: bool = bool(
-            getattr(self.cfg, "use_triplet_positives", False)
-        )
+        self._use_qrels: bool = bool(self.cfg.use_qrels)
+        self._use_triplet_positives: bool = bool(self.cfg.use_triplet_positives)
         cache_path_value: str | None = self._normalize_optional_str(
-            getattr(self.cfg, "triplet_positive_cache_path", None)
+            self.cfg.triplet_positive_cache_path
         )
         self._triplet_positive_cache_path: str | None = cache_path_value
         self._triplet_positive_cache_overwrite: bool = bool(
-            getattr(self.cfg, "triplet_positive_cache_overwrite", False)
+            self.cfg.triplet_positive_cache_overwrite
         )
-        max_queries_value: Any | None = getattr(self.cfg, "max_queries", None)
+        max_queries_value: Any | None = self.cfg.max_queries
         self._max_queries: int | None = (
             None if max_queries_value is None else int(max_queries_value)
         )
@@ -69,8 +68,7 @@ class RetrievalPDModule(PDModule):
         )
         self.hf_split: str = str(self.cfg.split)
         self._beir_mode: bool = (
-            str(getattr(self.cfg, "type", "")).lower() == "beir"
-            or self.cfg.get("beir_dataset") is not None
+            str(self.cfg.type).lower() == "beir" or self.cfg.beir_dataset is not None
         )
         text_cache_dir: str | None = self.cfg.query_corpus_hf_cache_dir
         self.hf_cache_dir: str | None = (
@@ -81,24 +79,22 @@ class RetrievalPDModule(PDModule):
             )
         )
         self.qrels_hf_name: str | None = self._normalize_optional_str(
-            getattr(self.cfg, "qrels_hf_name", None)
+            self.cfg.qrels_hf_name
         )
         self.qrels_hf_subset: str | None = self._normalize_optional_str(
-            getattr(self.cfg, "qrels_hf_subset", None)
+            self.cfg.qrels_hf_subset
         )
         qrels_split_override: str | None = self._normalize_optional_str(
-            getattr(self.cfg, "qrels_hf_split", None)
+            self.cfg.qrels_hf_split
         )
         self.qrels_hf_split: str = qrels_split_override or self.hf_split
         qrels_cache_override: str | None = self._normalize_optional_str(
-            getattr(self.cfg, "qrels_hf_cache_dir", None)
+            self.cfg.qrels_hf_cache_dir
         )
         self.qrels_hf_cache_dir: str | None = (
             qrels_cache_override if qrels_cache_override is not None else self.hf_cache_dir
         )
-        self.qrels_hf_data_files: Any | None = getattr(
-            self.cfg, "qrels_hf_data_files", None
-        )
+        self.qrels_hf_data_files: Any | None = self.cfg.qrels_hf_data_files
         self._query_ids: list[str] = []
         self._query_id_to_idx: dict[str, int] = {}
         self._qrels: Dict[str, Dict[str, float]] = {}
@@ -208,6 +204,86 @@ class RetrievalPDModule(PDModule):
         except (TypeError, AttributeError):
             return None
 
+    @staticmethod
+    def _resolve_triplet_column_name(
+        column_names: Iterable[str], candidates: Iterable[str]
+    ) -> str | None:
+        column_set: set[str] = set(column_names)
+        for candidate in candidates:
+            if candidate in column_set:
+                return candidate
+        return None
+
+    def _build_positives_from_triplet_columns(
+        self,
+        triplet_dataset: Dataset,
+        qid_column: str,
+        pos_column: str,
+        allowed_queries: set[str],
+        *,
+        enable_progress: bool,
+    ) -> tuple[Dict[str, Dict[str, float]], int, int] | None:
+        qid_values: pa.Array | pa.ChunkedArray = resolve_dataset_column(
+            triplet_dataset, qid_column
+        )
+        pos_values: pa.Array | pa.ChunkedArray = resolve_dataset_column(
+            triplet_dataset, pos_column
+        )
+
+        qid_chunks: list[pa.Array] = (
+            qid_values.chunks
+            if isinstance(qid_values, pa.ChunkedArray)
+            else [qid_values]
+        )
+        pos_chunks: list[pa.Array] = (
+            pos_values.chunks
+            if isinstance(pos_values, pa.ChunkedArray)
+            else [pos_values]
+        )
+        if len(qid_chunks) != len(pos_chunks):
+            return None
+
+        positives_by_qid: dict[str, set[str]] = {}
+        row_count: int = 0
+        positive_pairs: int = 0
+        progress: tqdm | None = None
+        if enable_progress:
+            progress = tqdm(
+                total=len(triplet_dataset),
+                desc="Scanning triplet positives",
+                mininterval=30.0,
+            )
+
+        for qid_chunk, pos_chunk in zip(qid_chunks, pos_chunks):
+            qids: list[Any] = qid_chunk.to_pylist()
+            pos_ids: list[Any] = pos_chunk.to_pylist()
+            row_count += len(qids)
+            if progress is not None:
+                progress.update(len(qids))
+
+            for qid_value, pos_value in zip(qids, pos_ids):
+                if qid_value is None or pos_value is None:
+                    continue
+                qid: str = str(qid_value)
+                if not qid or qid not in allowed_queries:
+                    continue
+                pos_id: str = str(pos_value)
+                if not pos_id:
+                    continue
+                doc_set: set[str] = positives_by_qid.setdefault(qid, set())
+                if pos_id not in doc_set:
+                    doc_set.add(pos_id)
+                    positive_pairs += 1
+
+        if progress is not None:
+            progress.close()
+
+        positives: Dict[str, Dict[str, float]] = {
+            qid: {doc_id: 1.0 for doc_id in doc_ids}
+            for qid, doc_ids in positives_by_qid.items()
+        }
+        return positives, row_count, positive_pairs
+
     def _build_positives_from_triplets(
         self,
         triplet_rows: Iterable[Mapping[str, Any]],
@@ -215,6 +291,24 @@ class RetrievalPDModule(PDModule):
         *,
         enable_progress: bool,
     ) -> tuple[Dict[str, Dict[str, float]], int, int]:
+        if isinstance(triplet_rows, Dataset):
+            qid_column: str | None = self._resolve_triplet_column_name(
+                triplet_rows.column_names, ("query_id", "qid", "_id")
+            )
+            pos_column: str | None = self._resolve_triplet_column_name(
+                triplet_rows.column_names, ("positive_id", "pos_id", "doc_pos_id")
+            )
+            if qid_column and pos_column:
+                column_result = self._build_positives_from_triplet_columns(
+                    triplet_rows,
+                    qid_column,
+                    pos_column,
+                    allowed_queries,
+                    enable_progress=enable_progress,
+                )
+                if column_result is not None:
+                    return column_result
+
         positives_by_qid: dict[str, set[str]] = {}
         row_count: int = 0
         positive_pairs: int = 0

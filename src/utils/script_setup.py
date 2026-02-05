@@ -1,16 +1,26 @@
 import logging
 import os
 import warnings
+from typing import Any
 
 import torch
 from dotenv import load_dotenv
-from omegaconf import OmegaConf
+from omegaconf import DictConfig, OmegaConf
 
 from src.utils.logging import (
+    log_if_rank_zero,
     patch_hydra_argparser_for_python314,
+    setup_tqdm_friendly_logging,
+    suppress_lightning_recommendation_tips,
     suppress_dataloader_workers_warning,
     suppress_httpx_logging,
     suppress_pytorch_lightning_tips,
+)
+from src.utils.seed import set_seed
+from src.utils.trainer import (
+    get_cpu_trainer_kwargs,
+    get_gpu_trainer_kwargs,
+    resolve_precision,
 )
 
 
@@ -87,3 +97,84 @@ def configure_script_environment(
 
     if suppress_dataloader_workers:
         suppress_dataloader_workers_warning()
+
+
+def initialize_run(
+    cfg: DictConfig,
+    *,
+    logger: logging.Logger,
+    suppress_lightning_tips: bool = True,
+) -> None:
+    """Common run initialization for script entrypoints."""
+    setup_tqdm_friendly_logging()
+    if suppress_lightning_tips:
+        suppress_lightning_recommendation_tips()
+    os.makedirs(cfg.log_dir, exist_ok=True)
+    set_seed(cfg.seed)
+    log_if_rank_zero(logger, f"Random seed set to: {cfg.seed}")
+
+
+def normalize_optional_path(value: Any) -> str | None:
+    """Normalize optional path-like values from configs."""
+    if value is None:
+        return None
+    text: str = str(value).strip()
+    return text if text else None
+
+
+def normalize_optional_str(value: Any) -> str | None:
+    """Normalize optional string values from configs."""
+    if value is None:
+        return None
+    text: str = str(value).strip()
+    if not text:
+        return None
+    if text.lower() in {"none", "null"}:
+        return None
+    return text
+
+
+def resolve_trainer_settings(cfg_section: DictConfig) -> tuple[dict[str, Any], str]:
+    """Return trainer kwargs and precision for the config section."""
+    trainer_kwargs: dict[str, Any] = (
+        get_cpu_trainer_kwargs(cfg_section)
+        if bool(cfg_section.use_cpu)
+        else get_gpu_trainer_kwargs(cfg_section)
+    )
+    precision: str = resolve_precision(cfg_section)
+    return trainer_kwargs, precision
+
+
+def resolve_model_source(
+    cfg: DictConfig,
+    *,
+    logger: logging.Logger,
+    set_nanobeir_flag: bool = False,
+) -> DictConfig:
+    """Resolve model source (HF weights vs checkpoint) for evaluation/mining."""
+    testing_cfg: DictConfig = cfg.testing
+    hf_model_path: str | None = normalize_optional_path(
+        testing_cfg.hf_model_path
+    )
+    checkpoint_path: str | None = normalize_optional_path(
+        testing_cfg.checkpoint_path
+    )
+
+    if hf_model_path:
+        if checkpoint_path:
+            raise ValueError(
+                "Provide either testing.hf_model_path or "
+                "testing.checkpoint_path, not both."
+            )
+        cfg.model.huggingface_name = hf_model_path
+        if set_nanobeir_flag and hasattr(cfg, "nanobeir"):
+            cfg.nanobeir.use_huggingface_model = True
+        log_if_rank_zero(logger, f"Using Hugging Face model: {hf_model_path}")
+        return cfg
+
+    if not checkpoint_path:
+        raise ValueError(
+            "testing.checkpoint_path must be set unless "
+            "testing.hf_model_path is provided."
+        )
+    return cfg

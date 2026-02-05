@@ -13,6 +13,11 @@ torch_compile_mode: default
 strategy: ddp
 static_graph: true
 num_devices: null
+gpu_sparsify: true
+scoring_workers: 4
+scoring_method: exact
+scoring_backend: threads
+wand_block_size: 128
 sparse_top_k: 4096
 sparse_min_weight: 0.0
 

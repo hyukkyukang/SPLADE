@@ -97,6 +97,70 @@ def sparsify_vector_gpu(
     return indices_np, values_np
 
 
+def _sparsify_batch_gpu_csr_core_topk(
+    vectors: torch.Tensor,
+    *,
+    exclude_token_ids: torch.Tensor | None,
+    threshold: float,
+    top_k: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Sparsify a batch of dense vectors into CSR tensors on GPU (top-k path)."""
+    batch_size: int = int(vectors.shape[0])
+    masked: torch.Tensor = vectors
+    if exclude_token_ids is not None and int(exclude_token_ids.numel()) > 0:
+        masked = masked.clone()
+        masked.index_fill_(1, exclude_token_ids, float("-inf"))
+    topk_values: torch.Tensor
+    topk_indices: torch.Tensor
+    topk_values, topk_indices = torch.topk(
+        masked, k=int(top_k), dim=1, largest=True, sorted=False
+    )
+    valid_mask: torch.Tensor = topk_values > threshold
+    order: torch.Tensor = torch.argsort(topk_indices, dim=1)
+    sorted_indices: torch.Tensor = torch.gather(topk_indices, 1, order)
+    sorted_values: torch.Tensor = torch.gather(topk_values, 1, order)
+    sorted_valid: torch.Tensor = torch.gather(valid_mask, 1, order)
+    row_counts: torch.Tensor = sorted_valid.sum(dim=1, dtype=torch.int64)
+    indptr_gpu: torch.Tensor = torch.zeros(
+        (batch_size + 1,), dtype=torch.int64, device=vectors.device
+    )
+    indptr_gpu[1:] = torch.cumsum(row_counts, dim=0)
+    flat_indices: torch.Tensor = sorted_indices[sorted_valid]
+    flat_values: torch.Tensor = sorted_values[sorted_valid]
+    return indptr_gpu, flat_indices, flat_values
+
+
+def _sparsify_batch_gpu_csr_core_threshold(
+    vectors: torch.Tensor,
+    *,
+    exclude_token_ids: torch.Tensor | None,
+    threshold: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Sparsify a batch of dense vectors into CSR tensors on GPU (threshold path)."""
+    batch_size: int = int(vectors.shape[0])
+    vocab_size: int = int(vectors.shape[1])
+    mask: torch.Tensor = vectors > threshold
+    if exclude_token_ids is not None and int(exclude_token_ids.numel()) > 0:
+        mask.index_fill_(1, exclude_token_ids, False)
+    row_idx: torch.Tensor
+    col_idx: torch.Tensor
+    row_idx, col_idx = torch.nonzero(mask, as_tuple=True)
+    linear_idx: torch.Tensor = row_idx.to(torch.int64) * int(vocab_size) + col_idx.to(
+        torch.int64
+    )
+    order: torch.Tensor = torch.argsort(linear_idx)
+    row_idx = row_idx[order]
+    col_idx = col_idx[order]
+    flat_values: torch.Tensor = vectors[row_idx, col_idx]
+    row_counts: torch.Tensor = torch.bincount(row_idx, minlength=batch_size)
+    flat_indices: torch.Tensor = col_idx
+    indptr_gpu: torch.Tensor = torch.zeros(
+        (batch_size + 1,), dtype=torch.int64, device=vectors.device
+    )
+    indptr_gpu[1:] = torch.cumsum(row_counts, dim=0)
+    return indptr_gpu, flat_indices, flat_values
+
+
 def sparsify_batch_gpu_csr(
     vectors: torch.Tensor,
     *,
@@ -135,53 +199,20 @@ def sparsify_batch_gpu_csr(
             )
             return indptr, indices, values
 
-        masked: torch.Tensor = vectors
-        if exclude_ids is not None:
-            masked = masked.clone()
-            masked.index_fill_(1, exclude_ids, float("-inf"))
-        topk_values: torch.Tensor
-        topk_indices: torch.Tensor
-        topk_values, topk_indices = torch.topk(
-            masked, k=top_k_int, dim=1, largest=True, sorted=False
+        indptr_gpu, flat_indices, flat_values = _sparsify_batch_gpu_csr_core_topk(
+            vectors,
+            exclude_token_ids=exclude_ids,
+            threshold=threshold,
+            top_k=top_k_int,
         )
-        valid_mask: torch.Tensor = topk_values > threshold
-        order: torch.Tensor = torch.argsort(topk_indices, dim=1)
-        sorted_indices: torch.Tensor = torch.gather(topk_indices, 1, order)
-        sorted_values: torch.Tensor = torch.gather(topk_values, 1, order)
-        sorted_valid: torch.Tensor = torch.gather(valid_mask, 1, order)
-        row_counts: torch.Tensor = sorted_valid.sum(dim=1, dtype=torch.int64)
-        indptr_gpu: torch.Tensor = torch.zeros(
-            (batch_size + 1,), dtype=torch.int64, device=device
-        )
-        indptr_gpu[1:] = torch.cumsum(row_counts, dim=0)
-        flat_indices: torch.Tensor = sorted_indices[sorted_valid]
-        flat_values: torch.Tensor = sorted_values[sorted_valid]
     else:
-        mask: torch.Tensor = vectors > threshold
-        if exclude_ids is not None:
-            mask.index_fill_(1, exclude_ids, False)
-        if bool(mask.any()):
-            row_idx: torch.Tensor
-            col_idx: torch.Tensor
-            row_idx, col_idx = torch.nonzero(mask, as_tuple=True)
-            linear_idx: torch.Tensor = row_idx.to(torch.int64) * int(
-                vocab_size
-            ) + col_idx.to(torch.int64)
-            order = torch.argsort(linear_idx)
-            row_idx = row_idx[order]
-            col_idx = col_idx[order]
-            flat_values = vectors[row_idx, col_idx]
-            row_counts = torch.bincount(row_idx, minlength=batch_size)
-            flat_indices = col_idx
-        else:
-            flat_indices = torch.empty((0,), dtype=torch.long, device=device)
-            flat_values = torch.empty((0,), dtype=vectors.dtype, device=device)
-            row_counts = torch.zeros((batch_size,), dtype=torch.int64, device=device)
-
-        indptr_gpu = torch.zeros(
-            (batch_size + 1,), dtype=torch.int64, device=device
+        indptr_gpu, flat_indices, flat_values = (
+            _sparsify_batch_gpu_csr_core_threshold(
+                vectors,
+                exclude_token_ids=exclude_ids,
+                threshold=threshold,
+            )
         )
-        indptr_gpu[1:] = torch.cumsum(row_counts, dim=0)
 
     torch_value_dtype: torch.dtype = resolve_torch_dtype(value_dtype)
     indptr = indptr_gpu.to(device="cpu")
@@ -213,6 +244,9 @@ class InvertedIndex:
     post_weights: np.ndarray
     doc_ids: list[str]
     metadata: dict[str, Any]
+    term_max: np.ndarray | None = None
+    block_max: np.ndarray | None = None
+    block_ptr: np.ndarray | None = None
 
 
 class SparseShardWriter:
@@ -504,6 +538,9 @@ def load_inverted_index(index_path: Path) -> InvertedIndex:
     term_ptr_path: Path = index_path / "term_ptr.npy"
     post_doc_ids_path: Path = index_path / "post_doc_ids.npy"
     post_weights_path: Path = index_path / "post_weights.npy"
+    term_max_path: Path = index_path / "term_max.npy"
+    block_max_path: Path = index_path / "block_max.npy"
+    block_ptr_path: Path = index_path / "block_ptr.npy"
     doc_ids_path: Path = index_path / "doc_ids.json"
     metadata_path: Path = index_path / "metadata.json"
 
@@ -527,12 +564,33 @@ def load_inverted_index(index_path: Path) -> InvertedIndex:
     with metadata_path.open("r", encoding="utf-8") as meta_file:
         metadata: dict[str, Any] = json.load(meta_file)
 
+    has_block_max: bool = bool(metadata.get("has_block_max"))
+    term_max: np.ndarray | None = None
+    block_max: np.ndarray | None = None
+    block_ptr: np.ndarray | None = None
+    if has_block_max:
+        if not term_max_path.exists():
+            raise FileNotFoundError(f"Missing term_max.npy at {term_max_path}")
+        if not block_max_path.exists():
+            raise FileNotFoundError(f"Missing block_max.npy at {block_max_path}")
+        if not block_ptr_path.exists():
+            raise FileNotFoundError(f"Missing block_ptr.npy at {block_ptr_path}")
+    if term_max_path.exists():
+        term_max = np.load(term_max_path, mmap_mode="r")
+    if block_max_path.exists():
+        block_max = np.load(block_max_path, mmap_mode="r")
+    if block_ptr_path.exists():
+        block_ptr = np.load(block_ptr_path, mmap_mode="r")
+
     return InvertedIndex(
         term_ptr=term_ptr,
         post_doc_ids=post_doc_ids,
         post_weights=post_weights,
         doc_ids=doc_ids,
         metadata=metadata,
+        term_max=term_max,
+        block_max=block_max,
+        block_ptr=block_ptr,
     )
 
 
@@ -659,6 +717,92 @@ def build_inverted_index_from_shards(
 
 
 @numba.njit
+def _compute_term_max(term_ptr: np.ndarray, post_weights: np.ndarray) -> np.ndarray:
+    vocab_size: int = term_ptr.shape[0] - 1
+    term_max: np.ndarray = np.zeros(vocab_size, dtype=post_weights.dtype)
+    for term_id in range(vocab_size):
+        start: int = int(term_ptr[term_id])
+        end: int = int(term_ptr[term_id + 1])
+        if start < end:
+            max_val = post_weights[start]
+            for pos in range(start + 1, end):
+                value = post_weights[pos]
+                if value > max_val:
+                    max_val = value
+            term_max[term_id] = max_val
+    return term_max
+
+
+def compute_term_max(term_ptr: np.ndarray, post_weights: np.ndarray) -> np.ndarray:
+    """Compute the max posting weight per term."""
+    if term_ptr.ndim != 1:
+        raise ValueError("term_ptr must be a 1D array.")
+    return _compute_term_max(term_ptr, post_weights)
+
+
+@numba.njit
+def _fill_block_max(
+    term_ptr: np.ndarray,
+    post_weights: np.ndarray,
+    block_ptr: np.ndarray,
+    block_size: int,
+    block_max: np.ndarray,
+) -> None:
+    vocab_size: int = term_ptr.shape[0] - 1
+    for term_id in range(vocab_size):
+        start: int = int(term_ptr[term_id])
+        end: int = int(term_ptr[term_id + 1])
+        if start >= end:
+            continue
+        block_base: int = int(block_ptr[term_id])
+        block_idx: int = 0
+        pos: int = start
+        while pos < end:
+            block_end: int = pos + block_size
+            if block_end > end:
+                block_end = end
+            max_val = post_weights[pos]
+            for offset in range(pos + 1, block_end):
+                value = post_weights[offset]
+                if value > max_val:
+                    max_val = value
+            block_max[block_base + block_idx] = max_val
+            block_idx += 1
+            pos = block_end
+
+
+def compute_block_max(
+    term_ptr: np.ndarray, post_weights: np.ndarray, block_size: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Compute per-block max weights and block pointers for postings."""
+    if block_size <= 0:
+        raise ValueError("block_size must be a positive integer.")
+    if term_ptr.ndim != 1:
+        raise ValueError("term_ptr must be a 1D array.")
+
+    vocab_size: int = term_ptr.shape[0] - 1
+    term_lengths: np.ndarray = term_ptr[1:] - term_ptr[:-1]
+    block_counts: np.ndarray = (term_lengths + int(block_size) - 1) // int(block_size)
+    block_ptr: np.ndarray = np.zeros(vocab_size + 1, dtype=np.int64)
+    if block_counts.size > 0:
+        block_ptr[1:] = np.cumsum(block_counts, dtype=np.int64)
+    total_blocks: int = int(block_ptr[-1])
+    block_max: np.ndarray = np.zeros(total_blocks, dtype=post_weights.dtype)
+    if total_blocks > 0:
+        _fill_block_max(term_ptr, post_weights, block_ptr, int(block_size), block_max)
+    return block_max, block_ptr
+
+
+def compute_term_and_block_max(
+    term_ptr: np.ndarray, post_weights: np.ndarray, block_size: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Compute term max plus block max and pointers."""
+    term_max: np.ndarray = compute_term_max(term_ptr, post_weights)
+    block_max, block_ptr = compute_block_max(term_ptr, post_weights, block_size)
+    return term_max, block_max, block_ptr
+
+
+@numba.njit
 def _accumulate_scores(
     term_ptr: np.ndarray,
     post_doc_ids: np.ndarray,
@@ -755,15 +899,229 @@ def score_query_postings(
     )
 
 
+@numba.njit
+def _advance_to(
+    post_doc_ids: np.ndarray, pos: int, end: int, target_doc: int
+) -> int:
+    left: int = pos
+    right: int = end
+    while left < right:
+        mid: int = (left + right) // 2
+        if post_doc_ids[mid] < target_doc:
+            left = mid + 1
+        else:
+            right = mid
+    return left
+
+
+@numba.njit
+def _min_score(values: np.ndarray, count: int) -> float:
+    min_val: float = float(values[0])
+    for idx in range(1, count):
+        value = float(values[idx])
+        if value < min_val:
+            min_val = value
+    return min_val
+
+
+@numba.njit
+def _find_min_index(values: np.ndarray, count: int) -> int:
+    min_idx: int = 0
+    min_val: float = float(values[0])
+    for idx in range(1, count):
+        value = float(values[idx])
+        if value < min_val:
+            min_val = value
+            min_idx = idx
+    return min_idx
+
+
+@numba.njit
+def _score_query_postings_wand(
+    term_ptr: np.ndarray,
+    post_doc_ids: np.ndarray,
+    post_weights: np.ndarray,
+    term_max: np.ndarray,
+    block_max: np.ndarray,
+    block_ptr: np.ndarray,
+    q_indices: np.ndarray,
+    q_values: np.ndarray,
+    top_k: int,
+    block_size: int,
+) -> tuple[np.ndarray, np.ndarray, int]:
+    n_terms: int = q_indices.shape[0]
+    pos: np.ndarray = np.empty(n_terms, dtype=np.int64)
+    end: np.ndarray = np.empty(n_terms, dtype=np.int64)
+    for idx in range(n_terms):
+        term_id = int(q_indices[idx])
+        pos[idx] = int(term_ptr[term_id])
+        end[idx] = int(term_ptr[term_id + 1])
+
+    current_doc: np.ndarray = np.empty(n_terms, dtype=np.int32)
+    order: np.ndarray = np.empty(n_terms, dtype=np.int64)
+    top_docs: np.ndarray = np.empty(top_k, dtype=np.int32)
+    top_scores: np.ndarray = np.empty(top_k, dtype=np.float32)
+    top_count: int = 0
+    threshold: float = -np.inf
+    sentinel: np.int32 = np.int32(2147483647)
+
+    while True:
+        active_terms: int = 0
+        for idx in range(n_terms):
+            if pos[idx] < end[idx]:
+                current_doc[idx] = post_doc_ids[pos[idx]]
+                active_terms += 1
+            else:
+                current_doc[idx] = sentinel
+        if active_terms == 0:
+            break
+
+        order = np.argsort(current_doc)
+        if current_doc[order[0]] == sentinel:
+            break
+
+        ub_sum: float = 0.0
+        pivot_doc: int = int(sentinel)
+        pivot_found: bool = False
+        for ord_idx in range(n_terms):
+            term_idx = int(order[ord_idx])
+            if current_doc[term_idx] == sentinel:
+                break
+            term_id = int(q_indices[term_idx])
+            ub_sum += float(q_values[term_idx]) * float(term_max[term_id])
+            if ub_sum > threshold:
+                pivot_doc = int(current_doc[term_idx])
+                pivot_found = True
+                break
+
+        if not pivot_found:
+            break
+
+        if pivot_doc == int(current_doc[order[0]]):
+            block_sum: float = 0.0
+            for idx in range(n_terms):
+                if pos[idx] >= end[idx]:
+                    continue
+                if current_doc[idx] > pivot_doc:
+                    continue
+                term_id = int(q_indices[idx])
+                start = int(term_ptr[term_id])
+                block_idx = (pos[idx] - start) // block_size
+                block_id = int(block_ptr[term_id]) + int(block_idx)
+                block_end_pos = start + (block_idx + 1) * block_size
+                if block_end_pos > end[idx]:
+                    block_end_pos = int(end[idx])
+                block_end_doc = int(post_doc_ids[block_end_pos - 1])
+                if pivot_doc <= block_end_doc:
+                    ub_value = float(block_max[block_id])
+                else:
+                    ub_value = float(term_max[term_id])
+                block_sum += float(q_values[idx]) * ub_value
+
+            if block_sum <= threshold:
+                for idx in range(n_terms):
+                    if pos[idx] < end[idx] and post_doc_ids[pos[idx]] == pivot_doc:
+                        pos[idx] += 1
+                continue
+
+            score: float = 0.0
+            for idx in range(n_terms):
+                if pos[idx] < end[idx] and post_doc_ids[pos[idx]] == pivot_doc:
+                    score += float(q_values[idx]) * float(post_weights[pos[idx]])
+                    pos[idx] += 1
+            if score > threshold:
+                if top_count < top_k:
+                    top_docs[top_count] = np.int32(pivot_doc)
+                    top_scores[top_count] = np.float32(score)
+                    top_count += 1
+                    if top_count == top_k:
+                        threshold = _min_score(top_scores, top_k)
+                else:
+                    min_idx = _find_min_index(top_scores, top_k)
+                    if score > float(top_scores[min_idx]):
+                        top_scores[min_idx] = np.float32(score)
+                        top_docs[min_idx] = np.int32(pivot_doc)
+                        threshold = _min_score(top_scores, top_k)
+        else:
+            for ord_idx in range(n_terms):
+                term_idx = int(order[ord_idx])
+                if current_doc[term_idx] < pivot_doc:
+                    pos[term_idx] = _advance_to(
+                        post_doc_ids, int(pos[term_idx]), int(end[term_idx]), pivot_doc
+                    )
+                else:
+                    break
+
+    return top_docs, top_scores, top_count
+
+
+def score_query_postings_wand(
+    term_ptr: np.ndarray,
+    post_doc_ids: np.ndarray,
+    post_weights: np.ndarray,
+    term_max: np.ndarray,
+    block_max: np.ndarray,
+    block_ptr: np.ndarray,
+    q_indices: np.ndarray,
+    q_values: np.ndarray,
+    *,
+    scores: np.ndarray,
+    seen: np.ndarray,
+    top_k: int,
+    block_size: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Score a query using Block-Max WAND and return top-k results."""
+    if top_k <= 0:
+        empty_docs: np.ndarray = np.zeros((0,), dtype=np.int32)
+        empty_scores: np.ndarray = np.zeros((0,), dtype=np.float32)
+        return empty_docs, empty_scores
+    if q_indices.size == 0:
+        empty_docs = np.zeros((0,), dtype=np.int32)
+        empty_scores = np.zeros((0,), dtype=np.float32)
+        return empty_docs, empty_scores
+    if block_size <= 0:
+        raise ValueError("block_size must be a positive integer.")
+    if term_max is None or block_max is None or block_ptr is None:
+        raise ValueError("WAND scoring requires term_max, block_max, and block_ptr.")
+
+    top_docs, top_scores, top_count = _score_query_postings_wand(
+        term_ptr=term_ptr,
+        post_doc_ids=post_doc_ids,
+        post_weights=post_weights,
+        term_max=term_max,
+        block_max=block_max,
+        block_ptr=block_ptr,
+        q_indices=q_indices,
+        q_values=q_values,
+        top_k=int(top_k),
+        block_size=int(block_size),
+    )
+    if top_count <= 0:
+        empty_docs = np.zeros((0,), dtype=np.int32)
+        empty_scores = np.zeros((0,), dtype=np.float32)
+        return empty_docs, empty_scores
+
+    selected_docs: np.ndarray = top_docs[:top_count].copy()
+    selected_scores: np.ndarray = top_scores[:top_count].copy()
+    order: np.ndarray = np.argsort(selected_scores)[::-1]
+    return selected_docs[order].astype(np.int32, copy=False), selected_scores[
+        order
+    ].astype(np.float32, copy=False)
+
+
 __all__ = [
     "InvertedIndex",
     "ShardInfo",
     "SparseShardWriter",
     "build_inverted_index_from_shards",
+    "compute_block_max",
+    "compute_term_and_block_max",
+    "compute_term_max",
     "load_inverted_index",
     "load_shard_manifest",
     "resolve_numpy_dtype",
     "score_query_postings",
+    "score_query_postings_wand",
     "sparsify_batch_gpu_csr",
     "sparsify_vector_gpu",
     "sparsify_query_vector",

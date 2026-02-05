@@ -14,7 +14,7 @@ from config.path import ABS_CONFIG_DIR
 from src.data.utils import id_to_idx, resolve_dataset_column
 from src.utils import set_seed
 from src.utils.logging import get_logger, log_if_rank_zero
-from src.utils.script_setup import configure_script_environment
+from src.utils.script_setup import configure_script_environment, normalize_optional_str
 
 logger: logging.Logger = get_logger("scripts.preprocess.score_cross_encoder", __file__)
 
@@ -73,21 +73,10 @@ def _parse_scoring_settings(cfg: DictConfig) -> ScoringSettings:
     )
 
 
-def _normalize_optional_str(value: Any) -> str | None:
-    """Normalize optional string values from configs."""
-    if value is None:
-        return None
-    if isinstance(value, str):
-        normalized: str = value.strip().lower()
-        if normalized in {"", "none", "null"}:
-            return None
-    return str(value)
-
-
 def _load_dataset_from_config(cfg: DictConfig) -> Dataset:
     """Load a dataset based on the dataset config block."""
     hf_name: str = str(cfg.hf_name)
-    hf_subset: str | None = _normalize_optional_str(cfg.hf_subset)
+    hf_subset: str | None = normalize_optional_str(cfg.hf_subset)
     hf_split: str = str(cfg.hf_split)
     hf_cache_dir: str | None = cfg.hf_cache_dir
     data_files: Mapping[str, Any] | None = cfg.hf_data_files

@@ -14,29 +14,26 @@ from sentence_transformers.sparse_encoder.evaluation import SparseNanoBEIREvalua
 
 from config.path import ABS_CONFIG_DIR
 from src.data.pl_module import RerankingDataModule, RetrievalDataModule
-from src.model.pl_module import RerankingLightningModule, RetrievalLightningModule
-from src.utils import log_if_rank_zero, set_seed
-from src.utils.logging import (
-    get_logger,
-    setup_tqdm_friendly_logging,
-    suppress_lightning_recommendation_tips,
-)
+from src.model.pl_module import RerankingLightningModule, RetrievalEvalLightningModule
+from src.utils import log_if_rank_zero
+from src.utils.logging import get_logger
 from src.utils.model_utils import (
     apply_checkpoint_model_config,
     build_splade_model,
     load_splade_checkpoint,
 )
-from src.utils.script_setup import configure_script_environment
+from src.utils.script_setup import (
+    configure_script_environment,
+    initialize_run,
+    normalize_optional_path,
+    resolve_model_source,
+    resolve_trainer_settings,
+)
 from src.utils.sparse_encoder import (
     build_doc_only_sparse_encoder_adapter,
     build_sparse_encoder_from_checkpoint,
     build_sparse_encoder_from_huggingface,
     resolve_nanobeir_compatibility,
-)
-from src.utils.trainer import (
-    get_cpu_trainer_kwargs,
-    get_gpu_trainer_kwargs,
-    resolve_precision,
 )
 
 logger: logging.Logger = get_logger(__name__, __file__)
@@ -62,53 +59,8 @@ def _resolve_device(cfg: DictConfig) -> torch.device:
     return torch.device("cpu")
 
 
-def _initialize_run(cfg: DictConfig, *, suppress_lightning_tips: bool) -> None:
-    setup_tqdm_friendly_logging()
-    if suppress_lightning_tips:
-        suppress_lightning_recommendation_tips()
-    os.makedirs(cfg.log_dir, exist_ok=True)
-    set_seed(cfg.seed)
-    log_if_rank_zero(logger, f"Random seed set to: {cfg.seed}")
-
-
-def _normalize_optional_path(value: Any) -> str | None:
-    if value is None:
-        return None
-    text: str = str(value).strip()
-    return text if text else None
-
-
-def _resolve_model_source(cfg: DictConfig) -> DictConfig:
-    testing_cfg: DictConfig = cfg.testing
-    hf_model_path: str | None = _normalize_optional_path(
-        getattr(testing_cfg, "hf_model_path", None)
-    )
-    checkpoint_path: str | None = _normalize_optional_path(
-        getattr(testing_cfg, "checkpoint_path", None)
-    )
-
-    if hf_model_path:
-        if checkpoint_path:
-            raise ValueError(
-                "Provide either testing.hf_model_path or "
-                "testing.checkpoint_path, not both."
-            )
-        cfg.model.huggingface_name = hf_model_path
-        if hasattr(cfg, "nanobeir"):
-            cfg.nanobeir.use_huggingface_model = True
-        log_if_rank_zero(logger, f"Using Hugging Face model: {hf_model_path}")
-        return cfg
-
-    if not checkpoint_path:
-        raise ValueError(
-            "testing.checkpoint_path must be set unless "
-            "testing.hf_model_path is provided."
-        )
-    return cfg
-
-
 def _run_standard_eval(cfg: DictConfig) -> None:
-    _initialize_run(cfg, suppress_lightning_tips=True)
+    initialize_run(cfg, logger=logger, suppress_lightning_tips=True)
 
     cfg = apply_checkpoint_model_config(
         cfg,
@@ -120,7 +72,7 @@ def _run_standard_eval(cfg: DictConfig) -> None:
     eval_module: L.LightningModule
     data_module: L.LightningDataModule
     if eval_type == "retrieval":
-        eval_module = RetrievalLightningModule(cfg=cfg)
+        eval_module = RetrievalEvalLightningModule(cfg=cfg)
         data_module = RetrievalDataModule(cfg=cfg)
     elif eval_type == "reranking":
         eval_module = RerankingLightningModule(cfg=cfg)
@@ -130,12 +82,7 @@ def _run_standard_eval(cfg: DictConfig) -> None:
     eval_module.eval()
 
     testing_cfg: DictConfig = cfg.testing
-    trainer_kwargs: dict[str, Any] = (
-        get_cpu_trainer_kwargs(testing_cfg)
-        if testing_cfg.use_cpu
-        else get_gpu_trainer_kwargs(testing_cfg)
-    )
-    precision: str = resolve_precision(testing_cfg)
+    trainer_kwargs, precision = resolve_trainer_settings(testing_cfg)
 
     trainer: L.Trainer = L.Trainer(
         precision=precision,
@@ -148,9 +95,9 @@ def _run_standard_eval(cfg: DictConfig) -> None:
 
 
 def _run_nanobeir_eval(cfg: DictConfig) -> None:
-    _initialize_run(cfg, suppress_lightning_tips=False)
+    initialize_run(cfg, logger=logger, suppress_lightning_tips=False)
 
-    checkpoint_path_value: str | None = _normalize_optional_path(
+    checkpoint_path_value: str | None = normalize_optional_path(
         cfg.testing.checkpoint_path
     )
     use_huggingface_model: bool = bool(cfg.nanobeir.use_huggingface_model)
@@ -207,9 +154,7 @@ def _run_nanobeir_eval(cfg: DictConfig) -> None:
             )
         checkpoint_path = str(checkpoint_path_value)
 
-        doc_only_enabled: bool = (
-            bool(cfg.model.doc_only) if hasattr(cfg.model, "doc_only") else False
-        )
+        doc_only_enabled: bool = bool(cfg.model.doc_only)
         if doc_only_enabled:
             model: Any = build_splade_model(cfg, use_cpu=cfg.testing.use_cpu)
             missing: list[str]
@@ -301,8 +246,9 @@ def _is_nanobeir_run(cfg: DictConfig) -> bool:
 
 @hydra.main(version_base=None, config_path=ABS_CONFIG_DIR, config_name="evaluate")
 def main(cfg: DictConfig) -> None:
-    cfg = _resolve_model_source(cfg)
-    if _is_nanobeir_run(cfg):
+    is_nanobeir: bool = _is_nanobeir_run(cfg)
+    cfg = resolve_model_source(cfg, logger=logger, set_nanobeir_flag=is_nanobeir)
+    if is_nanobeir:
         _run_nanobeir_eval(cfg)
     else:
         _run_standard_eval(cfg)

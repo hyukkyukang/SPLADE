@@ -11,6 +11,10 @@ from sentence_transformers.sparse_encoder.evaluation import SparseNanoBEIREvalua
 
 from src.metric.retrieval import RetrievalMetrics, resolve_k_list
 from src.model.losses import LossComputer
+from src.model.pl_module.utils import (
+    resolve_cudagraph_mark_step,
+    validate_torch_compile_mode,
+)
 from src.model.retriever.sparse.neural.splade import SpladeModel
 from src.utils.logging import log_if_rank_zero
 from src.utils.model_utils import build_splade_model
@@ -35,20 +39,6 @@ def _dynamo_disable(fn: _TCallable) -> _TCallable:
     if callable(disable_fn):
         return cast(_TCallable, disable_fn(fn))
     return fn
-
-
-def _resolve_cudagraph_mark_step() -> Callable[[], None] | None:
-    if not hasattr(torch, "compiler"):
-        return None
-    compiler_mod = torch.compiler
-    if not hasattr(compiler_mod, "cudagraph_mark_step_begin"):
-        return None
-    mark_step_fn = compiler_mod.cudagraph_mark_step_begin
-    return mark_step_fn if callable(mark_step_fn) else None
-
-
-def _build_compile_kwargs(mode: str) -> dict[str, Any]:
-    return {"mode": mode}
 
 
 class SPLADETrainingModule(L.LightningModule):
@@ -118,21 +108,11 @@ class SPLADETrainingModule(L.LightningModule):
         if not compile_enabled or not compile_available:
             return {}
         compile_mode_value: Any = cfg.training.torch_compile_mode
-        compile_mode: str = str(compile_mode_value).lower()
-        valid_compile_modes: set[str] = {
-            "default",
-            "reduce-overhead",
-            "max-autotune",
-        }
-        if compile_mode not in valid_compile_modes:
-            raise ValueError(
-                "Unsupported torch.compile mode: "
-                f"{compile_mode_value!r}. Expected one of "
-                f"{sorted(valid_compile_modes)}."
-            )
-        compile_mode_kwargs: dict[str, Any] = _build_compile_kwargs(compile_mode)
+        compile_mode, compile_mode_kwargs = validate_torch_compile_mode(
+            compile_mode_value
+        )
         if compile_mode in {"reduce-overhead", "max-autotune"}:
-            self._torch_compile_mark_step = _resolve_cudagraph_mark_step()
+            self._torch_compile_mark_step = resolve_cudagraph_mark_step()
             # Compile the full model to avoid multi-call cudagraph overwrites.
             self.model = torch.compile(self.model, **compile_mode_kwargs)
             self._torch_compile_full_model = True

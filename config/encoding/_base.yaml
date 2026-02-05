@@ -1,7 +1,7 @@
 # @package encoding
 name: encoding_base
 
-batch_size: 512
+batch_size: 1024
 num_workers: 10
 prefetch_factor: 4
 max_padding: true
@@ -12,7 +12,6 @@ torch_compile_mode: default
 use_cpu: false
 strategy: ddp
 static_graph: true
-num_devices: null
 
 checkpoint_path: null
 # Directories for saving encoded shards and index.
@@ -25,3 +24,4 @@ async_write: true
 async_write_queue_size: 100
 sparse_top_k: 4096
 sparse_min_weight: 0.0
+wand_block_size: 128

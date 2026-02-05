@@ -4,37 +4,19 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List
 
 import lightning as L
-import numpy as np
 import torch
 from omegaconf import DictConfig
 
-from src.indexing.sparse_index import (
-    InvertedIndex,
-    load_inverted_index,
-    score_query_postings,
-    sparsify_query_vector,
+from src.model.pl_module.indexed_retrieval import IndexedRetrievalHelper
+from src.model.pl_module.utils import (
+    build_splade_model_with_checkpoint,
+    resolve_cudagraph_mark_step,
+    validate_torch_compile_mode,
 )
-from src.metric.retrieval import resolve_k_list
-from src.model.pl_module.utils import build_splade_model_with_checkpoint
 from src.model.retriever.sparse.neural.splade import SpladeModel
 from src.utils.logging import log_if_rank_zero
-from src.utils.model_utils import resolve_tagged_output_dir
 
 logger: logging.Logger = logging.getLogger("RetrievalSearchLightningModule")
-
-
-def _resolve_cudagraph_mark_step() -> Callable[[], None] | None:
-    if not hasattr(torch, "compiler"):
-        return None
-    compiler_mod = torch.compiler
-    if not hasattr(compiler_mod, "cudagraph_mark_step_begin"):
-        return None
-    mark_step_fn = compiler_mod.cudagraph_mark_step_begin
-    return mark_step_fn if callable(mark_step_fn) else None
-
-
-def _build_compile_kwargs(mode: str) -> dict[str, Any]:
-    return {"mode": mode}
 
 
 def _append_rank_suffix(path: Path, rank: int) -> Path:
@@ -59,33 +41,14 @@ class RetrievalSearchLightningModule(L.LightningModule):
         self._torch_compile_mark_step: Callable[[], None] | None = None
         self._setup_torch_compile()
 
-        self._k_list: List[int] = resolve_k_list(self.cfg.testing.k_list)
-        self._k_max: int = max(self._k_list)
+        self._retrieval_helper = IndexedRetrievalHelper(
+            cfg=cfg, logger=logger, index_context="search"
+        )
 
-        self._doc_ids: List[str] | None = None
-        self._index: InvertedIndex | None = None
-        self._score_buffer: np.ndarray | None = None
-        self._seen_buffer: np.ndarray | None = None
-        self._query_exclude_token_ids: list[int] = []
-        self._query_min_weight: float = 0.0
-        self._query_top_k: int | None = None
-
-        search_cfg: DictConfig | None = getattr(self.cfg, "search", None)
-        self._exclude_positives: bool = bool(
-            search_cfg.exclude_positives
-            if search_cfg is not None and "exclude_positives" in search_cfg
-            else False
-        )
-        self._include_query_text: bool = bool(
-            search_cfg.include_query_text
-            if search_cfg is not None and "include_query_text" in search_cfg
-            else False
-        )
-        self._flush_every: int = int(
-            search_cfg.flush_every
-            if search_cfg is not None and "flush_every" in search_cfg
-            else 100
-        )
+        search_cfg: DictConfig = self.cfg.search
+        self._exclude_positives = bool(search_cfg.exclude_positives)
+        self._include_query_text = bool(search_cfg.include_query_text)
+        self._flush_every = int(search_cfg.flush_every)
 
         self._output_handle: Any | None = None
         self._queries_written: int = 0
@@ -101,7 +64,7 @@ class RetrievalSearchLightningModule(L.LightningModule):
         )
 
     def _setup_torch_compile(self) -> dict[str, Any]:
-        compile_enabled: bool = bool(self.cfg.testing.get("torch_compile", False))
+        compile_enabled: bool = bool(self.cfg.testing.torch_compile)
         compile_available: bool = hasattr(torch, "compile")
         self._torch_compile_mark_step = None
         if compile_enabled and not compile_available:
@@ -114,54 +77,16 @@ class RetrievalSearchLightningModule(L.LightningModule):
             return {}
         if not compile_enabled or not compile_available:
             return {}
-        compile_mode_value: Any = self.cfg.testing.get("torch_compile_mode", "default")
-        compile_mode: str = str(compile_mode_value).lower()
-        valid_compile_modes: set[str] = {
-            "default",
-            "reduce-overhead",
-            "max-autotune",
-        }
-        if compile_mode not in valid_compile_modes:
-            raise ValueError(
-                "Unsupported torch.compile mode: "
-                f"{compile_mode_value!r}. Expected one of "
-                f"{sorted(valid_compile_modes)}."
-            )
-        compile_mode_kwargs: dict[str, Any] = _build_compile_kwargs(compile_mode)
+        compile_mode_value: Any = self.cfg.testing.torch_compile_mode
+        compile_mode, compile_mode_kwargs = validate_torch_compile_mode(
+            compile_mode_value
+        )
         if compile_mode in {"reduce-overhead", "max-autotune"}:
-            self._torch_compile_mark_step = _resolve_cudagraph_mark_step()
+            self._torch_compile_mark_step = resolve_cudagraph_mark_step()
         query_wrapper: torch.nn.Module = self.model._query_encoder_wrapper
         query_encoder = torch.compile(query_wrapper, **compile_mode_kwargs)
         self.model._query_encoder_fn = query_encoder
         return compile_mode_kwargs
-
-    def _load_index(self) -> InvertedIndex:
-        index_dir_value: str | None = self.cfg.encoding.index_dir
-        if not index_dir_value:
-            raise ValueError("encoding.index_dir must be set for index-based search.")
-        index_path: Path = resolve_tagged_output_dir(
-            index_dir_value,
-            model_name=str(self.cfg.model.name),
-            tag=self.cfg.tag,
-        )
-        index: InvertedIndex = load_inverted_index(index_path)
-        return index
-
-    def _resolve_query_sparsify_config(self, metadata: dict[str, Any]) -> None:
-        exclude_ids: list[int] = [
-            int(token_id) for token_id in metadata.get("exclude_token_ids") or []
-        ]
-        min_weight_value: float = float(metadata.get("min_weight") or 0.0)
-        top_k_value: int | None = (
-            None if metadata.get("top_k") is None else int(metadata["top_k"])
-        )
-        self._query_exclude_token_ids = exclude_ids
-        self._query_min_weight = min_weight_value
-        self._query_top_k = top_k_value
-
-    def _prepare_score_buffers(self, doc_count: int) -> None:
-        self._score_buffer = np.zeros(int(doc_count), dtype=np.float32)
-        self._seen_buffer = np.zeros(int(doc_count), dtype=np.uint8)
 
     def _open_output_handle(self) -> None:
         if not bool(self.cfg.testing.save_run):
@@ -186,12 +111,7 @@ class RetrievalSearchLightningModule(L.LightningModule):
     def on_test_start(self) -> None:
         self.model.eval()
         self._queries_written = 0
-
-        index: InvertedIndex = self._load_index()
-        self._index = index
-        self._doc_ids = list(index.doc_ids)
-        self._resolve_query_sparsify_config(index.metadata)
-        self._prepare_score_buffers(len(index.doc_ids))
+        self._retrieval_helper.setup()
         self._open_output_handle()
 
     def test_step(
@@ -200,15 +120,9 @@ class RetrievalSearchLightningModule(L.LightningModule):
         batch_idx: int,
     ) -> None:
         _ = batch_idx
-        if (
-            self._index is None
-            or self._doc_ids is None
-            or self._score_buffer is None
-            or self._seen_buffer is None
-            or self._output_handle is None
-        ):
+        if self._output_handle is None:
             raise ValueError(
-                "Index, buffers, and output handle must be initialized in on_test_start."
+                "Output handle must be initialized in on_test_start."
             )
 
         qids: List[str] = batch["qid"]
@@ -222,41 +136,15 @@ class RetrievalSearchLightningModule(L.LightningModule):
         query_attention_mask: torch.Tensor = batch["query_attention_mask"].to(
             self.device
         )
-        if self._torch_compile_mark_step is not None:
-            self._torch_compile_mark_step()
-        query_reps: torch.Tensor = self.model.encode_queries(
-            query_input_ids, query_attention_mask
+        query_reps: torch.Tensor = self._retrieval_helper.encode_queries(
+            self.model,
+            query_input_ids,
+            query_attention_mask,
+            self._torch_compile_mark_step,
         )
-        query_reps_cpu: np.ndarray = query_reps.detach().cpu().float().numpy()
-
+        scored_results = self._retrieval_helper.score_queries(query_reps)
         for i, relevance_judgments in enumerate(relevance_judgments_list):
-            query_vector: np.ndarray = query_reps_cpu[i]
-            q_indices: np.ndarray
-            q_values: np.ndarray
-            q_indices, q_values = sparsify_query_vector(
-                query_vector,
-                exclude_token_ids=self._query_exclude_token_ids,
-                min_weight=self._query_min_weight,
-                top_k=self._query_top_k,
-            )
-            top_docs: np.ndarray
-            top_scores: np.ndarray
-            top_docs, top_scores = score_query_postings(
-                self._index.term_ptr,
-                self._index.post_doc_ids,
-                self._index.post_weights,
-                q_indices,
-                q_values,
-                scores=self._score_buffer,
-                seen=self._seen_buffer,
-                top_k=self._k_max,
-            )
-            selected_doc_ids: List[str] = [
-                self._doc_ids[int(doc_idx)] for doc_idx in top_docs.tolist()
-            ]
-            selected_scores: List[float] = [
-                float(score) for score in top_scores.tolist()
-            ]
+            selected_doc_ids, selected_scores = scored_results[i]
 
             if self._exclude_positives and relevance_judgments:
                 positive_ids: set[str] = {
@@ -288,4 +176,5 @@ class RetrievalSearchLightningModule(L.LightningModule):
                 self._output_handle.flush()
 
     def on_test_end(self) -> None:
+        self._retrieval_helper.shutdown()
         self._close_output_handle()

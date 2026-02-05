@@ -9,25 +9,13 @@ from src.metric.retrieval import RetrievalMetrics, resolve_k_list
 from src.model.pl_module.utils import (
     build_splade_model_with_checkpoint,
     finalize_retrieval_metrics,
+    resolve_cudagraph_mark_step,
+    validate_torch_compile_mode,
 )
 from src.model.retriever.sparse.neural.splade import SpladeModel
 from src.utils.logging import log_if_rank_zero
 
 logger: logging.Logger = logging.getLogger("RerankingLightningModule")
-
-
-def _resolve_cudagraph_mark_step() -> Callable[[], None] | None:
-    if not hasattr(torch, "compiler"):
-        return None
-    compiler_mod = torch.compiler
-    if not hasattr(compiler_mod, "cudagraph_mark_step_begin"):
-        return None
-    mark_step_fn = compiler_mod.cudagraph_mark_step_begin
-    return mark_step_fn if callable(mark_step_fn) else None
-
-
-def _build_compile_kwargs(mode: str) -> dict[str, Any]:
-    return {"mode": mode}
 
 
 class RerankingLightningModule(L.LightningModule):
@@ -78,21 +66,11 @@ class RerankingLightningModule(L.LightningModule):
         if not compile_enabled or not compile_available:
             return {}
         compile_mode_value: Any = self.cfg.testing.get("torch_compile_mode", "default")
-        compile_mode: str = str(compile_mode_value).lower()
-        valid_compile_modes: set[str] = {
-            "default",
-            "reduce-overhead",
-            "max-autotune",
-        }
-        if compile_mode not in valid_compile_modes:
-            raise ValueError(
-                "Unsupported torch.compile mode: "
-                f"{compile_mode_value!r}. Expected one of "
-                f"{sorted(valid_compile_modes)}."
-            )
-        compile_mode_kwargs: dict[str, Any] = _build_compile_kwargs(compile_mode)
+        compile_mode, compile_mode_kwargs = validate_torch_compile_mode(
+            compile_mode_value
+        )
         if compile_mode in {"reduce-overhead", "max-autotune"}:
-            self._torch_compile_mark_step = _resolve_cudagraph_mark_step()
+            self._torch_compile_mark_step = resolve_cudagraph_mark_step()
             self.model = torch.compile(self.model, **compile_mode_kwargs)
             self._torch_compile_full_model = True
             return compile_mode_kwargs

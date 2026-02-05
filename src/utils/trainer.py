@@ -11,9 +11,8 @@ DDP_TIMEOUT_HOURS: int = 1
 def get_cpu_trainer_kwargs(cfg_section: DictConfig) -> dict[str, Any]:
     """Build trainer kwargs for CPU execution."""
     strategy_name: str = str(cfg_section.strategy)
-    num_devices: int = (
-        1 if cfg_section.num_devices is None else int(cfg_section.num_devices)
-    )
+    num_devices_value: Any = cfg_section.get("num_devices")
+    num_devices: int = 1 if num_devices_value is None else int(num_devices_value)
     kwargs: dict[str, Any] = {"accelerator": "cpu", "devices": num_devices}
 
     if strategy_name == "ddp":
@@ -39,8 +38,9 @@ def get_gpu_trainer_kwargs(cfg_section: DictConfig) -> dict[str, Any]:
     strategy_name: str = str(cfg_section.strategy)
     detected_devices: int = int(torch.cuda.device_count())
     num_devices: int = detected_devices
-    if cfg_section.num_devices is not None:
-        num_devices = min(int(cfg_section.num_devices), detected_devices)
+    num_devices_value: Any = cfg_section.get("num_devices")
+    if num_devices_value is not None:
+        num_devices = min(int(num_devices_value), detected_devices)
 
     kwargs: dict[str, Any] = {"accelerator": "cuda", "devices": num_devices}
 

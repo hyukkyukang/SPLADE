@@ -11,29 +11,22 @@ from src.indexing.async_writer import AsyncSparseWriter, SparseWriterConfig
 from src.indexing.sparse_index import (
     SparseShardWriter,
     resolve_numpy_dtype,
+    resolve_torch_dtype,
+    _sparsify_batch_gpu_csr_core_threshold,
+    _sparsify_batch_gpu_csr_core_topk,
     sparsify_batch_gpu_csr,
 )
-from src.model.pl_module.utils import build_splade_model_with_checkpoint
+from src.model.pl_module.utils import (
+    build_splade_model_with_checkpoint,
+    resolve_cudagraph_mark_step,
+    validate_torch_compile_mode,
+)
 from src.model.retriever.sparse.neural.splade import SpladeModel
 from src.utils import is_rank_zero, log_if_rank_zero
 from src.utils.model_utils import resolve_tagged_output_dir
 from src.utils.transformers import build_tokenizer
 
 logger: logging.Logger = logging.getLogger("SPLADEEncodeModule")
-
-
-def _resolve_cudagraph_mark_step() -> Callable[[], None] | None:
-    if not hasattr(torch, "compiler"):
-        return None
-    compiler_mod = torch.compiler
-    if not hasattr(compiler_mod, "cudagraph_mark_step_begin"):
-        return None
-    mark_step_fn = compiler_mod.cudagraph_mark_step_begin
-    return mark_step_fn if callable(mark_step_fn) else None
-
-
-def _build_compile_kwargs(mode: str) -> dict[str, Any]:
-    return {"mode": mode}
 
 
 class SPLADEEncodeModule(L.LightningModule):
@@ -60,6 +53,12 @@ class SPLADEEncodeModule(L.LightningModule):
             self.cfg.encoding.get("async_write_queue_size", 8)
         )
         self._torch_compile_mark_step: Callable[[], None] | None = None
+        self._sparsify_core_topk: Callable[
+            ..., tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        ] | None = None
+        self._sparsify_core_threshold: Callable[
+            ..., tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        ] | None = None
         self._setup_torch_compile()
 
     # --- Protected methods ---
@@ -82,6 +81,8 @@ class SPLADEEncodeModule(L.LightningModule):
         compile_enabled: bool = bool(self.cfg.encoding.get("torch_compile", False))
         compile_available: bool = hasattr(torch, "compile")
         self._torch_compile_mark_step = None
+        self._sparsify_core_topk = None
+        self._sparsify_core_threshold = None
         if compile_enabled and not compile_available:
             log_if_rank_zero(
                 logger,
@@ -93,25 +94,81 @@ class SPLADEEncodeModule(L.LightningModule):
         if not compile_enabled or not compile_available:
             return {}
         compile_mode_value: Any = self.cfg.encoding.get("torch_compile_mode", "default")
-        compile_mode: str = str(compile_mode_value).lower()
-        valid_compile_modes: set[str] = {
-            "default",
-            "reduce-overhead",
-            "max-autotune",
-        }
-        if compile_mode not in valid_compile_modes:
-            raise ValueError(
-                "Unsupported torch.compile mode: "
-                f"{compile_mode_value!r}. Expected one of "
-                f"{sorted(valid_compile_modes)}."
-            )
-        compile_mode_kwargs: dict[str, Any] = _build_compile_kwargs(compile_mode)
+        compile_mode, compile_mode_kwargs = validate_torch_compile_mode(
+            compile_mode_value
+        )
         if compile_mode in {"reduce-overhead", "max-autotune"}:
-            self._torch_compile_mark_step = _resolve_cudagraph_mark_step()
+            self._torch_compile_mark_step = resolve_cudagraph_mark_step()
         doc_wrapper: torch.nn.Module = self.model._doc_encoder_wrapper
         doc_encoder = torch.compile(doc_wrapper, **compile_mode_kwargs)
         self.model._doc_encoder_fn = doc_encoder
+        self._sparsify_core_topk = torch.compile(
+            _sparsify_batch_gpu_csr_core_topk, **compile_mode_kwargs
+        )
+        self._sparsify_core_threshold = torch.compile(
+            _sparsify_batch_gpu_csr_core_threshold, **compile_mode_kwargs
+        )
         return compile_mode_kwargs
+
+    def _sparsify_batch(
+        self, vectors: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if (
+            self._sparsify_core_topk is None
+            and self._sparsify_core_threshold is None
+        ):
+            return sparsify_batch_gpu_csr(
+                vectors,
+                exclude_token_ids=self._exclude_token_ids_tensor,
+                min_weight=self._min_weight,
+                top_k=self._top_k,
+                value_dtype=self._value_dtype,
+            )
+        if vectors.ndim != 2:
+            raise ValueError("sparsify_batch_gpu_csr expects a 2D tensor.")
+        batch_size: int = int(vectors.shape[0])
+        vocab_size: int = int(vectors.shape[1])
+        if batch_size == 0:
+            indptr = torch.zeros((1,), dtype=torch.int64, device="cpu")
+            indices = torch.empty((0,), dtype=torch.int32, device="cpu")
+            values = torch.empty(
+                (0,), dtype=resolve_torch_dtype(self._value_dtype), device="cpu"
+            )
+            return indptr, indices, values
+        threshold: float = float(self._min_weight) if self._min_weight > 0.0 else 0.0
+        exclude_ids: torch.Tensor | None = self._exclude_token_ids_tensor
+        if exclude_ids is not None and int(exclude_ids.numel()) > 0:
+            exclude_ids = exclude_ids.to(device=vectors.device)
+        if self._top_k is not None:
+            top_k_int: int = min(int(self._top_k), vocab_size)
+            if top_k_int <= 0:
+                indptr = torch.zeros((batch_size + 1,), dtype=torch.int64, device="cpu")
+                indices = torch.empty((0,), dtype=torch.int32, device="cpu")
+                values = torch.empty(
+                    (0,), dtype=resolve_torch_dtype(self._value_dtype), device="cpu"
+                )
+                return indptr, indices, values
+            core_fn = self._sparsify_core_topk or _sparsify_batch_gpu_csr_core_topk
+            indptr_gpu, flat_indices, flat_values = core_fn(
+                vectors,
+                exclude_token_ids=exclude_ids,
+                threshold=threshold,
+                top_k=top_k_int,
+            )
+        else:
+            core_fn = (
+                self._sparsify_core_threshold or _sparsify_batch_gpu_csr_core_threshold
+            )
+            indptr_gpu, flat_indices, flat_values = core_fn(
+                vectors,
+                exclude_token_ids=exclude_ids,
+                threshold=threshold,
+            )
+        torch_value_dtype: torch.dtype = resolve_torch_dtype(self._value_dtype)
+        indptr = indptr_gpu.to(device="cpu")
+        indices = flat_indices.to(dtype=torch.int32, device="cpu")
+        values = flat_values.to(dtype=torch_value_dtype, device="cpu")
+        return indptr, indices, values
 
     # --- Public methods ---
     def on_predict_start(self) -> None:
@@ -197,13 +254,7 @@ class SPLADEEncodeModule(L.LightningModule):
         doc_reps: torch.Tensor = self.model.encode_docs(
             doc_input_ids, doc_attention_mask
         )
-        indptr, indices, values = sparsify_batch_gpu_csr(
-            doc_reps,
-            exclude_token_ids=self._exclude_token_ids_tensor,
-            min_weight=self._min_weight,
-            top_k=self._top_k,
-            value_dtype=self._value_dtype,
-        )
+        indptr, indices, values = self._sparsify_batch(doc_reps)
         if self._async_writer is not None:
             self._async_writer.check_healthy()
             indptr.share_memory_()

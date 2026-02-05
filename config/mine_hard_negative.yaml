@@ -21,10 +21,26 @@ dataset:
   use_triplet_positives: true
   triplet_positive_cache_path: data/cache/msmarco_triplet_positives.parquet
 
+mining:
+  output_dir_base: "data/hard_negatives"
+  run_filename: "hard_negatives.jsonl"
+  # Optional post-processing: convert per-rank JSONL outputs to Parquet shards.
+  postprocess:
+    enabled: true
+    # Parquet shards are written next to the JSONL files.
+    # Delete JSONL files after successful conversion.
+    cleanup_jsonl: true
+    # Require row count match before cleanup.
+    require_count_match: true
+    # Add a "rank" column in the Parquet shards.
+    add_rank_column: false
+    # Validation: run with a small max_queries and verify row counts match
+    # before enabling cleanup_jsonl.
+
 testing:
   k_list: [500]
   save_run: true
-  run_path: ${log_dir}/search_results.jsonl
+  run_path: null
 
 search:
   exclude_positives: true
