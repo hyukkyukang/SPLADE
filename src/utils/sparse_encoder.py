@@ -308,7 +308,8 @@ def _extract_mlm_state_dict(
     key: str
     value: torch.Tensor
     for key, value in state_dict.items():
-        stripped_key: str | None = _strip_prefix(key, prefixes)
+        normalized_key: str = key.replace("_orig_mod.", "")
+        stripped_key: str | None = _strip_prefix(normalized_key, prefixes)
         if stripped_key is None:
             continue
         mlm_state[stripped_key] = value
