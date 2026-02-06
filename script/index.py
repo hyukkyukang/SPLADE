@@ -10,7 +10,7 @@ from tqdm.auto import tqdm
 from omegaconf import DictConfig
 
 from config.path import ABS_CONFIG_DIR
-from src.indexing.sparse_index import (
+from src.index.sparse import (
     ShardInfo,
     build_inverted_index_from_shards,
     compute_term_and_block_max,

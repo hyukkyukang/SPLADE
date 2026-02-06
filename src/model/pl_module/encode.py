@@ -7,11 +7,13 @@ import torch
 from omegaconf import DictConfig, OmegaConf
 from transformers import PreTrainedTokenizerBase
 
-from src.indexing.async_writer import AsyncSparseWriter, SparseWriterConfig
-from src.indexing.sparse_index import (
+from src.index.async_writer import AsyncSparseWriter, SparseWriterConfig
+from src.index.sparse import (
     SparseShardWriter,
     resolve_numpy_dtype,
     resolve_torch_dtype,
+)
+from src.search.sparsify import (
     _sparsify_batch_gpu_csr_core_threshold,
     _sparsify_batch_gpu_csr_core_topk,
     sparsify_batch_gpu_csr,

@@ -21,3 +21,22 @@ scoring:
   max_rows: null
   overwrite: true
   score_key: scores
+
+score_dataset:
+  hf_name: json
+  hf_subset: null
+  hf_split: train
+  hf_cache_dir: null
+  hf_data_files: log/search_results.jsonl
+  query_corpus_hf_name: sentence-transformers/msmarco
+  query_corpus_hf_cache_dir: null
+  query_corpus_hf_data_files: null
+
+positives:
+  enabled: true
+  cache_path: data/cache/msmarco_triplet_positives.parquet
+  hf_name: sentence-transformers/msmarco
+  hf_subset: triplets
+  hf_split: train
+  hf_cache_dir: null
+  hf_data_files: null

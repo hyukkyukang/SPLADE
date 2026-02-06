@@ -2,7 +2,6 @@ import logging
 from typing import Any, Callable
 
 import lightning as L
-import numpy as np
 import torch
 from omegaconf import DictConfig
 
@@ -41,25 +40,6 @@ def validate_torch_compile_mode(mode_value: Any) -> tuple[str, dict[str, Any]]:
             f"{sorted(_VALID_TORCH_COMPILE_MODES)}."
         )
     return compile_mode, build_compile_kwargs(compile_mode)
-
-
-def resolve_query_sparsify_config(
-    metadata: dict[str, Any],
-) -> tuple[list[int], float, int | None]:
-    exclude_ids: list[int] = [
-        int(token_id) for token_id in metadata.get("exclude_token_ids") or []
-    ]
-    min_weight_value: float = float(metadata.get("min_weight") or 0.0)
-    top_k_value: int | None = (
-        None if metadata.get("top_k") is None else int(metadata["top_k"])
-    )
-    return exclude_ids, min_weight_value, top_k_value
-
-
-def prepare_score_buffers(doc_count: int) -> tuple[np.ndarray, np.ndarray]:
-    score_buffer = np.zeros(int(doc_count), dtype=np.float32)
-    seen_buffer = np.zeros(int(doc_count), dtype=np.uint8)
-    return score_buffer, seen_buffer
 
 
 def build_splade_model_with_checkpoint(

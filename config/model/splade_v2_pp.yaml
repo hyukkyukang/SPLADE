@@ -1,0 +1,9 @@
+# @package model
+defaults:
+  - _base
+
+name: splade_v2_pp
+huggingface_name: Luyu/co-condenser-marco
+query_pooling: max
+doc_pooling: max
+sparse_activation: log1p_relu

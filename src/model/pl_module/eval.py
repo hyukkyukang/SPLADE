@@ -6,7 +6,7 @@ import torch
 from omegaconf import DictConfig
 
 from src.metric.retrieval import RetrievalMetrics
-from src.model.pl_module.indexed_retrieval import IndexedRetrievalHelper
+from src.search.retrieval import IndexedRetrievalHelper
 from src.model.pl_module.utils import (
     build_splade_model_with_checkpoint,
     finalize_retrieval_metrics,

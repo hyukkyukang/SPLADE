@@ -7,9 +7,9 @@ from typing import Sequence
 import torch
 import torch.multiprocessing as mp
 
-from src.indexing.sparse_index import SparseShardWriter
+from src.index.sparse import SparseShardWriter
 
-logger: logging.Logger = logging.getLogger("src.indexing.async_writer")
+logger: logging.Logger = logging.getLogger("src.index.async_writer")
 
 
 @dataclass(frozen=True)
@@ -136,3 +136,6 @@ class AsyncSparseWriter:
         self._queue = None
         self._error_queue = None
         self._process = None
+
+
+__all__ = ["AsyncSparseWriter", "SparseWriterConfig"]

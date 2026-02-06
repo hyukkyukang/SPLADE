@@ -3,7 +3,7 @@ import unittest
 import numpy as np
 import torch
 
-from src.indexing.sparse_index import sparsify_batch_gpu_csr
+from src.search.sparsify import sparsify_batch_gpu_csr
 
 
 class SparsifyBatchGpuCsrTest(unittest.TestCase):

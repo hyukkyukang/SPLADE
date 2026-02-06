@@ -14,7 +14,7 @@ pip install -r requirements.txt
 All entrypoints use Hydra configs under `config/`.
 
 - Override config groups: `model=splade_v2_doc`, `dataset=beir/trec-covid`,
-  `training=splade_v2_max`.
+  `training=splade_v2`.
 - Override parameters: `training.use_cpu=true`,
   `testing.checkpoint_path=...`, `encoding.checkpoint_path=...`.
 - Logs go to `log/` by default; set `tag=...` to create per-run log dirs.
@@ -65,9 +65,9 @@ python script/index.py \
   encoding.index_dir=log/index
 ```
 
-Block-Max WAND scoring requires bounds stored in the index. If you enable
-`testing.scoring_method=wand` or change `encoding.wand_block_size`, rebuild the
-index with `script/index.py`.
+Index scoring supports `testing.scoring_method=full|wand|bmw`. Block-Max WAND
+(`bmw`) requires bounds stored in the index. If you enable `bmw` or change
+`encoding.wand_block_size`, rebuild the index with `script/index.py`.
 
 ## Evaluate (retrieval / reranking)
 
@@ -106,7 +106,7 @@ Use HF weights instead of a checkpoint:
 ```
 python script/evaluate.py --benchmark nanobeir \
   nanobeir.use_huggingface_model=true \
-  model.huggingface_name=naver/splade_v2_max
+  model.huggingface_name=naver/splade_v2
 ```
 
 ## Preprocess
@@ -152,6 +152,6 @@ docker run --gpus all -v "$PWD:/workspace" -it splade-repro bash
 ## Config toggles
 
 - Paper-faithful regularization: `training.regularization.paper_faithful=true|false`
-- SPLADE variants: `training=splade_v1|splade_v2_max|splade_v2_doc`
+- SPLADE variants: `training=splade_v1|splade_v2|splade_v2_doc`
 - Distillation: `training.distill.enabled=true`
 - Encode compilation: `encoding.torch_compile=true` (compiles encoder + sparsify core)

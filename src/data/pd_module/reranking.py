@@ -1,12 +1,10 @@
-from typing import Any
-
-import torch
 from omegaconf import DictConfig
 from transformers import PreTrainedTokenizerBase
 
 from src.data.collator import UniversalCollator
 from src.data.dataclass import MetaItem, RerankingDataItem
 from src.data.pd_module import PDModule
+from src.data.pd_module.utils import build_rerank_inputs
 
 
 class RerankingPDModule(PDModule):
@@ -33,66 +31,29 @@ class RerankingPDModule(PDModule):
 
     def __getitem__(self, idx: int) -> RerankingDataItem:
         meta_item: MetaItem = self._build_meta_item(int(idx))
-        query_text: str = self.dataset.resolve_query_text(meta_item)
-        pos_ids: list[str] = meta_item.pos_ids
-        neg_ids: list[str] = meta_item.neg_ids
-        pos_texts: list[str] = self.dataset.resolve_doc_texts(
-            pos_ids, meta_item.pos_texts
-        )
-        neg_texts: list[str] = self.dataset.resolve_doc_texts(
-            neg_ids, meta_item.neg_texts
-        )
-
-        doc_texts: list[str] = pos_texts + neg_texts
-        doc_ids: list[str] = pos_ids + neg_ids
-
-        query_input_ids: torch.Tensor
-        query_attention_mask: torch.Tensor
-        query_input_ids, query_attention_mask = self._tokenize_text(
-            query_text, max_length=self.max_query_length
-        )
-        doc_input_ids: torch.Tensor
-        doc_attention_mask: torch.Tensor
-        doc_input_ids, doc_attention_mask = self._tokenize_docs(
-            doc_texts, max_length=self.max_doc_length
-        )
-
-        doc_mask: torch.Tensor = torch.zeros(len(doc_texts), dtype=torch.bool)
-        if doc_texts:
-            doc_mask[:] = True
-        pos_mask: torch.Tensor = torch.zeros(len(doc_texts), dtype=torch.bool)
-        if pos_texts:
-            pos_mask[: len(pos_texts)] = True
-
-        pos_scores_list: list[float] = (
-            meta_item.pos_scores
-            if meta_item.pos_scores is not None
-            else [float("nan")] * len(pos_ids)
-        )
-        neg_scores_list: list[float] = (
-            meta_item.neg_scores
-            if meta_item.neg_scores is not None
-            else [float("nan")] * len(neg_ids)
-        )
-        teacher_scores_list: list[float] = pos_scores_list + neg_scores_list
-        teacher_scores: torch.Tensor = torch.tensor(
-            teacher_scores_list, dtype=torch.float
+        inputs = build_rerank_inputs(
+            dataset=self.dataset,
+            tokenizer=self.tokenizer,
+            meta_item=meta_item,
+            max_query_length=self.max_query_length,
+            max_doc_length=self.max_doc_length,
+            max_padding=self.max_padding,
         )
 
         return RerankingDataItem(
             data_idx=int(idx),
-            qid=meta_item.qid,
-            pos_ids=pos_ids,
-            neg_ids=neg_ids,
-            query_text=query_text,
-            doc_texts=doc_texts,
-            query_input_ids=query_input_ids,
-            query_attention_mask=query_attention_mask,
-            doc_input_ids=doc_input_ids,
-            doc_attention_mask=doc_attention_mask,
-            doc_mask=doc_mask,
-            pos_mask=pos_mask,
-            teacher_scores=teacher_scores,
+            qid=inputs.qid,
+            pos_ids=inputs.pos_ids,
+            neg_ids=inputs.neg_ids,
+            query_text=inputs.query_text,
+            doc_texts=inputs.doc_texts,
+            query_input_ids=inputs.query_input_ids,
+            query_attention_mask=inputs.query_attention_mask,
+            doc_input_ids=inputs.doc_input_ids,
+            doc_attention_mask=inputs.doc_attention_mask,
+            doc_mask=inputs.doc_mask,
+            pos_mask=inputs.pos_mask,
+            teacher_scores=inputs.teacher_scores,
         )
 
     # --- Property methods ---

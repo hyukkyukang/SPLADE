@@ -7,7 +7,7 @@ import lightning as L
 import torch
 from omegaconf import DictConfig
 
-from src.model.pl_module.indexed_retrieval import IndexedRetrievalHelper
+from src.search.retrieval import IndexedRetrievalHelper
 from src.model.pl_module.utils import (
     build_splade_model_with_checkpoint,
     resolve_cudagraph_mark_step,

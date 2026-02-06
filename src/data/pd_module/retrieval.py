@@ -14,6 +14,7 @@ from transformers import PreTrainedTokenizerBase
 from src.data.collator import UniversalCollator
 from src.data.dataclass import RetrievalDataItem
 from src.data.pd_module import PDModule
+from src.data.pd_module.utils import tokenize_text
 from src.data.utils import resolve_dataset_column
 from src.utils.dist import is_rank_zero, maybe_barrier
 from src.utils.logging import log_if_rank_zero
@@ -92,7 +93,9 @@ class RetrievalPDModule(PDModule):
             self.cfg.qrels_hf_cache_dir
         )
         self.qrels_hf_cache_dir: str | None = (
-            qrels_cache_override if qrels_cache_override is not None else self.hf_cache_dir
+            qrels_cache_override
+            if qrels_cache_override is not None
+            else self.hf_cache_dir
         )
         self.qrels_hf_data_files: Any | None = self.cfg.qrels_hf_data_files
         self._query_ids: list[str] = []
@@ -109,15 +112,14 @@ class RetrievalPDModule(PDModule):
         qid: str = self._query_ids[int(idx)]
         query_idx: int = self._query_id_to_idx[qid]
         query_text: str = self.dataset.query_text(query_idx)
-        tokens: dict[str, torch.Tensor] = self.tokenizer(
+        query_input_ids: torch.Tensor
+        query_attention_mask: torch.Tensor
+        query_input_ids, query_attention_mask = tokenize_text(
+            self.tokenizer,
             query_text,
-            padding=True,
-            truncation=True,
             max_length=self.max_query_length,
-            return_tensors="pt",
+            padding=True,
         )
-        query_input_ids: torch.Tensor = tokens["input_ids"].squeeze(0)
-        query_attention_mask: torch.Tensor = tokens["attention_mask"].squeeze(0)
         return RetrievalDataItem(
             data_idx=int(idx),
             qid=qid,
@@ -330,7 +332,10 @@ class RetrievalPDModule(PDModule):
             if not qid or qid not in allowed_queries:
                 continue
             pos_id: str = str(
-                row.get("positive_id") or row.get("pos_id") or row.get("doc_pos_id") or ""
+                row.get("positive_id")
+                or row.get("pos_id")
+                or row.get("doc_pos_id")
+                or ""
             )
             if not pos_id:
                 continue
@@ -364,7 +369,9 @@ class RetrievalPDModule(PDModule):
             and qrels_subset is None
             and qrels_data_files is None
         ):
-            return self._load_hf_split(qrels_name, "qrels", qrels_split, qrels_cache_dir)
+            return self._load_hf_split(
+                qrels_name, "qrels", qrels_split, qrels_cache_dir
+            )
 
         data_files: dict[str, Any] | None = (
             dict(qrels_data_files) if qrels_data_files is not None else None
@@ -520,7 +527,9 @@ class RetrievalPDModule(PDModule):
             # Restrict evaluation to queries with qrels to avoid scoring unlabeled queries.
             qrels_query_ids: set[str] = set(self._qrels.keys())
             if qrels_query_ids:
-                self._query_ids = [qid for qid in self._query_ids if qid in qrels_query_ids]
+                self._query_ids = [
+                    qid for qid in self._query_ids if qid in qrels_query_ids
+                ]
 
     def get_relevance_judgments(self, qid: str) -> Dict[str, float]:
         return self._qrels.get(qid, {})

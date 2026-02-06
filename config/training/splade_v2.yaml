@@ -2,7 +2,7 @@
 defaults:
   - _base
 
-name: splade_v2_max
+name: splade_v2
 
 regularization:
   query_weight: 0.0002

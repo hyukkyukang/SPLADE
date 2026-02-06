@@ -7,10 +7,10 @@ root_dir_path: "."
 
 # Defaults
 defaults:
-  - model: splade_v2_max
+  - model: splade_v2
   - dataset@train_dataset: msmarco
   - dataset@val_dataset: msmarco
-  - training: splade_v2_max
+  - training: splade_v2
   - testing: default
   # The following overrides are necessary to make the logging colorized.
   - override hydra/job_logging: colorlog_custom

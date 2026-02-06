@@ -2,12 +2,15 @@ import unittest
 
 import numpy as np
 
-from src.indexing.sparse_index import (
+from src.index.sparse import (
     compute_term_and_block_max,
+)
+from src.search.scoring import (
     score_query_postings,
+    score_query_postings_bmw,
     score_query_postings_wand,
 )
-from src.model.pl_module.utils import prepare_score_buffers
+from src.search.buffers import prepare_score_buffers
 
 
 class WandScoringTest(unittest.TestCase):
@@ -19,7 +22,7 @@ class WandScoringTest(unittest.TestCase):
         )
         return term_ptr, post_doc_ids, post_weights
 
-    def test_wand_matches_exact(self) -> None:
+    def test_wand_and_bmw_match_full(self) -> None:
         term_ptr, post_doc_ids, post_weights = self._build_index()
         term_max, block_max, block_ptr = compute_term_and_block_max(
             term_ptr, post_weights, block_size=2
@@ -28,7 +31,7 @@ class WandScoringTest(unittest.TestCase):
         q_values = np.array([1.0, 0.5, 0.2], dtype=np.float32)
 
         scores, seen = prepare_score_buffers(doc_count=4)
-        exact_docs, exact_scores = score_query_postings(
+        full_docs, full_scores = score_query_postings(
             term_ptr,
             post_doc_ids,
             post_weights,
@@ -45,18 +48,33 @@ class WandScoringTest(unittest.TestCase):
             post_doc_ids,
             post_weights,
             term_max,
-            block_max,
-            block_ptr,
             q_indices,
             q_values,
             scores=wand_buffer_scores,
             seen=wand_buffer_seen,
             top_k=3,
+        )
+
+        bmw_buffer_scores, bmw_buffer_seen = prepare_score_buffers(doc_count=4)
+        bmw_docs, bmw_scores = score_query_postings_bmw(
+            term_ptr,
+            post_doc_ids,
+            post_weights,
+            term_max,
+            block_max,
+            block_ptr,
+            q_indices,
+            q_values,
+            scores=bmw_buffer_scores,
+            seen=bmw_buffer_seen,
+            top_k=3,
             block_size=2,
         )
 
-        np.testing.assert_array_equal(wand_docs, exact_docs)
-        np.testing.assert_allclose(wand_scores, exact_scores)
+        np.testing.assert_array_equal(wand_docs, full_docs)
+        np.testing.assert_allclose(wand_scores, full_scores)
+        np.testing.assert_array_equal(bmw_docs, full_docs)
+        np.testing.assert_allclose(bmw_scores, full_scores)
 
 
 if __name__ == "__main__":

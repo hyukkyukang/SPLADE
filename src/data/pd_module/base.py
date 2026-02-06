@@ -9,6 +9,7 @@ from transformers import PreTrainedTokenizerBase
 
 from src.data.dataclass import MetaItem
 from src.data.dataset import BaseDataset
+from src.data.pd_module.utils import tokenize_docs, tokenize_text
 from src.data.registry import build_dataset
 
 
@@ -83,36 +84,22 @@ class PDModule(PyTorchDataset):
     def _tokenize_text(
         self, text: str, *, max_length: int
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        padding: str | bool = "max_length" if self.max_padding else True
-        tokens: dict[str, torch.Tensor] = self.tokenizer(
+        return tokenize_text(
+            self.tokenizer,
             text,
-            padding=padding,
-            truncation=True,
-            max_length=int(max_length),
-            return_tensors="pt",
+            max_length=max_length,
+            max_padding=self.max_padding,
         )
-        input_ids: torch.Tensor = tokens["input_ids"].squeeze(0)
-        attention_mask: torch.Tensor = tokens["attention_mask"].squeeze(0)
-        return input_ids, attention_mask
 
     def _tokenize_docs(
         self, docs: list[str], *, max_length: int
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        padding: str | bool = "max_length" if self.max_padding else True
-        if not docs:
-            empty_ids: torch.Tensor = torch.empty((0, max_length), dtype=torch.long)
-            empty_mask: torch.Tensor = torch.empty((0, max_length), dtype=torch.long)
-            return empty_ids, empty_mask
-        tokens: dict[str, torch.Tensor] = self.tokenizer(
-            list(docs),
-            padding=padding,
-            truncation=True,
-            max_length=int(max_length),
-            return_tensors="pt",
+        return tokenize_docs(
+            self.tokenizer,
+            docs,
+            max_length=max_length,
+            max_padding=self.max_padding,
         )
-        input_ids: torch.Tensor = tokens["input_ids"]
-        attention_mask: torch.Tensor = tokens["attention_mask"]
-        return input_ids, attention_mask
 
     # --- Public methods ---
     def prepare_data(self) -> None:

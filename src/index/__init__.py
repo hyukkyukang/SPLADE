@@ -1,6 +1,7 @@
-"""Indexing utilities package."""
+"""Index utilities package."""
 
-from src.indexing.sparse_index import (
+from src.index.async_writer import AsyncSparseWriter, SparseWriterConfig
+from src.index.sparse import (
     SparseShardWriter,
     build_inverted_index_from_shards,
     load_shard_manifest,
@@ -8,7 +9,9 @@ from src.indexing.sparse_index import (
 )
 
 __all__ = [
+    "AsyncSparseWriter",
     "SparseShardWriter",
+    "SparseWriterConfig",
     "build_inverted_index_from_shards",
     "load_shard_manifest",
     "resolve_numpy_dtype",
