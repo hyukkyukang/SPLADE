@@ -1,0 +1,21 @@
+# Cross-encoder scoring entrypoint for MS MARCO SPLADE v2 hard negatives
+defaults:
+  - score_cross_encoder
+  - _self_
+  - override /mining: disabled
+
+scoring:
+  data_module: standard
+  output_dir: "data/hard_negatives/scores"
+  output_basename: "msmarco_spladev2_cross_encoder_scores"
+  doc_source: spladev2
+
+score_dataset:
+  hf_name: Hyukkyu/msmarco-spladev2-hard-negatives
+  hf_subset: null
+  hf_split: train
+  hf_cache_dir: null
+  hf_data_files: null
+  query_corpus_hf_name: sentence-transformers/msmarco
+  query_corpus_hf_cache_dir: null
+  query_corpus_hf_data_files: null

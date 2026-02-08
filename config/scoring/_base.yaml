@@ -1,0 +1,33 @@
+# @package scoring
+precision: bf16-mixed
+use_cpu: false
+strategy: ddp
+static_graph: true
+num_devices: null
+num_workers: 4
+prefetch_factor: 2
+max_rows: null
+torch_compile: true
+torch_compile_mode: default
+run_predict: true
+upload_to_hub: true
+hf_namespace: "Hyukkyu"
+hf_repo_id: null
+hf_local_files_only: false
+hf_local_files_only_non_primary: true
+hf_max_retries: 5
+hf_hub_etag_timeout: 120
+hf_hub_download_timeout: 120
+doc_source: null
+doc_lookup_backend: dict
+doc_lookup_cache_dir: null
+doc_lookup_chunk_size: 100000
+doc_lookup_query_chunk_size: 900
+tokenize_chunk_size: 2048
+model_backend: auto_seq_cls
+model_checkpoint_path: null
+postprocess:
+  enabled: true
+  cleanup_jsonl: true
+  require_count_match: true
+  add_rank_column: false

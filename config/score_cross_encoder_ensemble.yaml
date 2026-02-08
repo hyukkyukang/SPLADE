@@ -1,0 +1,57 @@
+# Cross-encoder ensemble scoring (5 models)
+seed: 10
+log_dir_base: "log"
+tag: null
+log_dir: ${tagged_log_dir:${log_dir_base},${tag}}
+root_dir_path: "."
+
+defaults:
+  - scoring: cross_encoder
+  - dataset@score_dataset: msmarco
+  - override hydra/job_logging: colorlog_custom
+  - _self_
+
+scoring:
+  data_module: hard_negatives
+  output_dir: "data/hard_negatives/scores"
+  output_format: jsonl
+  merge_ranks: true
+  upload_to_hub: false
+
+score_dataset:
+  hf_name: parquet
+  hf_subset: null
+  hf_split: train
+  hf_cache_dir: null
+  hf_data_files: data/hard_negatives/extracted/msmarco_hardneg_100_balanced.parquet
+  query_corpus_hf_name: sentence-transformers/msmarco
+  query_corpus_hf_cache_dir: null
+  query_corpus_hf_data_files: null
+
+hard_negatives:
+  neg_keys: []
+  max_negatives: null
+  max_positives: null
+  require_negatives: true
+
+models:
+  - model_name: cross-encoder/ms-marco-MiniLM-L-6-v2
+    model_backend: auto_seq_cls
+    model_checkpoint_path: null
+    output_basename: msmarco_hardneg_100_minilm_l6_v2_scores
+  - model_name: naver/trecdl22-crossencoder-rankT53b-repro
+    model_backend: t5_encoder_rerank
+    model_checkpoint_path: ${oc.env:RANKT53B_CHECKPOINT_PATH,null}
+    output_basename: msmarco_hardneg_100_rankt53b_repro_scores
+  - model_name: naver/trecdl22-crossencoder-debertav3
+    model_backend: auto_seq_cls
+    model_checkpoint_path: null
+    output_basename: msmarco_hardneg_100_debertav3_scores
+  - model_name: naver/trecdl22-crossencoder-debertav2
+    model_backend: auto_seq_cls
+    model_checkpoint_path: null
+    output_basename: msmarco_hardneg_100_debertav2_scores
+  - model_name: naver/trecdl22-crossencoder-electra
+    model_backend: auto_seq_cls
+    model_checkpoint_path: null
+    output_basename: msmarco_hardneg_100_electra_scores

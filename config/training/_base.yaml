@@ -12,6 +12,7 @@ grad_accumulation: 1
 num_workers: 16
 prefetch_factor: 4
 max_padding: true
+init_checkpoint_path: null
 
 lr: 2e-5
 warmup_steps: 6000
@@ -58,6 +59,9 @@ distill:
   enabled: false
   weight: 1.0
   loss: mse
+  losses:
+    - type: ${.loss}
+      weight: ${.weight}
   teacher_score_key: teacher_scores
   fail_on_missing: true
 

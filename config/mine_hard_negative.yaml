@@ -11,6 +11,7 @@ defaults:
   - encoding: default
   - dataset: msmarco
   - testing: default
+  - mining: hard_negative
   - _self_
   # The following overrides are necessary to make the logging colorized.
   - override hydra/job_logging: colorlog_custom
@@ -19,23 +20,8 @@ dataset:
   max_padding: ${testing.max_padding}
   use_qrels: false
   use_triplet_positives: true
+  filter_queries_with_positives: true
   triplet_positive_cache_path: data/cache/msmarco_triplet_positives.parquet
-
-mining:
-  output_dir_base: "data/hard_negatives"
-  run_filename: "hard_negatives.jsonl"
-  # Optional post-processing: convert per-rank JSONL outputs to Parquet shards.
-  postprocess:
-    enabled: true
-    # Parquet shards are written next to the JSONL files.
-    # Delete JSONL files after successful conversion.
-    cleanup_jsonl: true
-    # Require row count match before cleanup.
-    require_count_match: true
-    # Add a "rank" column in the Parquet shards.
-    add_rank_column: false
-    # Validation: run with a small max_queries and verify row counts match
-    # before enabling cleanup_jsonl.
 
 testing:
   k_list: [500]
@@ -43,8 +29,6 @@ testing:
   run_path: null
 
 search:
-  exclude_positives: true
-  include_query_text: false
   merge_ranks: true
   flush_every: 100
 

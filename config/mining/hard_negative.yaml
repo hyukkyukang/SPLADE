@@ -1,0 +1,23 @@
+# @package mining
+defaults:
+  - _base
+
+name: hard_negative
+output_dir_base: "data/hard_negatives"
+run_filename: "hard_negatives.jsonl"
+upload_to_hub: true
+hf_namespace: "Hyukkyu"
+# Repo format: {hf_namespace}/{dataset_name}-{model_name}-hard-negatives
+# Requires HF_TOKEN or HUGGINGFACE_HUB_TOKEN in the environment.
+# Optional post-processing: convert per-rank JSONL outputs to Parquet shards.
+postprocess:
+  enabled: true
+  # Parquet shards are written next to the JSONL files.
+  # Delete JSONL files after successful conversion.
+  cleanup_jsonl: true
+  # Require row count match before cleanup.
+  require_count_match: true
+  # Add a "rank" column in the Parquet shards.
+  add_rank_column: false
+  # Validation: run with a small max_queries and verify row counts match
+  # before enabling cleanup_jsonl.

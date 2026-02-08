@@ -5,6 +5,7 @@ huggingface_model_class: AutoModelForMaskedLM
 # encoder settings
 dtype: float32
 attn_implementation: sdpa
+tie_word_embeddings: false
 is_quantized: false
 
 # encoding options

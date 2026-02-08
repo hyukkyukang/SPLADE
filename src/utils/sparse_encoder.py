@@ -329,11 +329,13 @@ def _build_mlm_transformer(cfg: DictConfig) -> MLMTransformer:
         str(cfg.model.dtype), bool(cfg.testing.use_cpu)
     )
     model_args: dict[str, Any] = {}
+    config_args: dict[str, Any] = {}
     attn_implementation: str | None = cfg.model.attn_implementation
     if attn_implementation:
         model_args["attn_implementation"] = attn_implementation
     if dtype is not None:
         model_args["torch_dtype"] = dtype
+    config_args["tie_word_embeddings"] = bool(cfg.model.tie_word_embeddings)
 
     max_input_length: int = int(cfg.model.max_input_length)
     tokenizer_args: dict[str, Any] = {"model_max_length": max_input_length}
@@ -345,6 +347,7 @@ def _build_mlm_transformer(cfg: DictConfig) -> MLMTransformer:
         max_seq_length=max_input_length,
         model_args=model_args,
         tokenizer_args=tokenizer_args,
+        config_args=config_args,
         cache_dir=cache_dir,
     )
     return mlm_transformer

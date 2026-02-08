@@ -15,11 +15,12 @@ static_graph: true
 num_devices: null
 gpu_sparsify: true
 scoring_workers: 4
-scoring_method: bmw
+scoring_method: full
 scoring_backend: threads
-wand_block_size: 128
-sparse_top_k: 4096
+wand_block_size: 256
+sparse_top_k: 512
 sparse_min_weight: 0.0
+query_exclude_token_ids: ${model.exclude_token_ids}
 
 k_list: [1, 5, 10, 50, 100]
 save_run: false

@@ -1,0 +1,12 @@
+# @package training
+defaults:
+  - splade_v2_pp
+
+name: splade_v2_pp_distill
+
+distill:
+  enabled: true
+  weight: 1.0
+  loss: margin_mse
+  teacher_score_key: teacher_scores
+  fail_on_missing: true

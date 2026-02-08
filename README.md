@@ -38,6 +38,34 @@ python script/train.py \
   dataset@val_dataset=msmarco
 ```
 
+Train with triplet meta rows + scored hard negatives (margin-MSE distillation):
+
+```
+python script/train.py \
+  training=splade_v2_distill \
+  model=splade_v2_hf \
+  dataset@train_dataset=msmarco_triplet_scores \
+  dataset@val_dataset=msmarco
+```
+
+Train directly from scored distillation rows (no triplet join):
+
+```
+python script/train.py \
+  training=splade_v2_distill \
+  dataset@train_dataset=msmarco_distill_scores \
+  dataset@val_dataset=msmarco
+```
+
+Override the scored dataset or number of negatives per query:
+
+```
+python script/train.py \
+  dataset@train_dataset=msmarco_triplet_scores \
+  train_dataset.score_hf_name=Hyukkyu/msmarco-spladev2-hard-negatives-scores \
+  train_dataset.score_negatives_per_query=1
+```
+
 Disable W&B logging (optional):
 
 ```
@@ -123,9 +151,54 @@ python script/preprocess/mine_hard_negative.py \
 Score candidate pairs with a cross-encoder:
 
 ```
-python script/preprocess/score_cross_encoder.py \
+python script/preprocess/mine_distillation_score.py \
   dataset@score_dataset=msmarco \
   scoring.model_name=cross-encoder/ms-marco-MiniLM-L-12-v2
+```
+
+Score MS MARCO hard negatives (merge all neg keys):
+
+```
+python script/preprocess/mine_distillation_score.py \
+  --config-name score_cross_encoder_msmarco_hard_negatives \
+  scoring.max_rows=10
+```
+
+## SPLADE-v3 data generation (before training)
+
+This pipeline uses `sentence-transformers/msmarco-hard-negatives`, builds a
+balanced 100-negatives/query dataset, scores 5 cross-encoders, normalizes and
+rescales scores, trims to 8 negatives per query, and uploads the final dataset
+to `Hyukkyu/msmarco-spladev3-scores`. Training then uses existing configs.
+
+1) Extract balanced hard negatives (top-50 + random-50 per source):
+
+```
+python script/preprocess/extract_hard_negatives.py \
+  --config-name extract_hard_negatives
+```
+
+2) Score the extracted dataset with 5 cross-encoders:
+
+```
+export RANKT53B_CHECKPOINT_PATH=/path/to/trecdl22-crossencoder-rankT53b-repro/pytorch_model.bin
+python script/preprocess/score_cross_encoder_ensemble.py \
+  --config-name score_cross_encoder_ensemble
+```
+
+3) Finalize (min-max + rescore + trim to 8) and upload to HF:
+
+```
+export HF_TOKEN=...
+python script/preprocess/finalize_distill_dataset.py \
+  --config-name finalize_distill_dataset
+```
+
+4) Train SPLADE-v3 (existing code):
+
+```
+python script/train.py --config-name train_splade_v3 \
+  training.init_checkpoint_path=/path/to/splade_pp_selfdistil.ckpt
 ```
 
 ## Experiments and utilities

@@ -75,6 +75,11 @@ def main(cfg: DictConfig) -> None:
 
     shard_infos: Sequence[ShardInfo]
     metadata: dict[str, Any]
+    shards_root: Path = encode_path / "shards"
+    log_if_rank_zero(
+        logger,
+        f"Loading shards from {shards_root}.",
+    )
     shard_infos, metadata = load_shard_manifest(encode_path)
     shard_infos = _ShardProgress(shard_infos)
     vocab_size: int | None = None
@@ -94,6 +99,10 @@ def main(cfg: DictConfig) -> None:
         )
         index_value_dtype = np.dtype("float32")
 
+    log_if_rank_zero(
+        logger,
+        f"Building inverted index from {len(shard_infos)} shards...",
+    )
     term_ptr: np.ndarray
     post_doc_ids: np.ndarray
     post_weights: np.ndarray
@@ -102,12 +111,23 @@ def main(cfg: DictConfig) -> None:
         shard_infos, vocab_size=vocab_size, value_dtype=index_value_dtype
     )
 
+    log_if_rank_zero(
+        logger,
+        f"Computing term and block max...",
+    )
     block_size_value: int = int(cfg.encoding.wand_block_size)
     if block_size_value <= 0:
         raise ValueError("encoding.wand_block_size must be a positive integer.")
     term_max, block_max, block_ptr = compute_term_and_block_max(
         term_ptr, post_weights, block_size_value
     )
+    term_lengths: np.ndarray = term_ptr[1:] - term_ptr[:-1]
+    if term_lengths.size > 0:
+        posting_list_len_mean: float = float(term_lengths.mean())
+        posting_list_len_var: float = float(term_lengths.var())
+    else:
+        posting_list_len_mean = 0.0
+        posting_list_len_var = 0.0
 
     np.save(index_path / "term_ptr.npy", term_ptr)
     np.save(index_path / "post_doc_ids.npy", post_doc_ids)
@@ -131,6 +151,8 @@ def main(cfg: DictConfig) -> None:
         "exclude_token_ids": metadata.get("exclude_token_ids"),
         "block_size": block_size_value,
         "has_block_max": True,
+        "posting_list_len_mean": posting_list_len_mean,
+        "posting_list_len_var": posting_list_len_var,
         "term_max_dtype": str(term_max.dtype),
         "block_max_dtype": str(block_max.dtype),
         "block_ptr_dtype": str(block_ptr.dtype),

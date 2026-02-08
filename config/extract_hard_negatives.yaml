@@ -1,0 +1,37 @@
+# Hard-negative extraction (balanced top-50 + random-50)
+seed: 10
+log_dir_base: "log"
+tag: null
+log_dir: ${tagged_log_dir:${log_dir_base},${tag}}
+root_dir_path: "."
+
+defaults:
+  - _self_
+  - override hydra/job_logging: colorlog_custom
+
+input:
+  hf_name: sentence-transformers/msmarco-hard-negatives
+  hf_subset: null
+  hf_split: train
+  hf_cache_dir: null
+  hf_data_files: msmarco-hard-negatives.jsonl.gz
+
+output:
+  output_dir: data/hard_negatives/extracted
+  output_basename: msmarco_hardneg_100_balanced
+  overwrite: true
+  max_rows: null
+  flush_every: 1000
+
+sampling:
+  top_total: 50
+  random_total: 50
+  top_pool: 1000
+  require_positive: true
+  require_negatives: true
+
+postprocess:
+  enabled: true
+  parquet_path: null
+  cleanup_jsonl: true
+  require_count_match: true

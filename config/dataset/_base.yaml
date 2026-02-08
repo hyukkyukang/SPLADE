@@ -12,6 +12,12 @@ max_padding: true
 num_negatives: 1
 num_positives: 1
 
+negative_sampling:
+  strategy: random
+  top_k: null
+  random_k: null
+  random_pool: null
+
 beir_dataset: null
 
 hf_name: null
@@ -31,6 +37,7 @@ qrels_hf_cache_dir: null
 qrels_hf_data_files: null
 use_qrels: true
 use_triplet_positives: false
+filter_queries_with_positives: false
 triplet_positive_cache_path: null
 triplet_positive_cache_overwrite: false
 load_corpus_in_memory: false
@@ -46,3 +53,20 @@ corpus_split_name: ${.corpus_split}
 corpus_id_column: _id
 corpus_text_column: text
 corpus_title_column: null
+
+# Optional: join scored hard negatives by query id.
+score_hf_name: null
+score_hf_subset: null
+score_hf_split: ${.split}
+score_hf_cache_dir: null
+score_hf_data_files: null
+score_query_id_column: query_id
+score_doc_ids_column: doc_ids
+score_labels_column: labels
+score_scores_column: scores
+score_negatives_per_query: 1
+score_missing_policy: error
+score_duplicate_policy: error
+score_log_every: 0
+score_progress_bar: false
+score_progress_refresh: 0.5

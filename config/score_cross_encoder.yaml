@@ -8,32 +8,29 @@ root_dir_path: "."
 defaults:
   - _self_
   - dataset@score_dataset: msmarco
+  - scoring: cross_encoder
+  - mining: score_cross_encoder
   - override hydra/job_logging: colorlog_custom
 
-scoring:
-  model_name: cross-encoder/ms-marco-MiniLM-L-12-v2
-  output_dir: "data/hard_negatives"
-  output_basename: "msmarco_cross_encoder_scores"
-  output_format: jsonl
-  batch_size: 16
-  max_length: 512
-  use_cpu: false
-  max_rows: null
-  overwrite: true
-  score_key: scores
+hard_negatives:
+  # Empty means merge all available keys in the neg dict.
+  neg_keys: []
+  max_negatives: null
+  max_positives: null
+  require_negatives: true
 
 score_dataset:
-  hf_name: json
+  hf_name: null
   hf_subset: null
   hf_split: train
   hf_cache_dir: null
-  hf_data_files: log/search_results.jsonl
+  hf_data_files: null
   query_corpus_hf_name: sentence-transformers/msmarco
   query_corpus_hf_cache_dir: null
   query_corpus_hf_data_files: null
 
 positives:
-  enabled: true
+  enabled: false
   cache_path: data/cache/msmarco_triplet_positives.parquet
   hf_name: sentence-transformers/msmarco
   hf_subset: triplets

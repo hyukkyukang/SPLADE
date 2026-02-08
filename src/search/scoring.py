@@ -149,6 +149,78 @@ def _find_min_index(values: np.ndarray, count: int) -> int:
 
 
 @numba.njit
+def _init_order(current_doc: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    order: np.ndarray = np.argsort(current_doc)
+    order_pos: np.ndarray = np.empty(order.shape[0], dtype=np.int64)
+    for idx in range(order.shape[0]):
+        order_pos[order[idx]] = idx
+    return order, order_pos
+
+
+@numba.njit
+def _sift_forward(
+    order: np.ndarray, order_pos: np.ndarray, current_doc: np.ndarray, term_idx: int
+) -> None:
+    pos: int = int(order_pos[term_idx])
+    n_terms: int = int(order.shape[0])
+    while pos + 1 < n_terms:
+        next_term: int = int(order[pos + 1])
+        if current_doc[term_idx] <= current_doc[next_term]:
+            break
+        order[pos] = next_term
+        order_pos[next_term] = pos
+        pos += 1
+    order[pos] = term_idx
+    order_pos[term_idx] = pos
+
+
+@numba.njit
+def _refresh_current_doc(
+    post_doc_ids: np.ndarray,
+    pos: np.ndarray,
+    end: np.ndarray,
+    current_doc: np.ndarray,
+    term_idx: int,
+    sentinel: np.int32,
+) -> None:
+    if pos[term_idx] < end[term_idx]:
+        current_doc[term_idx] = post_doc_ids[pos[term_idx]]
+    else:
+        current_doc[term_idx] = sentinel
+
+
+@numba.njit
+def _refresh_block_cache(
+    term_start: np.ndarray,
+    term_end: np.ndarray,
+    term_block_base: np.ndarray,
+    block_max: np.ndarray,
+    post_doc_ids: np.ndarray,
+    pos: np.ndarray,
+    block_idx: np.ndarray,
+    block_end_doc: np.ndarray,
+    block_max_val: np.ndarray,
+    term_idx: int,
+    block_size: int,
+    sentinel: np.int32,
+) -> None:
+    if pos[term_idx] >= term_end[term_idx]:
+        block_end_doc[term_idx] = sentinel
+        block_max_val[term_idx] = 0.0
+        block_idx[term_idx] = 0
+        return
+    new_block_idx: int = int((pos[term_idx] - term_start[term_idx]) // block_size)
+    if new_block_idx != block_idx[term_idx]:
+        block_idx[term_idx] = new_block_idx
+        block_id: int = int(term_block_base[term_idx] + new_block_idx)
+        block_end_pos: int = int(term_start[term_idx]) + (new_block_idx + 1) * block_size
+        if block_end_pos > term_end[term_idx]:
+            block_end_pos = int(term_end[term_idx])
+        block_end_doc[term_idx] = post_doc_ids[block_end_pos - 1]
+        block_max_val[term_idx] = float(block_max[block_id])
+
+
+@numba.njit
 def _score_query_postings_wand(
     term_ptr: np.ndarray,
     post_doc_ids: np.ndarray,
@@ -161,31 +233,29 @@ def _score_query_postings_wand(
     n_terms: int = q_indices.shape[0]
     pos: np.ndarray = np.empty(n_terms, dtype=np.int64)
     end: np.ndarray = np.empty(n_terms, dtype=np.int64)
-    for idx in range(n_terms):
-        term_id = int(q_indices[idx])
-        pos[idx] = int(term_ptr[term_id])
-        end[idx] = int(term_ptr[term_id + 1])
-
+    q_term_max: np.ndarray = np.empty(n_terms, dtype=np.float64)
     current_doc: np.ndarray = np.empty(n_terms, dtype=np.int32)
-    order: np.ndarray = np.empty(n_terms, dtype=np.int64)
     top_docs: np.ndarray = np.empty(top_k, dtype=np.int32)
     top_scores: np.ndarray = np.empty(top_k, dtype=np.float32)
     top_count: int = 0
     threshold: float = -np.inf
     sentinel: np.int32 = np.int32(2147483647)
+    pivot_terms: np.ndarray = np.empty(n_terms, dtype=np.int64)
+    advance_terms: np.ndarray = np.empty(n_terms, dtype=np.int64)
+
+    for idx in range(n_terms):
+        term_id = int(q_indices[idx])
+        pos[idx] = int(term_ptr[term_id])
+        end[idx] = int(term_ptr[term_id + 1])
+        if pos[idx] < end[idx]:
+            current_doc[idx] = post_doc_ids[pos[idx]]
+        else:
+            current_doc[idx] = sentinel
+        q_term_max[idx] = float(q_values[idx]) * float(term_max[term_id])
+
+    order, order_pos = _init_order(current_doc)
 
     while True:
-        active_terms: int = 0
-        for idx in range(n_terms):
-            if pos[idx] < end[idx]:
-                current_doc[idx] = post_doc_ids[pos[idx]]
-                active_terms += 1
-            else:
-                current_doc[idx] = sentinel
-        if active_terms == 0:
-            break
-
-        order = np.argsort(current_doc)
         if current_doc[order[0]] == sentinel:
             break
 
@@ -196,8 +266,7 @@ def _score_query_postings_wand(
             term_idx = int(order[ord_idx])
             if current_doc[term_idx] == sentinel:
                 break
-            term_id = int(q_indices[term_idx])
-            ub_sum += float(q_values[term_idx]) * float(term_max[term_id])
+            ub_sum += q_term_max[term_idx]
             if ub_sum > threshold:
                 pivot_doc = int(current_doc[term_idx])
                 pivot_found = True
@@ -208,10 +277,14 @@ def _score_query_postings_wand(
 
         if pivot_doc == int(current_doc[order[0]]):
             score: float = 0.0
-            for idx in range(n_terms):
-                if pos[idx] < end[idx] and post_doc_ids[pos[idx]] == pivot_doc:
-                    score += float(q_values[idx]) * float(post_weights[pos[idx]])
-                    pos[idx] += 1
+            pivot_count: int = 0
+            for ord_idx in range(n_terms):
+                term_idx = int(order[ord_idx])
+                if current_doc[term_idx] != pivot_doc:
+                    break
+                score += float(q_values[term_idx]) * float(post_weights[pos[term_idx]])
+                pivot_terms[pivot_count] = term_idx
+                pivot_count += 1
             if score > threshold:
                 if top_count < top_k:
                     top_docs[top_count] = np.int32(pivot_doc)
@@ -225,15 +298,30 @@ def _score_query_postings_wand(
                         top_scores[min_idx] = np.float32(score)
                         top_docs[min_idx] = np.int32(pivot_doc)
                         threshold = _min_score(top_scores, top_k)
+            for idx in range(pivot_count):
+                term_idx = int(pivot_terms[idx])
+                pos[term_idx] += 1
+                _refresh_current_doc(
+                    post_doc_ids, pos, end, current_doc, term_idx, sentinel
+                )
+                _sift_forward(order, order_pos, current_doc, term_idx)
         else:
+            advance_count: int = 0
             for ord_idx in range(n_terms):
                 term_idx = int(order[ord_idx])
-                if current_doc[term_idx] < pivot_doc:
-                    pos[term_idx] = _advance_to(
-                        post_doc_ids, int(pos[term_idx]), int(end[term_idx]), pivot_doc
-                    )
-                else:
+                if current_doc[term_idx] >= pivot_doc:
                     break
+                advance_terms[advance_count] = term_idx
+                advance_count += 1
+            for idx in range(advance_count):
+                term_idx = int(advance_terms[idx])
+                pos[term_idx] = _advance_to(
+                    post_doc_ids, int(pos[term_idx]), int(end[term_idx]), pivot_doc
+                )
+                _refresh_current_doc(
+                    post_doc_ids, pos, end, current_doc, term_idx, sentinel
+                )
+                _sift_forward(order, order_pos, current_doc, term_idx)
 
     return top_docs, top_scores, top_count
 
@@ -299,32 +387,51 @@ def _score_query_postings_bmw(
 ) -> tuple[np.ndarray, np.ndarray, int]:
     n_terms: int = q_indices.shape[0]
     pos: np.ndarray = np.empty(n_terms, dtype=np.int64)
-    end: np.ndarray = np.empty(n_terms, dtype=np.int64)
-    for idx in range(n_terms):
-        term_id = int(q_indices[idx])
-        pos[idx] = int(term_ptr[term_id])
-        end[idx] = int(term_ptr[term_id + 1])
-
+    term_start: np.ndarray = np.empty(n_terms, dtype=np.int64)
+    term_end: np.ndarray = np.empty(n_terms, dtype=np.int64)
+    term_block_base: np.ndarray = np.empty(n_terms, dtype=np.int64)
+    term_max_values: np.ndarray = np.empty(n_terms, dtype=np.float64)
+    q_term_max: np.ndarray = np.empty(n_terms, dtype=np.float64)
+    block_idx: np.ndarray = np.empty(n_terms, dtype=np.int64)
+    block_end_doc: np.ndarray = np.empty(n_terms, dtype=np.int32)
+    block_max_val: np.ndarray = np.empty(n_terms, dtype=np.float64)
     current_doc: np.ndarray = np.empty(n_terms, dtype=np.int32)
-    order: np.ndarray = np.empty(n_terms, dtype=np.int64)
     top_docs: np.ndarray = np.empty(top_k, dtype=np.int32)
     top_scores: np.ndarray = np.empty(top_k, dtype=np.float32)
     top_count: int = 0
     threshold: float = -np.inf
     sentinel: np.int32 = np.int32(2147483647)
+    pivot_terms: np.ndarray = np.empty(n_terms, dtype=np.int64)
+    advance_terms: np.ndarray = np.empty(n_terms, dtype=np.int64)
+
+    for idx in range(n_terms):
+        term_id = int(q_indices[idx])
+        start = int(term_ptr[term_id])
+        end = int(term_ptr[term_id + 1])
+        term_start[idx] = start
+        term_end[idx] = end
+        term_block_base[idx] = int(block_ptr[term_id])
+        pos[idx] = start
+        term_max_value: float = float(term_max[term_id])
+        term_max_values[idx] = term_max_value
+        q_term_max[idx] = float(q_values[idx]) * term_max_value
+        if start < end:
+            current_doc[idx] = post_doc_ids[start]
+            block_idx[idx] = 0
+            block_end_pos: int = start + block_size
+            if block_end_pos > end:
+                block_end_pos = end
+            block_end_doc[idx] = post_doc_ids[block_end_pos - 1]
+            block_max_val[idx] = float(block_max[term_block_base[idx]])
+        else:
+            current_doc[idx] = sentinel
+            block_idx[idx] = 0
+            block_end_doc[idx] = sentinel
+            block_max_val[idx] = 0.0
+
+    order, order_pos = _init_order(current_doc)
 
     while True:
-        active_terms: int = 0
-        for idx in range(n_terms):
-            if pos[idx] < end[idx]:
-                current_doc[idx] = post_doc_ids[pos[idx]]
-                active_terms += 1
-            else:
-                current_doc[idx] = sentinel
-        if active_terms == 0:
-            break
-
-        order = np.argsort(current_doc)
         if current_doc[order[0]] == sentinel:
             break
 
@@ -335,8 +442,7 @@ def _score_query_postings_bmw(
             term_idx = int(order[ord_idx])
             if current_doc[term_idx] == sentinel:
                 break
-            term_id = int(q_indices[term_idx])
-            ub_sum += float(q_values[term_idx]) * float(term_max[term_id])
+            ub_sum += q_term_max[term_idx]
             if ub_sum > threshold:
                 pivot_doc = int(current_doc[term_idx])
                 pivot_found = True
@@ -347,36 +453,47 @@ def _score_query_postings_bmw(
 
         if pivot_doc == int(current_doc[order[0]]):
             block_sum: float = 0.0
-            for idx in range(n_terms):
-                if pos[idx] >= end[idx]:
-                    continue
-                if current_doc[idx] > pivot_doc:
-                    continue
-                term_id = int(q_indices[idx])
-                start = int(term_ptr[term_id])
-                block_idx = (pos[idx] - start) // block_size
-                block_id = int(block_ptr[term_id]) + int(block_idx)
-                block_end_pos = start + (block_idx + 1) * block_size
-                if block_end_pos > end[idx]:
-                    block_end_pos = int(end[idx])
-                block_end_doc = int(post_doc_ids[block_end_pos - 1])
-                if pivot_doc <= block_end_doc:
-                    ub_value = float(block_max[block_id])
+            pivot_count: int = 0
+            for ord_idx in range(n_terms):
+                term_idx = int(order[ord_idx])
+                if current_doc[term_idx] != pivot_doc:
+                    break
+                if pivot_doc <= block_end_doc[term_idx]:
+                    ub_value = block_max_val[term_idx]
                 else:
-                    ub_value = float(term_max[term_id])
-                block_sum += float(q_values[idx]) * ub_value
+                    ub_value = term_max_values[term_idx]
+                block_sum += float(q_values[term_idx]) * ub_value
+                pivot_terms[pivot_count] = term_idx
+                pivot_count += 1
 
             if block_sum <= threshold:
-                for idx in range(n_terms):
-                    if pos[idx] < end[idx] and post_doc_ids[pos[idx]] == pivot_doc:
-                        pos[idx] += 1
+                for idx in range(pivot_count):
+                    term_idx = int(pivot_terms[idx])
+                    pos[term_idx] += 1
+                    _refresh_current_doc(
+                        post_doc_ids, pos, term_end, current_doc, term_idx, sentinel
+                    )
+                    _refresh_block_cache(
+                        term_start,
+                        term_end,
+                        term_block_base,
+                        block_max,
+                        post_doc_ids,
+                        pos,
+                        block_idx,
+                        block_end_doc,
+                        block_max_val,
+                        term_idx,
+                        block_size,
+                        sentinel,
+                    )
+                    _sift_forward(order, order_pos, current_doc, term_idx)
                 continue
 
             score: float = 0.0
-            for idx in range(n_terms):
-                if pos[idx] < end[idx] and post_doc_ids[pos[idx]] == pivot_doc:
-                    score += float(q_values[idx]) * float(post_weights[pos[idx]])
-                    pos[idx] += 1
+            for idx in range(pivot_count):
+                term_idx = int(pivot_terms[idx])
+                score += float(q_values[term_idx]) * float(post_weights[pos[term_idx]])
             if score > threshold:
                 if top_count < top_k:
                     top_docs[top_count] = np.int32(pivot_doc)
@@ -390,15 +507,58 @@ def _score_query_postings_bmw(
                         top_scores[min_idx] = np.float32(score)
                         top_docs[min_idx] = np.int32(pivot_doc)
                         threshold = _min_score(top_scores, top_k)
+            for idx in range(pivot_count):
+                term_idx = int(pivot_terms[idx])
+                pos[term_idx] += 1
+                _refresh_current_doc(
+                    post_doc_ids, pos, term_end, current_doc, term_idx, sentinel
+                )
+                _refresh_block_cache(
+                    term_start,
+                    term_end,
+                    term_block_base,
+                    block_max,
+                    post_doc_ids,
+                    pos,
+                    block_idx,
+                    block_end_doc,
+                    block_max_val,
+                    term_idx,
+                    block_size,
+                    sentinel,
+                )
+                _sift_forward(order, order_pos, current_doc, term_idx)
         else:
+            advance_count: int = 0
             for ord_idx in range(n_terms):
                 term_idx = int(order[ord_idx])
-                if current_doc[term_idx] < pivot_doc:
-                    pos[term_idx] = _advance_to(
-                        post_doc_ids, int(pos[term_idx]), int(end[term_idx]), pivot_doc
-                    )
-                else:
+                if current_doc[term_idx] >= pivot_doc:
                     break
+                advance_terms[advance_count] = term_idx
+                advance_count += 1
+            for idx in range(advance_count):
+                term_idx = int(advance_terms[idx])
+                pos[term_idx] = _advance_to(
+                    post_doc_ids, int(pos[term_idx]), int(term_end[term_idx]), pivot_doc
+                )
+                _refresh_current_doc(
+                    post_doc_ids, pos, term_end, current_doc, term_idx, sentinel
+                )
+                _refresh_block_cache(
+                    term_start,
+                    term_end,
+                    term_block_base,
+                    block_max,
+                    post_doc_ids,
+                    pos,
+                    block_idx,
+                    block_end_doc,
+                    block_max_val,
+                    term_idx,
+                    block_size,
+                    sentinel,
+                )
+                _sift_forward(order, order_pos, current_doc, term_idx)
 
     return top_docs, top_scores, top_count
 

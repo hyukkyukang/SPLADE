@@ -46,8 +46,6 @@ class RetrievalSearchLightningModule(L.LightningModule):
         )
 
         search_cfg: DictConfig = self.cfg.search
-        self._exclude_positives = bool(search_cfg.exclude_positives)
-        self._include_query_text = bool(search_cfg.include_query_text)
         self._flush_every = int(search_cfg.flush_every)
 
         self._output_handle: Any | None = None
@@ -126,9 +124,6 @@ class RetrievalSearchLightningModule(L.LightningModule):
             )
 
         qids: List[str] = batch["qid"]
-        query_texts: List[str] | None = (
-            batch.get("query_text") if self._include_query_text else None
-        )
         relevance_judgments_list: List[Dict[str, float]] = batch[
             "relevance_judgments"
         ]
@@ -144,32 +139,35 @@ class RetrievalSearchLightningModule(L.LightningModule):
         )
         scored_results = self._retrieval_helper.score_queries(query_reps)
         for i, relevance_judgments in enumerate(relevance_judgments_list):
-            selected_doc_ids, selected_scores = scored_results[i]
+            selected_doc_ids, _ = scored_results[i]
 
-            if self._exclude_positives and relevance_judgments:
-                positive_ids: set[str] = {
-                    doc_id
-                    for doc_id, score in relevance_judgments.items()
-                    if float(score) > 0
-                }
-                if positive_ids:
-                    filtered_doc_ids: list[str] = []
-                    filtered_scores: list[float] = []
-                    for doc_id, score in zip(selected_doc_ids, selected_scores):
-                        if doc_id in positive_ids:
-                            continue
-                        filtered_doc_ids.append(doc_id)
-                        filtered_scores.append(score)
-                    selected_doc_ids = filtered_doc_ids
-                    selected_scores = filtered_scores
+            pos_doc_ids: list[str] = [
+                doc_id
+                for doc_id, score in relevance_judgments.items()
+                if float(score) > 0
+            ]
+            pos_doc_ids = sorted(pos_doc_ids)
+            # Keep a safety net for missing positives even if dataset filtering is on.
+            if not pos_doc_ids:
+                log_if_rank_zero(
+                    logger,
+                    f"Skipping {qids[i]}: missing positives for hard negatives.",
+                    level="warning",
+                )
+                continue
+            pos_id_set: set[str] = set(pos_doc_ids)
+            if pos_id_set:
+                neg_doc_ids: list[str] = [
+                    doc_id for doc_id in selected_doc_ids if doc_id not in pos_id_set
+                ]
+            else:
+                neg_doc_ids = list(selected_doc_ids)
 
             record: dict[str, Any] = {
                 "qid": qids[i],
-                "doc_ids": selected_doc_ids,
-                "scores": selected_scores,
+                "pos_doc_ids": pos_doc_ids,
+                "neg_doc_ids": neg_doc_ids,
             }
-            if query_texts is not None:
-                record["query_text"] = query_texts[i]
             self._output_handle.write(json.dumps(record) + "\n")
             self._queries_written += 1
             if self._flush_every > 0 and self._queries_written % self._flush_every == 0:

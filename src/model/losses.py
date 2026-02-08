@@ -40,6 +40,7 @@ _MainLossFn = Callable[
 _DistillLossFn = Callable[
     [torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor
 ]
+_DistillLossSpec = tuple[str, float, _DistillLossFn]
 _RegLossFn = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
 
 
@@ -51,8 +52,7 @@ class LossComputer(nn.Module):
         loss_type: str,
         temperature: float,
         distill_enabled: bool,
-        distill_weight: float,
-        distill_loss_type: str,
+        distill_losses: list[tuple[str, float]],
         reg_query_weight: float,
         reg_doc_weight: float,
         reg_type: str,
@@ -62,9 +62,6 @@ class LossComputer(nn.Module):
         self.loss_type: str = loss_type.replace("-", "_").lower()
         self.temperature: float = float(temperature)
         self.distill_enabled: bool = bool(distill_enabled)
-        self.distill_weight: float = float(distill_weight)
-        # Normalize loss names to support both hyphen and underscore variants.
-        self.distill_loss_type: str = str(distill_loss_type).replace("-", "_").lower()
         self.reg_query_weight: float = float(reg_query_weight)
         self.reg_doc_weight: float = float(reg_doc_weight)
         self.reg_type: str = str(reg_type).lower()
@@ -76,10 +73,10 @@ class LossComputer(nn.Module):
             persistent=False,
         )
         self._main_loss_fn: _MainLossFn = self._resolve_main_loss_fn(self.loss_type)
-        self._distill_loss_fn: _DistillLossFn = (
-            self._resolve_distill_loss_fn(self.distill_loss_type)
+        self._distill_losses: list[_DistillLossSpec] = (
+            self._resolve_distill_losses(distill_losses)
             if self.distill_enabled
-            else self._distill_loss_noop
+            else []
         )
         self._reg_query_fn: _RegLossFn = self._resolve_reg_loss_fn(
             self.reg_type, enabled=self.reg_query_weight > 0
@@ -321,6 +318,24 @@ class LossComputer(nn.Module):
             return self._distill_loss_margin_mse
         raise ValueError(f"Unsupported distillation loss: {loss_type}")
 
+    def _resolve_distill_losses(
+        self, distill_losses: list[tuple[str, float]]
+    ) -> list[_DistillLossSpec]:
+        resolved: list[_DistillLossSpec] = []
+        for loss_type, weight in distill_losses:
+            loss_key: str = str(loss_type).replace("-", "_").lower()
+            loss_weight: float = float(weight)
+            if loss_weight == 0.0:
+                continue
+            loss_fn: _DistillLossFn = self._resolve_distill_loss_fn(loss_key)
+            resolved.append((loss_key, loss_weight, loss_fn))
+        if not resolved:
+            raise ValueError(
+                "distill.losses must include at least one non-zero weight loss "
+                "when distill is enabled."
+            )
+        return resolved
+
     def _resolve_reg_loss_fn(self, reg_type: str, *, enabled: bool) -> _RegLossFn:
         if not enabled:
             return self._reg_loss_noop
@@ -345,6 +360,7 @@ class LossComputer(nn.Module):
         torch.Tensor,
         torch.Tensor,
         torch.Tensor,
+        dict[str, torch.Tensor],
         torch.Tensor,
         torch.Tensor,
     ]:
@@ -352,14 +368,27 @@ class LossComputer(nn.Module):
         loss: torch.Tensor
         pairwise_loss: torch.Tensor
         in_batch_loss: torch.Tensor
-        loss, pairwise_loss, in_batch_loss = self._main_loss_fn(
-            pairwise_scores, q_reps, doc_reps, pos_mask, doc_mask
-        )
+        if self.distill_enabled:
+            # When distilling, optimize only distillation + regularization.
+            zero = pairwise_scores.new_zeros(())
+            loss = zero
+            pairwise_loss = zero
+            in_batch_loss = zero
+        else:
+            loss, pairwise_loss, in_batch_loss = self._main_loss_fn(
+                pairwise_scores, q_reps, doc_reps, pos_mask, doc_mask
+            )
 
-        distill_loss: torch.Tensor = self._distill_loss_fn(
-            pairwise_scores, teacher_scores, pos_mask, doc_mask
-        )
-        loss = loss + self.distill_weight * distill_loss
+        distill_loss: torch.Tensor = pairwise_scores.new_zeros(())
+        distill_losses: dict[str, torch.Tensor] = {}
+        if self.distill_enabled:
+            for loss_key, loss_weight, loss_fn in self._distill_losses:
+                loss_value: torch.Tensor = loss_fn(
+                    pairwise_scores, teacher_scores, pos_mask, doc_mask
+                )
+                distill_losses[loss_key] = loss_value
+                distill_loss = distill_loss + (loss_weight * loss_value)
+        loss = loss + distill_loss
 
         query_row_mask: torch.Tensor = torch.ones(
             q_reps.shape[0], device=q_reps.device, dtype=torch.bool
@@ -378,6 +407,7 @@ class LossComputer(nn.Module):
             pairwise_loss,
             in_batch_loss,
             distill_loss,
+            distill_losses,
             q_reg,
             d_reg,
         )

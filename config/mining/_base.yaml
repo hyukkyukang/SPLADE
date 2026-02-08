@@ -1,0 +1,14 @@
+# @package mining
+enabled: true
+output_dir_base: "data/hard_negatives"
+run_filename: "hard_negatives.jsonl"
+dataset_name: null
+model_name: null
+prefer_parquet: true
+upload_to_hub: false
+hf_namespace: null
+postprocess:
+  enabled: true
+  cleanup_jsonl: false
+  require_count_match: true
+  add_rank_column: false

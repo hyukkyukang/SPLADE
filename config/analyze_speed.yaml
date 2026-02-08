@@ -1,0 +1,64 @@
+# Speed benchmark entrypoint config
+seed: 10
+log_dir_base: "log/analysis/speed/${model.name}/${dataset.name}"
+tag: null
+log_dir: ${tagged_log_dir:${log_dir_base},${tag}}
+root_dir_path: "."
+
+# Defaults
+defaults:
+  - model: splade_v2
+  - encoding: default
+  - dataset: msmarco
+  - testing: default
+  - _self_
+  # The following overrides are necessary to make the logging colorized.
+  - override hydra/job_logging: colorlog_custom
+
+dataset:
+  max_padding: ${testing.max_padding}
+  max_queries: ${speed.sample_queries}
+  use_qrels: false
+
+encoding:
+  index_tag: null
+
+speed:
+  sample_queries: 10
+  batch_sizes:
+    - 2
+    - 8
+    - 32
+  warmup_steps: 5
+  output_dir: ${log_dir}
+  summary_filename: speed_summary.json
+  per_query_filename: speed_per_query.jsonl
+  summary_format: long
+  merge_ranks: true
+  breakdown_search_time: true
+
+testing:
+  strategy: single
+  num_devices: 1
+  scoring_methods:
+    - full
+    - wand
+    - bmw
+  scoring_workers_list:
+    - 1
+    - 4
+    - 8
+
+hydra:
+  output_subdir: null
+  run:
+    dir: ${log_dir}
+  job_logging:
+    handlers:
+      console:
+        class: logging.StreamHandler
+        formatter: colorlog
+        stream: ext://sys.stdout
+      file:
+        class: logging.FileHandler
+        filename: ${log_dir}/speed.log

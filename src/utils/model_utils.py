@@ -40,6 +40,7 @@ def build_splade_model(cfg: DictConfig, *, use_cpu: bool) -> SpladeModel:
         dtype=dtype,
         normalize=cfg.model.normalize,
         doc_only=doc_only,
+        tie_word_embeddings=cfg.model.tie_word_embeddings,
     )
 
 
@@ -132,7 +133,9 @@ def load_splade_checkpoint(
             len(unexpected_keys),
         )
         if missing_keys:
-            error_logger.error("Missing keys (sample): %s", ", ".join(missing_keys[:10]))
+            error_logger.error(
+                "Missing keys (sample): %s", ", ".join(missing_keys[:10])
+            )
         if unexpected_keys:
             error_logger.error(
                 "Unexpected keys (sample): %s", ", ".join(unexpected_keys[:10])
@@ -216,6 +219,52 @@ def resolve_tagged_output_dir(
     return base_path / model_segment / tag_value
 
 
+def _strip_override_prefix(override: str) -> str:
+    text: str = override.strip()
+    while text.startswith("+"):
+        text = text[1:]
+    return text.strip()
+
+
+def _get_hydra_task_overrides(cfg: DictConfig) -> list[str]:
+    overrides: list[str] = []
+    try:
+        from hydra.core.hydra_config import HydraConfig
+
+        if HydraConfig.initialized():
+            overrides = list(HydraConfig.get().overrides.task)
+    except Exception:
+        overrides = []
+    if overrides:
+        return overrides
+    if "hydra" not in cfg:
+        return []
+    hydra_cfg: DictConfig = cfg.hydra
+    if "overrides" not in hydra_cfg:
+        return []
+    overrides_cfg: DictConfig = hydra_cfg.overrides
+    if "task" not in overrides_cfg:
+        return []
+    return [str(item) for item in overrides_cfg.task]
+
+
+def _resolve_model_override_keys(cfg: DictConfig) -> tuple[bool, set[str]]:
+    """Check Hydra overrides to see if model config was overridden."""
+    overrides = _get_hydra_task_overrides(cfg)
+    override_keys: set[str] = set()
+    for override in overrides:
+        cleaned: str = _strip_override_prefix(str(override))
+        if not cleaned:
+            continue
+        if cleaned.startswith("model=") or cleaned.startswith("model@"):
+            return True, set()
+        if cleaned.startswith("model."):
+            key: str = cleaned[len("model.") :].split("=", 1)[0].strip()
+            if key:
+                override_keys.add(key)
+    return False, override_keys
+
+
 def apply_checkpoint_model_config(
     cfg: DictConfig,
     checkpoint_path: str | None,
@@ -234,6 +283,14 @@ def apply_checkpoint_model_config(
     if not checkpoint_path:
         return cfg
 
+    model_group_override, model_override_keys = _resolve_model_override_keys(cfg)
+    if model_group_override:
+        log_if_rank_zero(
+            logger,
+            "Runtime model override detected; skipping checkpoint model config.",
+        )
+        return cfg
+
     summary_keys: tuple[str, ...] = (
         "name",
         "huggingface_name",
@@ -246,9 +303,7 @@ def apply_checkpoint_model_config(
         "max_input_length",
     )
     runtime_model_cfg: DictConfig | None = cfg.model if "model" in cfg else None
-    log_if_rank_zero(
-        logger, f"Loading checkpoint model config from {checkpoint_path}."
-    )
+    log_if_rank_zero(logger, f"Loading checkpoint model config from {checkpoint_path}.")
 
     hparams_cfg: DictConfig | None = _load_checkpoint_hparams(checkpoint_path)
     if hparams_cfg is None:
@@ -278,6 +333,8 @@ def apply_checkpoint_model_config(
     )
 
     exclude_set: set[str] = {str(key) for key in exclude_keys}
+    if model_override_keys:
+        exclude_set.update({str(key) for key in model_override_keys})
     model_dict: Any = OmegaConf.to_container(checkpoint_model_cfg, resolve=True)
     if not isinstance(model_dict, dict):
         log_if_rank_zero(

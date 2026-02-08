@@ -1,0 +1,38 @@
+# @package dataset
+defaults:
+  - _base@_here_
+
+name: msmarco_triplet_scores
+type: msmarco_triplet_scores
+split: train
+
+# Base triplet meta dataset (one row per query).
+hf_name: sentence-transformers/msmarco
+hf_subset: triplets
+hf_cache_dir: null
+hf_max_samples: null
+hf_skip_samples: 0
+hf_data_files: null
+
+query_corpus_hf_name: sentence-transformers/msmarco
+query_corpus_hf_cache_dir: null
+query_corpus_hf_data_files: null
+
+query_id_column: query_id
+query_text_column: query
+corpus_id_column: passage_id
+corpus_text_column: passage
+
+# Scored hard-negative dataset (query_id/doc_ids/labels/scores).
+score_hf_name: Hyukkyu/msmarco-spladev2-hard-negatives-scores
+score_hf_subset: null
+score_hf_split: ${.split}
+score_hf_cache_dir: null
+score_hf_data_files: null
+score_query_id_column: query_id
+score_doc_ids_column: doc_ids
+score_labels_column: labels
+score_scores_column: scores
+score_negatives_per_query: 1
+score_missing_policy: error
+score_duplicate_policy: error

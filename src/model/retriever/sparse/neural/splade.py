@@ -48,6 +48,7 @@ class SpladeEncoder(nn.Module):
         sparse_activation: str,
         attn_implementation: Optional[str] = None,
         dtype: Optional[torch.dtype] = None,
+        tie_word_embeddings: bool = False,
     ) -> None:
         super().__init__()
         kwargs: dict[str, Any] = {}
@@ -55,6 +56,7 @@ class SpladeEncoder(nn.Module):
             kwargs["attn_implementation"] = attn_implementation
         if dtype is not None:
             kwargs["dtype"] = dtype
+        kwargs["tie_word_embeddings"] = tie_word_embeddings
         # Load the masked language model backbone.
         self.mlm: AutoModelForMaskedLM
         # Avoid duplicate load reports on non-zero ranks.
@@ -108,7 +110,9 @@ class _SpladeEncoderWrapper(nn.Module):
         self.encoder = encoder
         self.register_buffer("_pooling_mode", pooling_mode, persistent=False)
 
-    def forward(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, input_ids: torch.Tensor, attention_mask: torch.Tensor
+    ) -> torch.Tensor:
         return self.encoder(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -128,6 +132,7 @@ class SpladeModel(nn.Module):
         dtype: Optional[torch.dtype] = None,
         normalize: bool = False,
         doc_only: bool = False,
+        tie_word_embeddings: bool = False,
     ) -> None:
         super().__init__()
         # Build encoder shared by query and document pooling.
@@ -136,6 +141,7 @@ class SpladeModel(nn.Module):
             sparse_activation=sparse_activation,
             attn_implementation=attn_implementation,
             dtype=dtype,
+            tie_word_embeddings=tie_word_embeddings,
         )
         self.query_pooling: str = query_pooling
         self.doc_pooling: str = doc_pooling
@@ -157,7 +163,9 @@ class SpladeModel(nn.Module):
         self._doc_encoder_wrapper: _SpladeEncoderWrapper = _SpladeEncoderWrapper(
             self.encoder, self._doc_pooling_mode
         )
-        self._query_encoder_fn: Callable[..., torch.Tensor] = self._query_encoder_wrapper
+        self._query_encoder_fn: Callable[..., torch.Tensor] = (
+            self._query_encoder_wrapper
+        )
         self._doc_encoder_fn: Callable[..., torch.Tensor] = self._doc_encoder_wrapper
         self.normalize: bool = normalize
         self.doc_only: bool = bool(doc_only)

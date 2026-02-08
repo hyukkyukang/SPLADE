@@ -51,6 +51,9 @@ class RetrievalPDModule(PDModule):
         )
         self._use_qrels: bool = bool(self.cfg.use_qrels)
         self._use_triplet_positives: bool = bool(self.cfg.use_triplet_positives)
+        self._filter_queries_with_positives: bool = bool(
+            self.cfg.filter_queries_with_positives
+        )
         cache_path_value: str | None = self._normalize_optional_str(
             self.cfg.triplet_positive_cache_path
         )
@@ -495,6 +498,22 @@ class RetrievalPDModule(PDModule):
                     "Loaded triplet positives cache from "
                     f"{cache_path.as_posix()} ({len(self._qrels)} queries).",
                 )
+                if self._filter_queries_with_positives:
+                    before_count: int = len(self._query_ids)
+                    qrels_query_ids: set[str] = set(self._qrels.keys())
+                    if qrels_query_ids:
+                        self._query_ids = [
+                            qid
+                            for qid in self._query_ids
+                            if qid in qrels_query_ids
+                        ]
+                    else:
+                        self._query_ids = []
+                    log_if_rank_zero(
+                        logger,
+                        "Filtered queries with positives: "
+                        f"{before_count} -> {len(self._query_ids)}.",
+                    )
             else:
                 self._qrels = {}
             return

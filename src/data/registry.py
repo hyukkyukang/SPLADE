@@ -2,7 +2,13 @@ from typing import Callable
 
 from omegaconf import DictConfig
 
-from src.data.dataset import BaseDataset, BEIRDataset, MSMARCODataset
+from src.data.dataset import (
+    BaseDataset,
+    BEIRDataset,
+    MSMARCODataset,
+    MSMARCODistillScoresDataset,
+    MSMARCOTripletScoresDataset,
+)
 
 DatasetBuilder = Callable[[DictConfig], BaseDataset]
 
@@ -10,6 +16,8 @@ DatasetBuilder = Callable[[DictConfig], BaseDataset]
 _DATASET_BUILDERS: dict[str, DatasetBuilder] = {
     "msmarco": MSMARCODataset,
     "msmarco_local_triplets": MSMARCODataset,
+    "msmarco_distill_scores": MSMARCODistillScoresDataset,
+    "msmarco_triplet_scores": MSMARCOTripletScoresDataset,
     "beir": BEIRDataset,
 }
 

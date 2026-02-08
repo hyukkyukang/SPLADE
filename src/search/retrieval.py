@@ -170,7 +170,7 @@ class IndexedRetrievalHelper:
             self._query_exclude_token_ids,
             self._query_min_weight,
             self._query_top_k,
-        ) = resolve_query_sparsify_config(self._index.metadata)
+        ) = resolve_query_sparsify_config(self.cfg)
         if self._query_exclude_token_ids:
             self._query_exclude_token_ids_tensor = torch.tensor(
                 self._query_exclude_token_ids, dtype=torch.long
@@ -222,10 +222,11 @@ class IndexedRetrievalHelper:
                 "encoding.index_dir must be set for index-based "
                 f"{self._index_context}."
             )
+        index_tag_value: object | None = self.cfg.encoding.index_tag
         index_path = resolve_tagged_output_dir(
             index_dir_value,
             model_name=str(self.cfg.model.name),
-            tag=self.cfg.tag,
+            tag=index_tag_value,
         )
         self._index_path = index_path
         return load_inverted_index(index_path)

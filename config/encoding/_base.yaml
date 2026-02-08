@@ -12,16 +12,19 @@ torch_compile_mode: default
 use_cpu: false
 strategy: ddp
 static_graph: true
+num_devices: null
 
 checkpoint_path: null
-# Directories for saving encoded shards and index.
-encode_dir: data/encoded
-index_dir: data/index
 
-shard_max_docs: 100_000
+encode_dir: "log/encode"
+index_dir: "log/index"
+index_tag: ${tag}
+
+shard_max_docs: 100000
 value_dtype: float32
-async_write: true
-async_write_queue_size: 100
-sparse_top_k: 4096
 sparse_min_weight: 0.0
-wand_block_size: 128
+sparse_top_k: 512
+wand_block_size: 256
+
+async_write: true
+async_write_queue_size: 8

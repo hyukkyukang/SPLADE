@@ -8,7 +8,7 @@ from omegaconf import DictConfig
 from config.path import ABS_CONFIG_DIR
 from src.data.pl_module import EncodeDataModule
 from src.model.pl_module import SPLADEEncodeModule
-from src.utils.logging import get_logger
+from src.utils.logging import get_logger, log_if_rank_zero
 from src.utils.model_utils import apply_checkpoint_model_config
 from src.utils.script_setup import (
     configure_script_environment,
@@ -51,6 +51,7 @@ def main(cfg: DictConfig) -> None:
         **trainer_kwargs,
     )
     trainer.predict(model=encode_module, datamodule=data_module)
+    log_if_rank_zero(logger, "Encoding complete")
 
 
 if __name__ == "__main__":

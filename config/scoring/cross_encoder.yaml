@@ -1,0 +1,25 @@
+# @package scoring
+defaults:
+  - _base
+
+data_module: standard
+model_name: cross-encoder/ms-marco-MiniLM-L-12-v2
+output_dir: "data/hard_negatives"
+output_basename: "msmarco_cross_encoder_scores"
+output_format: jsonl
+merge_ranks: true
+batch_size: 4096
+row_batch_size: 2
+max_length: 512
+num_workers: 16
+prefetch_factor: 2
+precision: bf16-mixed
+use_cpu: false
+strategy: ddp
+static_graph: true
+num_devices: null
+max_rows: null
+overwrite: true
+score_key: scores
+doc_text_cache_size: 200000
+flush_every: 1000

@@ -1,5 +1,6 @@
 import abc
 import logging
+import math
 import os
 import random
 from functools import cached_property
@@ -68,6 +69,35 @@ class BaseDataset(abc.ABC):
         self.local_triplets_dir: str | None = normalize_optional_str(
             self.cfg.local_triplets_dir
         )
+
+        negative_sampling_cfg: DictConfig = self.cfg.negative_sampling
+        self.negative_sampling_strategy: str = str(
+            negative_sampling_cfg.strategy
+        ).lower()
+        self.negative_sampling_top_k: int | None = (
+            None
+            if negative_sampling_cfg.top_k is None
+            else int(negative_sampling_cfg.top_k)
+        )
+        self.negative_sampling_random_k: int | None = (
+            None
+            if negative_sampling_cfg.random_k is None
+            else int(negative_sampling_cfg.random_k)
+        )
+        self.negative_sampling_random_pool: int | None = (
+            None
+            if negative_sampling_cfg.random_pool is None
+            else int(negative_sampling_cfg.random_pool)
+        )
+        if self.negative_sampling_strategy not in {
+            "random",
+            "topk",
+            "topk_plus_random",
+        }:
+            raise ValueError(
+                "negative_sampling.strategy must be one of: random, topk, "
+                f"topk_plus_random. Got: {self.negative_sampling_strategy}"
+            )
 
         query_subset_name: str = require_cfg_str(self.cfg, "query_subset_name")
         query_split_name: str = require_cfg_str(self.cfg, "query_split_name")
@@ -354,18 +384,47 @@ class BaseDataset(abc.ABC):
             neg_id_value: Any | None = row.get("negative_id")
             pos_ids = ["" if pos_id_value is None else str(pos_id_value)]
             neg_ids = ["" if neg_id_value is None else str(neg_id_value)]
+        elif "pos_doc_ids" in row or "neg_doc_ids" in row:
+            qid = str(row.get("query_id") or row.get("qid") or row.get("_id") or index)
+            pos_ids = [
+                str(doc_id)
+                for doc_id in row.get("pos_doc_ids") or []
+                if doc_id
+            ]
+            neg_ids = [
+                str(doc_id)
+                for doc_id in row.get("neg_doc_ids") or []
+                if doc_id
+            ]
+            pos_ids = sample_items(pos_ids, num_positives, rng)
+            neg_ids = sample_items(neg_ids, num_negatives, rng)
         elif "query_id" in row and "doc_ids" in row and "labels" in row:
             qid = str(row["query_id"])
             row_doc_ids = [str(doc_id) for doc_id in row["doc_ids"]]
             labels = [float(value) for value in row["labels"]]
-            pos_ids = [
-                doc_id for doc_id, label in zip(row_doc_ids, labels) if label > 0
-            ]
-            neg_ids = [
-                doc_id for doc_id, label in zip(row_doc_ids, labels) if label <= 0
-            ]
-            pos_ids = sample_items(pos_ids, num_positives, rng)
-            neg_ids = sample_items(neg_ids, num_negatives, rng)
+            score_list: list[float] | None = None
+            if isinstance(score_values, (list, tuple)) and len(score_values) == len(
+                row_doc_ids
+            ):
+                score_list = [float(score) for score in score_values]
+
+            pos_pairs: list[tuple[str, float | None]] = []
+            neg_pairs: list[tuple[str, float | None]] = []
+            for idx, (doc_id, label) in enumerate(zip(row_doc_ids, labels)):
+                score: float | None = None
+                if score_list is not None:
+                    score = score_list[idx]
+                if label > 0:
+                    pos_pairs.append((doc_id, score))
+                else:
+                    neg_pairs.append((doc_id, score))
+
+            pos_ids = sample_items(
+                [doc_id for doc_id, _ in pos_pairs], num_positives, rng
+            )
+            neg_ids = self._select_negative_ids(
+                neg_pairs, num_negatives=num_negatives, rng=rng
+            )
             if isinstance(score_values, (list, tuple)) and len(score_values) == len(
                 row_doc_ids
             ):
@@ -396,6 +455,68 @@ class BaseDataset(abc.ABC):
             query_text=query_text,
             pos_texts=pos_texts,
             neg_texts=neg_texts,
+        )
+
+    def _select_negative_ids(
+        self,
+        neg_pairs: list[tuple[str, float | None]],
+        *,
+        num_negatives: int,
+        rng: random.Random,
+    ) -> list[str]:
+        neg_ids: list[str] = [doc_id for doc_id, _ in neg_pairs]
+        if self.negative_sampling_strategy == "random":
+            return sample_items(neg_ids, num_negatives, rng)
+
+        scores: list[float] = []
+        for _, score in neg_pairs:
+            if score is None:
+                raise ValueError(
+                    "negative_sampling.strategy requires scores, but scores are missing."
+                )
+            if not math.isfinite(float(score)):
+                raise ValueError("negative_sampling.strategy requires finite scores.")
+            scores.append(float(score))
+
+        if self.negative_sampling_strategy == "topk":
+            sorted_pairs = sorted(
+                zip(neg_ids, scores), key=lambda pair: pair[1], reverse=True
+            )
+            return [doc_id for doc_id, _ in sorted_pairs[:num_negatives]]
+
+        if self.negative_sampling_strategy == "topk_plus_random":
+            top_k = self.negative_sampling_top_k
+            random_k = self.negative_sampling_random_k
+            if top_k is None or random_k is None:
+                raise ValueError(
+                    "negative_sampling.top_k and negative_sampling.random_k must be set "
+                    "for topk_plus_random."
+                )
+            if num_negatives != top_k + random_k:
+                raise ValueError(
+                    "num_negatives must equal top_k + random_k for topk_plus_random."
+                )
+            sorted_pairs = sorted(
+                zip(neg_ids, scores), key=lambda pair: pair[1], reverse=True
+            )
+            pool_size = (
+                len(sorted_pairs)
+                if self.negative_sampling_random_pool is None
+                else min(self.negative_sampling_random_pool, len(sorted_pairs))
+            )
+            pool_pairs = sorted_pairs[:pool_size]
+            top_pairs = pool_pairs[:top_k]
+            remaining_pairs = pool_pairs[top_k:]
+            if random_k > len(remaining_pairs):
+                raise ValueError(
+                    "Not enough negatives to sample random_k from the pool."
+                )
+            random_pairs = rng.sample(remaining_pairs, random_k)
+            selected_pairs = list(top_pairs) + list(random_pairs)
+            return [doc_id for doc_id, _ in selected_pairs]
+
+        raise ValueError(
+            f"Unsupported negative_sampling.strategy: {self.negative_sampling_strategy}"
         )
 
     def _loading(

@@ -1,0 +1,55 @@
+# Training entrypoint config for SPLADE-v3
+seed: 10
+log_dir_base: "log/train"
+tag: null
+log_dir: ${tagged_log_dir:${log_dir_base},${tag}}
+root_dir_path: "."
+
+# Defaults
+defaults:
+  - model: splade_v3
+  - dataset@train_dataset: msmarco_spladev3_scores
+  - dataset@val_dataset: msmarco
+  - training: splade_v3
+  - testing: default
+  # The following overrides are necessary to make the logging colorized.
+  - override hydra/job_logging: colorlog_custom
+  - _self_
+
+train_dataset:
+  hf_skip_samples: ${training.val_sample_size}
+  hf_max_samples: null
+  max_padding: ${training.max_padding}
+
+val_dataset:
+  hf_name: sentence-transformers/msmarco
+  hf_subset: triplets
+  hf_max_samples: ${training.val_sample_size}
+  hf_skip_samples: 0
+  max_padding: ${training.max_padding}
+
+training:
+  init_checkpoint_path: ${oc.env:SPLADE_PP_SELF_DISTIL_PATH,null}
+
+nanobeir:
+  enabled: true
+  run_every_n_val: 1
+  datasets: [msmarco, nfcorpus, nq]
+  batch_size: ${testing.batch_size}
+  use_cpu: ${training.use_cpu}
+  cache_dir: null
+  save_json: true
+
+hydra:
+  output_subdir: null
+  run:
+    dir: ${log_dir}
+  job_logging:
+    handlers:
+      console:
+        class: logging.StreamHandler
+        formatter: colorlog
+        stream: ext://sys.stdout
+      file:
+        class: logging.FileHandler
+        filename: ${log_dir}/train.log

@@ -17,7 +17,8 @@ from src.model.pl_module.utils import (
 )
 from src.model.retriever.sparse.neural.splade import SpladeModel
 from src.utils.logging import log_if_rank_zero
-from src.utils.model_utils import build_splade_model
+from src.utils.model_utils import build_splade_model, load_splade_checkpoint
+from src.utils.script_setup import normalize_optional_str
 from src.utils.sparse_encoder import (
     DocOnlySparseEncoderAdapter,
     SparseEncoderCache,
@@ -52,6 +53,19 @@ class SPLADETrainingModule(L.LightningModule):
         self.cfg: DictConfig = cfg
         # Build the encoder with a dtype appropriate for the device.
         self.model: SpladeModel = build_splade_model(cfg, use_cpu=cfg.training.use_cpu)
+        init_checkpoint_path: str | None = normalize_optional_str(
+            cfg.training.init_checkpoint_path
+        )
+        if init_checkpoint_path is not None:
+            missing, unexpected = load_splade_checkpoint(
+                self.model, init_checkpoint_path, logger=logger
+            )
+            log_if_rank_zero(
+                logger,
+                "Initialized SPLADE weights from checkpoint "
+                f"{init_checkpoint_path}. Missing={len(missing)}, "
+                f"unexpected={len(unexpected)}.",
+            )
         # Transformers from_pretrained defaults to eval; ensure training mode here.
         self.model.train()
         self._doc_only_flag: bool = bool(self.model.doc_only)
@@ -65,6 +79,13 @@ class SPLADETrainingModule(L.LightningModule):
         self.loss_cfg: DictConfig = cfg.training.loss
         # Loss type controls pairwise vs in-batch negatives.
         self.loss_type: str = str(self.loss_cfg.type).lower()
+        distill_losses_cfg = self.distill_cfg.losses
+        distill_losses: list[tuple[str, float]] = []
+        if distill_losses_cfg is not None:
+            for entry in distill_losses_cfg:
+                loss_type: str = str(entry.type)
+                loss_weight: float = float(entry.weight)
+                distill_losses.append((loss_type, loss_weight))
         reg_weight_value: float | None = self.reg_cfg.weight
         if reg_weight_value is None:
             self.reg_query_weight = float(self.reg_cfg.query_weight)
@@ -78,8 +99,7 @@ class SPLADETrainingModule(L.LightningModule):
             loss_type=self.loss_type,
             temperature=self.temperature,
             distill_enabled=bool(self.distill_cfg.enabled),
-            distill_weight=float(self.distill_cfg.weight),
-            distill_loss_type=str(self.distill_cfg.loss),
+            distill_losses=distill_losses,
             reg_query_weight=self.reg_query_weight,
             reg_doc_weight=self.reg_doc_weight,
             reg_type=str(self.reg_cfg.type),
@@ -255,6 +275,7 @@ class SPLADETrainingModule(L.LightningModule):
         pairwise_loss: torch.Tensor
         in_batch_loss: torch.Tensor
         distill_loss: torch.Tensor
+        distill_losses: dict[str, torch.Tensor]
         q_reg: torch.Tensor
         d_reg: torch.Tensor
         (
@@ -263,6 +284,7 @@ class SPLADETrainingModule(L.LightningModule):
             pairwise_loss,
             in_batch_loss,
             distill_loss,
+            distill_losses,
             q_reg,
             d_reg,
         ) = self.loss_computer(
@@ -287,6 +309,8 @@ class SPLADETrainingModule(L.LightningModule):
             metrics["in_batch_loss"] = in_batch_loss
         if self.distill_cfg.enabled:
             metrics["distill_loss"] = distill_loss
+            for loss_key, loss_value in distill_losses.items():
+                metrics[f"distill_{loss_key}"] = loss_value
         if self.reg_cfg.query_weight > 0:
             metrics["q_reg"] = q_reg
         if self.reg_cfg.doc_weight > 0:
@@ -318,6 +342,15 @@ class SPLADETrainingModule(L.LightningModule):
             self.log(
                 "train_distill_loss",
                 detached_metrics["distill_loss"],
+                on_step=True,
+                on_epoch=True,
+            )
+        for name, value in detached_metrics.items():
+            if not name.startswith("distill_") or name == "distill_loss":
+                continue
+            self.log(
+                f"train_{name}",
+                value,
                 on_step=True,
                 on_epoch=True,
             )

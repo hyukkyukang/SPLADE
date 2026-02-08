@@ -1,0 +1,81 @@
+# Distillation score ensemble + rescore
+seed: 10
+log_dir_base: "log"
+tag: null
+log_dir: ${tagged_log_dir:${log_dir_base},${tag}}
+root_dir_path: "."
+
+defaults:
+  - _self_
+  - override hydra/job_logging: colorlog_custom
+
+input_defaults: &input_defaults
+  path: null
+  format: auto
+  score_key: scores
+  query_id_key: query_id
+  doc_ids_key: doc_ids
+  labels_key: labels
+  doc_sources_key: doc_sources
+  hf_name: null
+  hf_subset: null
+  hf_split: train
+  hf_cache_dir: null
+  hf_data_files: null
+
+inputs:
+  - <<: *input_defaults
+    name: cross-encoder/ms-marco-MiniLM-L-6-v2
+    path: data/hard_negatives/msmarco_minilm_l6_v2_scores.jsonl
+  - <<: *input_defaults
+    name: naver/trecdl22-crossencoder-rankT53b-repro
+    path: data/hard_negatives/msmarco_rankt53b_repro_scores.jsonl
+  - <<: *input_defaults
+    name: naver/trecdl22-crossencoder-debertav3
+    path: data/hard_negatives/msmarco_debertav3_scores.jsonl
+  - <<: *input_defaults
+    name: naver/trecdl22-crossencoder-debertav2
+    path: data/hard_negatives/msmarco_debertav2_scores.jsonl
+  - <<: *input_defaults
+    name: naver/trecdl22-crossencoder-electra
+    path: data/hard_negatives/msmarco_electra_scores.jsonl
+
+merge:
+  output_path: data/hard_negatives/msmarco_spladev3_ensemble_scores.jsonl
+  output_score_key: scores
+  query_id_key: query_id
+  doc_ids_key: doc_ids
+  labels_key: labels
+  doc_sources_key: doc_sources
+  overwrite: true
+  strict_alignment: true
+  flush_every: 1000
+  max_rows: null
+
+normalization:
+  enabled: true
+  epsilon: 1e-6
+
+rescore:
+  enabled: true
+  output_mean: null
+  output_std: null
+  reference:
+    path: data/hard_negatives/msmarco_reference_scores.jsonl
+    format: auto
+    score_key: scores
+    query_id_key: query_id
+    doc_ids_key: doc_ids
+    labels_key: labels
+    doc_sources_key: doc_sources
+    hf_name: null
+    hf_subset: null
+    hf_split: train
+    hf_cache_dir: null
+    hf_data_files: null
+
+postprocess:
+  enabled: false
+  parquet_path: null
+  cleanup_jsonl: true
+  require_count_match: true

@@ -1,0 +1,15 @@
+# Triplet+scores join sanity check
+defaults:
+  - dataset: msmarco_triplet_scores
+  - _self_
+
+sanity:
+  max_rows: 1000
+  log_every: 200
+  sample_rows: 3
+  strict: true
+
+dataset:
+  score_log_every: 100000
+  score_progress_bar: true
+  score_progress_refresh: 0.5

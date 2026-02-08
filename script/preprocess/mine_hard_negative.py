@@ -1,4 +1,5 @@
 import logging
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -87,6 +88,15 @@ def _resolve_output_basename(cfg: DictConfig) -> str:
     return f"{dataset_name}_{model_name}_hardneg"
 
 
+def _resolve_hub_repo_id(cfg: DictConfig) -> str:
+    mining_cfg: DictConfig = cfg.mining
+    namespace_value: str | None = normalize_optional_str(mining_cfg.hf_namespace)
+    namespace: str = namespace_value or "Hyukkyu"
+    dataset_name: str = _resolve_dataset_name(cfg)
+    model_name: str = _resolve_model_name(cfg)
+    return f"{namespace}/{dataset_name}-{model_name}-hard-negatives"
+
+
 def _configure_mining_output(cfg: DictConfig) -> None:
     if "mining" not in cfg:
         return
@@ -103,9 +113,7 @@ def _configure_mining_output(cfg: DictConfig) -> None:
         normalize_optional_str(mining_cfg.run_filename) or "search_results.jsonl"
     )
     testing_cfg: DictConfig = cfg.testing
-    run_path_value: str | None = normalize_optional_str(
-        testing_cfg.run_path
-    )
+    run_path_value: str | None = normalize_optional_str(testing_cfg.run_path)
     if run_path_value is None:
         run_path = output_dir / run_filename
         testing_cfg.run_path = str(run_path)
@@ -140,6 +148,69 @@ def _append_rank_suffix(path: Path, rank: int) -> Path:
     if suffix:
         return path.with_name(f"{stem}.rank{rank}{suffix}")
     return path.with_name(f"{path.name}.rank{rank}")
+
+
+def _resolve_parquet_outputs(cfg: DictConfig, trainer: L.Trainer) -> list[Path]:
+    run_path_value: str | None = normalize_optional_str(cfg.testing.run_path)
+    if run_path_value is None:
+        return []
+    run_path = Path(run_path_value)
+    world_size: int = int(trainer.world_size)
+    if world_size <= 1:
+        parquet_path = run_path.with_suffix(".parquet")
+        return [parquet_path] if parquet_path.exists() else []
+    parquet_paths: list[Path] = []
+    for rank in range(world_size):
+        parquet_path = _append_rank_suffix(run_path, rank).with_suffix(".parquet")
+        if parquet_path.exists():
+            parquet_paths.append(parquet_path)
+    return parquet_paths
+
+
+def _upload_parquet_to_hub(cfg: DictConfig, trainer: L.Trainer) -> None:
+    if "mining" not in cfg:
+        return
+    mining_cfg: DictConfig = cfg.mining
+    if not bool(mining_cfg.upload_to_hub):
+        return
+    if int(trainer.global_rank) != 0:
+        return
+
+    post_cfg: DictConfig = mining_cfg.postprocess
+    if not bool(post_cfg.enabled):
+        log_if_rank_zero(
+            logger,
+            "Skipping hub upload because mining.postprocess.enabled is false.",
+            level="warning",
+        )
+        return
+
+    parquet_paths = _resolve_parquet_outputs(cfg, trainer)
+    if not parquet_paths:
+        log_if_rank_zero(
+            logger,
+            "Skipping hub upload because no parquet outputs were found.",
+            level="warning",
+        )
+        return
+
+    repo_id: str = _resolve_hub_repo_id(cfg)
+    token = normalize_optional_str(
+        os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACE_HUB_TOKEN")
+    )
+    if token is None:
+        raise ValueError(
+            "HF_TOKEN or HUGGINGFACE_HUB_TOKEN must be set to upload the dataset."
+        )
+
+    data_files = {"train": [str(path) for path in parquet_paths]}
+    log_if_rank_zero(
+        logger,
+        f"Uploading parquet dataset to {repo_id} from {len(parquet_paths)} shard(s).",
+    )
+    dataset = load_dataset("parquet", data_files=data_files, split="train")
+    dataset.push_to_hub(repo_id, token=token)
+    log_if_rank_zero(logger, f"Upload complete: {repo_id}")
 
 
 def _merge_rank_outputs(cfg: DictConfig, trainer: L.Trainer) -> None:
@@ -198,23 +269,19 @@ def _count_jsonl_rows(path: Path) -> int:
     return count
 
 
-def _build_search_result_features(include_query_text: bool) -> Features:
+def _build_search_result_features() -> Features:
     feature_dict: dict[str, Any] = {
         "qid": Value("string"),
-        "doc_ids": Sequence(Value("string")),
-        "scores": Sequence(Value("float32")),
+        "pos_doc_ids": Sequence(Value("string")),
+        "neg_doc_ids": Sequence(Value("string")),
     }
-    if include_query_text:
-        feature_dict["query_text"] = Value("string")
     return Features(feature_dict)
 
 
 def _resolve_jsonl_inputs(run_path: Path, world_size: int) -> list[tuple[int, Path]]:
     if world_size <= 1:
         return [(0, run_path)]
-    return [
-        (rank, _append_rank_suffix(run_path, rank)) for rank in range(world_size)
-    ]
+    return [(rank, _append_rank_suffix(run_path, rank)) for rank in range(world_size)]
 
 
 def _add_rank_column(dataset: Dataset, rank: int) -> Dataset:
@@ -233,17 +300,14 @@ def _convert_jsonl_to_parquet(
     *,
     add_rank_column: bool,
     rank: int | None,
-    include_query_text: bool,
     count_jsonl_rows: bool,
 ) -> tuple[Path, int | None, int]:
-    jsonl_rows: int | None = (
-        _count_jsonl_rows(jsonl_path) if count_jsonl_rows else None
-    )
+    jsonl_rows: int | None = _count_jsonl_rows(jsonl_path) if count_jsonl_rows else None
     dataset: Dataset = load_dataset(
         "json",
         data_files=str(jsonl_path),
         split="train",
-        features=_build_search_result_features(include_query_text),
+        features=_build_search_result_features(),
     )
     if add_rank_column and rank is not None:
         dataset = _add_rank_column(dataset, rank)
@@ -288,8 +352,6 @@ def _postprocess_outputs(cfg: DictConfig, trainer: L.Trainer) -> None:
         return
 
     run_path = Path(run_path_value)
-    search_cfg: DictConfig = cfg.search
-    include_query_text: bool = bool(search_cfg.include_query_text)
     count_jsonl_rows: bool = bool(
         settings.cleanup_jsonl and settings.require_count_match
     )
@@ -314,7 +376,6 @@ def _postprocess_outputs(cfg: DictConfig, trainer: L.Trainer) -> None:
             jsonl_path,
             add_rank_column=settings.add_rank_column,
             rank=rank,
-            include_query_text=include_query_text,
             count_jsonl_rows=count_jsonl_rows,
         )
         converted += 1
@@ -352,7 +413,9 @@ def _postprocess_outputs(cfg: DictConfig, trainer: L.Trainer) -> None:
     )
 
 
-@hydra.main(version_base=None, config_path=ABS_CONFIG_DIR, config_name="mine_hard_negative")
+@hydra.main(
+    version_base=None, config_path=ABS_CONFIG_DIR, config_name="mine_hard_negative"
+)
 def main(cfg: DictConfig) -> None:
     initialize_run(cfg, logger=logger, suppress_lightning_tips=True)
     cfg = resolve_model_source(cfg, logger=logger)
@@ -379,6 +442,7 @@ def main(cfg: DictConfig) -> None:
     trainer.test(model=search_module, datamodule=data_module)
     _merge_rank_outputs(cfg, trainer)
     _postprocess_outputs(cfg, trainer)
+    _upload_parquet_to_hub(cfg, trainer)
     log_if_rank_zero(logger, "Search complete")
 
 

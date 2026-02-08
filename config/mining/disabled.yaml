@@ -1,0 +1,11 @@
+# @package mining
+defaults:
+  - _base
+
+name: disabled
+enabled: false
+output_dir_base: "data/hard_negatives"
+run_filename: "hard_negatives.jsonl"
+dataset_name: null
+model_name: null
+prefer_parquet: true

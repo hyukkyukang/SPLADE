@@ -3,19 +3,25 @@
 from typing import Any
 
 import numpy as np
+from omegaconf import DictConfig
 
 
 def resolve_query_sparsify_config(
-    metadata: dict[str, Any],
+    cfg: DictConfig,
 ) -> tuple[list[int], float, int | None]:
-    exclude_ids: list[int] = [
-        int(token_id) for token_id in metadata.get("exclude_token_ids") or []
-    ]
-    min_weight_value: float = float(metadata.get("min_weight") or 0.0)
-    top_k_value: int | None = (
-        None if metadata.get("top_k") is None else int(metadata["top_k"])
-    )
-    return exclude_ids, min_weight_value, top_k_value
+    exclude_value: Any = cfg.testing.query_exclude_token_ids
+    if exclude_value:
+        exclude_ids = [int(token_id) for token_id in exclude_value]
+    else:
+        exclude_ids = []
+    min_weight_value: float = float(cfg.testing.sparse_min_weight)
+    top_k_value: int | None = cfg.testing.sparse_top_k
+    if top_k_value is None:
+        top_k = None
+    else:
+        top_k_int = int(top_k_value)
+        top_k = None if top_k_int <= 0 else top_k_int
+    return exclude_ids, min_weight_value, top_k
 
 
 def prepare_score_buffers(doc_count: int) -> tuple[np.ndarray, np.ndarray]:
