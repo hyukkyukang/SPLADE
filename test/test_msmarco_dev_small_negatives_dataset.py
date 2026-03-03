@@ -5,6 +5,7 @@ from unittest.mock import patch
 from datasets import Dataset
 from omegaconf import DictConfig, OmegaConf
 
+from src.data.dataclass import MetaItem
 from src.data.dataset.msmarco_dev_small_negatives import (
     MSMARCODevSmallNegativesDataset,
 )
@@ -163,6 +164,48 @@ class MSMARCODevSmallNegativesDatasetTest(unittest.TestCase):
             resolved = dataset.lookup_query_texts(["q2", "q_missing", "q1"])
 
         self.assertEqual(resolved, {"q2": "two", "q1": "one"})
+
+    def test_resolve_query_text_falls_back_to_query_lookup(self) -> None:
+        dataset = MSMARCODevSmallNegativesDataset(
+            cfg=build_dataset_cfg(query_lookup_hf_name="dummy/query-lookup")
+        )
+        meta_rows = Dataset.from_list([{"qid": "q_lookup", "pos": [1], "neg": [2]}])
+        primary_query_rows = Dataset.from_list(
+            [{"query_id": "q_primary", "query": "primary query"}]
+        )
+        lookup_rows = Dataset.from_list(
+            [{"query_id": "q_lookup", "text": "lookup query"}]
+        )
+
+        def _mock_load(
+            hf_name: str,
+            hf_subset: str | None,
+            split: str,
+            cache_dir: str | None,
+            data_files: dict[str, str] | None,
+        ) -> Dataset:
+            _ = split
+            _ = cache_dir
+            _ = data_files
+            if hf_name == "dummy/query-lookup":
+                return lookup_rows
+            if hf_name == "sentence-transformers/msmarco" and hf_subset == "queries":
+                return primary_query_rows
+            return meta_rows
+
+        with patch.object(dataset, "_load_hf_dataset", side_effect=_mock_load):
+            resolved = dataset.resolve_query_text(
+                MetaItem(
+                    qid="q_lookup",
+                    pos_ids=[],
+                    neg_ids=[],
+                    pos_scores=None,
+                    neg_scores=None,
+                    query_text=None,
+                )
+            )
+
+        self.assertEqual(resolved, "lookup query")
 
 
 if __name__ == "__main__":

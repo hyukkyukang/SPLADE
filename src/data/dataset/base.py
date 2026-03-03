@@ -695,13 +695,30 @@ class BaseDataset(abc.ABC):
         )
 
     # --- Public methods ---
+    def _lookup_query_text_by_id(self, qid: str) -> str:
+        lookup_dataset: Dataset | None = self.query_lookup_dataset
+        if lookup_dataset is None:
+            return ""
+        qid_text: str = str(qid)
+        query_idx: int = int(self.query_lookup_id_to_idx.get(qid_text, -1))
+        if query_idx < 0:
+            return ""
+        row: dict[str, Any] = dict(lookup_dataset[int(query_idx)])
+        raw_text: Any | None = row.get(self.query_lookup_text_column)
+        return "" if raw_text is None else str(raw_text).strip()
+
     def resolve_query_text(self, meta_item: MetaItem) -> str:
         if meta_item.query_text is not None:
-            return meta_item.query_text
+            query_text: str = str(meta_item.query_text)
+            if query_text.strip():
+                return query_text
         try:
-            return self._get_query_text_from_id(meta_item.qid)
+            query_text = self._get_query_text_from_id(meta_item.qid)
+            if query_text.strip():
+                return query_text
         except KeyError:
-            return ""
+            pass
+        return self._lookup_query_text_by_id(meta_item.qid)
 
     def resolve_doc_texts(
         self, doc_ids: list[str], inline_texts: list[str] | None
