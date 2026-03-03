@@ -127,20 +127,7 @@ class TrainingCompilePolicyManager:
         # Query/doc encoder wrappers share one encoder module. Under unfrozen DDP,
         # compiling wrappers separately can be unstable; compile shared encoder once.
         if ddp_enabled and not freeze_backbone:
-            shared_encoder_mode: str = compile_mode
             shared_encoder_kwargs: dict[str, Any] = dict(compile_mode_kwargs)
-            if compile_mode == "max-autotune":
-                (
-                    shared_encoder_mode,
-                    shared_encoder_kwargs,
-                ) = validate_torch_compile_mode("max-autotune-no-cudagraphs")
-                log_if_rank_zero(
-                    self.logger,
-                    "Using shared-encoder torch.compile fallback "
-                    f"{compile_mode!r} -> {shared_encoder_mode!r} for unfrozen DDP "
-                    "to avoid unstable cudagraph capture.",
-                    level="warning",
-                )
             self.loss_compile_mode_kwargs = dict(shared_encoder_kwargs)
             self._eager_query_encoder_fn = self.model._query_encoder_wrapper
             self._eager_doc_encoder_fn = self.model._doc_encoder_wrapper
@@ -199,7 +186,7 @@ class TrainingCompilePolicyManager:
         skip_query_compile_for_large_vocab: bool = False
         skip_doc_compile_for_large_vocab: bool = False
         # Large-vocab heads can trigger unstable Triton autotune kernels.
-        if compile_mode in {"max-autotune", "max-autotune-no-cudagraphs"}:
+        if compile_mode == "max-autotune":
             try:
                 vocab_size: int = int(getattr(encoder_obj, "vocab_size", 0))
             except Exception:

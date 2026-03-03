@@ -8,8 +8,11 @@ name: splade
 max_steps: 150000
 batch_size: 32
 eval_batch_size: 16
+# Validation keeps 100 candidates/query for metrics, but encodes doc candidates
+# in micro-batches to cap peak VRAM.
+validation_doc_encode_chunk_size: 10
 grad_accumulation: 1
-num_workers: 8
+num_workers: 2
 prefetch_factor: 2
 dataloader_multiprocessing_context: null
 max_padding: true
@@ -35,10 +38,10 @@ torch_compile_force_aten_gemm_for_large_vocab: true
 torch_compile_large_vocab_threshold: 100000
 # Optional per-wrapper fallback compile modes for large-vocab runs.
 # `null` keeps the global mode.
-torch_compile_large_vocab_query_fallback_mode: max-autotune-no-cudagraphs
-torch_compile_large_vocab_doc_fallback_mode: max-autotune-no-cudagraphs
+torch_compile_large_vocab_query_fallback_mode: max-autotune
+torch_compile_large_vocab_doc_fallback_mode: max-autotune
 # Loss compile can also use a fallback mode under large-vocab safety.
-torch_compile_large_vocab_loss_fallback_mode: max-autotune-no-cudagraphs
+torch_compile_large_vocab_loss_fallback_mode: max-autotune
 torch_compile_skip_query_encoder_for_large_vocab: false
 torch_compile_skip_doc_encoder_for_large_vocab: false
 # Enable safer DDP settings for compile-heavy modes by default.

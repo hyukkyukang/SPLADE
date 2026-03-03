@@ -17,6 +17,7 @@ from src.utils.script_setup import normalize_optional_str
 
 logger = get_logger("SPLADETrainingModule")
 _TCallable = TypeVar("_TCallable", bound=Callable[..., Any])
+_VALIDATION_DOC_ENCODE_CHUNK_SIZE = 10
 
 
 def _dynamo_disable(fn: _TCallable) -> _TCallable:
@@ -134,6 +135,39 @@ class SPLADETrainingModule(L.LightningModule):
         if selected_loss_computer is not None:
             self.loss_computer = selected_loss_computer
         self._setup_eval_metrics(cfg)
+        self._validation_doc_encode_chunk_size: int = int(
+            cfg.training.get(
+                "validation_doc_encode_chunk_size",
+                _VALIDATION_DOC_ENCODE_CHUNK_SIZE,
+            )
+        )
+        if self._validation_doc_encode_chunk_size <= 0:
+            self._validation_doc_encode_chunk_size = _VALIDATION_DOC_ENCODE_CHUNK_SIZE
+
+    def _encode_docs_in_chunks(
+        self,
+        flat_docs: torch.Tensor,
+        flat_masks: torch.Tensor,
+        *,
+        chunk_size: int,
+        use_compile: bool,
+    ) -> torch.Tensor:
+        total_docs: int = int(flat_docs.shape[0])
+        if total_docs <= chunk_size:
+            if use_compile:
+                self._compile_policy.maybe_mark_step()
+            return self.model.encode_docs(flat_docs, flat_masks)
+
+        doc_rep_chunks: list[torch.Tensor] = []
+        start: int
+        for start in range(0, total_docs, chunk_size):
+            end: int = min(start + chunk_size, total_docs)
+            if use_compile:
+                self._compile_policy.maybe_mark_step()
+            doc_rep_chunks.append(
+                self.model.encode_docs(flat_docs[start:end], flat_masks[start:end])
+            )
+        return torch.cat(doc_rep_chunks, dim=0)
 
     def _setup_eval_metrics(self, cfg: DictConfig) -> None:
         self.val_metrics_cfg = cfg.training.validation_metrics
@@ -224,7 +258,23 @@ class SPLADETrainingModule(L.LightningModule):
         use_compile: bool = bool(
             self._compile_policy.compile_enabled_for_current_stage
         )
-        if self._compile_policy.torch_compile_full_model:
+        use_chunked_validation_doc_encoding: bool = (
+            stage == "val"
+            and int(flat_docs.shape[0]) > self._validation_doc_encode_chunk_size
+        )
+        if use_chunked_validation_doc_encoding:
+            if use_compile:
+                self._compile_policy.maybe_mark_step()
+            q_reps = self.model.encode_queries(
+                batch["query_input_ids"], batch["query_attention_mask"]
+            )
+            flat_doc_reps = self._encode_docs_in_chunks(
+                flat_docs,
+                flat_masks,
+                chunk_size=self._validation_doc_encode_chunk_size,
+                use_compile=use_compile,
+            )
+        elif self._compile_policy.torch_compile_full_model:
             active_model: torch.nn.Module = (
                 self._compile_policy.resolve_active_model_for_train_step()
             )

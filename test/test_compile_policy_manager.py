@@ -99,7 +99,7 @@ class CompilePolicyManagerTest(unittest.TestCase):
         self.assertEqual(compile_mock.call_count, 1)
         self.assertIsNotNone(manager._compiled_query_encoder_fn)
         self.assertIsNotNone(manager._compiled_doc_encoder_fn)
-        self.assertEqual(manager.loss_compile_mode_kwargs.get("mode"), "max-autotune-no-cudagraphs")
+        self.assertEqual(manager.loss_compile_mode_kwargs.get("mode"), "max-autotune")
 
     def test_frozen_ddp_dynamic_graph_uses_wrapper_compile(self) -> None:
         model = _DummyModel(freeze_backbone=True, vocab_size=30522)

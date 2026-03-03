@@ -14,7 +14,6 @@ _VALID_TORCH_COMPILE_MODES: tuple[str, ...] = (
     "default",
     "reduce-overhead",
     "max-autotune",
-    "max-autotune-no-cudagraphs",
 )
 
 

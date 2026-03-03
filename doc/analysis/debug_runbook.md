@@ -18,7 +18,7 @@ Checks:
 
 Actions:
 - use shared-encoder compile path (implemented in `compile_policy.py`)
-- use fallback mode `max-autotune-no-cudagraphs` where needed
+- keep `training.torch_compile_mode=max-autotune`
 - if unstable, temporarily set:
   - `training.static_graph=false`
   - `training.torch_compile_mode=default`

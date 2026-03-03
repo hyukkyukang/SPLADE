@@ -30,6 +30,22 @@ def get_cpu_trainer_kwargs(cfg_section: DictConfig) -> dict[str, Any]:
             )
         else:
             kwargs["strategy"] = "auto"
+    elif strategy_name == "ddp_spawn":
+        if num_devices > 1:
+            use_static_graph: bool = bool(cfg_section.static_graph)
+            find_unused_parameters: bool = bool(
+                cfg_section.get("find_unused_parameters", False)
+            )
+            if find_unused_parameters:
+                use_static_graph = False
+            kwargs["strategy"] = DDPStrategy(
+                timeout=timedelta(hours=DDP_TIMEOUT_HOURS),
+                static_graph=use_static_graph,
+                find_unused_parameters=find_unused_parameters,
+                start_method="spawn",
+            )
+        else:
+            kwargs["strategy"] = "auto"
     elif strategy_name == "single":
         kwargs["devices"] = 1
         kwargs["strategy"] = "auto"
@@ -63,7 +79,6 @@ def get_gpu_trainer_kwargs(cfg_section: DictConfig) -> dict[str, Any]:
         compile_mode_normalized: str = compile_mode.strip().lower()
         compile_safe_modes: set[str] = {
             "max-autotune",
-            "max-autotune-no-cudagraphs",
             "reduce-overhead",
         }
         compile_ddp_safe_mode: bool = bool(
@@ -86,6 +101,40 @@ def get_gpu_trainer_kwargs(cfg_section: DictConfig) -> dict[str, Any]:
             static_graph=use_static_graph,
             find_unused_parameters=find_unused_parameters,
             gradient_as_bucket_view=gradient_as_bucket_view,
+        )
+    elif strategy_name == "ddp_spawn":
+        use_static_graph: bool = bool(cfg_section.static_graph)
+        find_unused_parameters: bool = bool(
+            cfg_section.get("find_unused_parameters", False)
+        )
+        compile_enabled: bool = bool(cfg_section.get("torch_compile", False))
+        compile_mode: str = str(cfg_section.get("torch_compile_mode", "default"))
+        compile_mode_normalized: str = compile_mode.strip().lower()
+        compile_safe_modes: set[str] = {
+            "max-autotune",
+            "reduce-overhead",
+        }
+        compile_ddp_safe_mode: bool = bool(
+            cfg_section.get("torch_compile_ddp_safe_mode", True)
+        )
+        if (
+            compile_enabled
+            and compile_ddp_safe_mode
+            and compile_mode_normalized in compile_safe_modes
+        ):
+            find_unused_parameters = True
+            use_static_graph = False
+        gradient_as_bucket_view: bool = bool(
+            cfg_section.get("gradient_as_bucket_view", True)
+        )
+        if find_unused_parameters:
+            use_static_graph = False
+        kwargs["strategy"] = DDPStrategy(
+            timeout=timedelta(hours=DDP_TIMEOUT_HOURS),
+            static_graph=use_static_graph,
+            find_unused_parameters=find_unused_parameters,
+            gradient_as_bucket_view=gradient_as_bucket_view,
+            start_method="spawn",
         )
     elif strategy_name == "fsdp":
         kwargs["strategy"] = FSDPStrategy(timeout=timedelta(hours=DDP_TIMEOUT_HOURS))

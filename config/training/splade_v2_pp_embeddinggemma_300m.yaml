@@ -16,6 +16,6 @@ find_unused_parameters: false
 batch_size: 4
 eval_batch_size: 2
 grad_accumulation: 2
-num_workers: 8
-prefetch_factor: 4
+num_workers: 2
+prefetch_factor: 2
 dataloader_multiprocessing_context: fork
