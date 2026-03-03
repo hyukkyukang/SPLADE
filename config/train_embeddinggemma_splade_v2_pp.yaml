@@ -19,17 +19,6 @@ train_dataset:
   hf_skip_samples: ${training.val_sample_size}
   hf_max_samples: null
   max_padding: ${training.max_padding}
-  pretokenize:
-    output_dir: data/cache/pretokenized/msmarco_embeddinggemma_splade_lsr
-    overwrite: false
-    storage_format: sidecar_only
-    loading_mode: streaming
-    streaming_max_cached_shards: 8
-    streaming_row_cache_size: 50000
-    streaming_index_cache_size: 100000
-    streaming_sqlite_cache_size_kib: 65536
-    streaming_sqlite_mmap_size: 2147483648
-    streaming_numpy_sidecar: true
 
 val_dataset:
   hf_max_samples: ${training.val_sample_size}
@@ -42,14 +31,6 @@ val_dataset:
   query_lookup_hf_data_files: null
   query_lookup_id_column: _id
   query_lookup_text_column: text
-  pretokenize:
-    enabled: true
-    output_dir: data/cache/pretokenized/msmarco_dev_small_negatives_embeddinggemma_splade_lsr
-    overwrite: false
-    storage_format: sidecar_only
-    loading_mode: streaming
-    streaming_max_cached_shards: 8
-    streaming_numpy_sidecar: true
 
 nanobeir:
   enabled: true

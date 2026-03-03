@@ -114,7 +114,13 @@ class TrainingCompilePolicyManager:
         self.loss_compile_mode_kwargs = dict(compile_mode_kwargs)
 
         strategy_name: str = str(cfg.training.get("strategy", "")).lower()
-        configured_num_devices: int = int(cfg.training.get("num_devices", 1))
+        raw_num_devices: Any = cfg.training.get("num_devices", 1)
+        try:
+            configured_num_devices = (
+                1 if raw_num_devices is None else int(raw_num_devices)
+            )
+        except (TypeError, ValueError):
+            configured_num_devices = 1
         ddp_enabled: bool = ("ddp" in strategy_name) or (configured_num_devices > 1)
         encoder_obj: Any = getattr(self.model, "encoder", None)
         freeze_backbone: bool = bool(getattr(encoder_obj, "freeze_backbone", False))

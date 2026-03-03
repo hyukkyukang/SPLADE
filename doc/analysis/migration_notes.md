@@ -14,17 +14,15 @@ This note summarizes behavior-preserving changes that affect extension points.
 If you previously modified `train.py` directly for these concerns, migrate edits
 to the dedicated service module first.
 
-## Pretokenize Pipeline Extraction
+## Data Pipeline Simplification
 
-- Pretokenization logic moved out of `src/data/pd_module/train.py` into:
-  - `pretokenize_lifecycle.py`
-  - `pretokenize_writer.py`
-  - `pretokenize_runtime_reader.py`
-  - `pretokenize_row_materializer.py`
-  - `pretokenize_backend.py`
+- Pretokenization/cache modules were removed.
+- Training data flow now uses a single runtime tokenization path in:
+  - `src/data/pd_module/train.py`
+  - `src/data/pd_module/utils.py`
 
-Behavior is intentionally preserved, but the entry points are now smaller and
-module-specific.
+This removes cache lifecycle/runtime branching and keeps behavior easier to
+reason about in DDP and worker processes.
 
 ## Validation/Evaluation Semantics
 
@@ -50,4 +48,3 @@ in individual scripts.
 - Encoding config `name` fields are unique:
   - `config/encoding/anna_base.yaml` -> `name: anna_base`
   - `config/encoding/bert_large.yaml` -> `name: bert_large`
-

@@ -38,12 +38,10 @@
 
 ## Phase 3: Data Pipeline Decomposition
 - [x] Split `src/data/pd_module/train.py` into:
-  - [x] Pretokenize cache lifecycle manager.
-  - [x] Cache storage/index writer.
-  - [x] Runtime cache reader.
-  - [x] Training row materializer.
-- [x] Extract row-pointer and sidecar logic behind one cache backend protocol.
-- [x] Add dedicated tests for cache lock, manifest mismatch, and stale lock recovery.
+  - [x] Runtime row materialization path.
+  - [x] Shared tokenization/rerank-input utilities.
+- [x] Remove pretokenization cache codepaths and keep a single runtime-tokenization flow.
+- [x] Keep dataset/text/id artifact warmup explicit through `PDModule` loading policy hooks.
 
 ## Phase 4: Evaluation/Validation Unification
 - [x] Ensure standalone `script/validation.py` uses exactly training-time validation semantics.
@@ -53,14 +51,13 @@
 
 ## Phase 5: Performance Optimization
 - [x] Reduce Python overhead in `__getitem__` hot paths.
-- [x] Improve streaming token store batched/global-row lookup usage.
 - [x] Tighten scoring backend buffer reuse and minimize allocations.
 - [x] Gate expensive per-step logging metrics by interval.
 - [x] Add benchmark harness for:
-  - [x] pretokenized sidecar-only
-  - [x] pretokenized hybrid
-  - [x] non-pretokenized
-- [x] Record and compare ETA/throughput for each variant.
+  - [x] training throughput baseline
+  - [x] validation runtime baseline
+  - [x] retrieval runtime baseline
+- [x] Record and compare ETA/throughput for active runtime paths.
 
 ## Phase 6: Config + CI + Test Hygiene
 - [x] Remove ambiguous config artifacts (example duplicate names).
@@ -88,12 +85,10 @@
 - [x] Proceed to Phase 2 Step 3 (extract metrics/logging service from training module).
 - [x] Proceed to Phase 2 Step 4 (extract validation candidate/metric accumulator).
 - [x] Proceed to Phase 2 Step 5 (extract NanoBEIR evaluation runner).
-- [x] Proceed to Phase 3 Step 1 (split pretokenize cache lifecycle manager).
-- [x] Proceed to Phase 3 Step 2 (extract cache storage/index writer).
-- [x] Proceed to Phase 3 Step 3 (extract runtime cache reader).
-- [x] Proceed to Phase 3 Step 4 (extract training row materializer).
-- [x] Proceed to Phase 3 follow-up (row-pointer/sidecar backend protocol extraction).
-- [x] Proceed to Phase 3 test hardening (cache lock/manifest mismatch/stale lock recovery).
+- [x] Proceed to Phase 3 Step 1 (simplify training data module flow).
+- [x] Proceed to Phase 3 Step 2 (consolidate runtime row materialization path).
+- [x] Proceed to Phase 3 Step 3 (remove legacy cache module surfaces).
+- [x] Proceed to Phase 3 Step 4 (finalize direct runtime tokenization path).
 - [x] Proceed to Phase 4 Step 1 (validation semantics parity check and consolidation).
 - [x] Proceed to Phase 4 Step 2 (retrieval evaluation isolation/explicitness hardening).
 - [x] Proceed to Phase 6 Step 2 (Hydra config composition tests).

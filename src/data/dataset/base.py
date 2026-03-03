@@ -1,4 +1,5 @@
 import abc
+from dataclasses import dataclass
 import logging
 import math
 import os
@@ -34,6 +35,18 @@ CORPUS_SPLIT_NAME_KEY: str = "corpus_split_name"
 CORPUS_ID_COLUMN_KEY: str = "corpus_id_column"
 CORPUS_TEXT_COLUMN_KEY: str = "corpus_text_column"
 CORPUS_TITLE_COLUMN_KEY: str = "corpus_title_column"
+
+
+@dataclass(frozen=True)
+class _MetaRowParseResult:
+    qid: str
+    pos_ids: list[str]
+    neg_ids: list[str]
+    pos_scores: list[float] | None
+    neg_scores: list[float] | None
+    query_text: str | None
+    pos_texts: list[str] | None
+    neg_texts: list[str] | None
 
 
 class BaseDataset(abc.ABC):
@@ -411,6 +424,129 @@ class BaseDataset(abc.ABC):
                 return row.get(key)
         return None
 
+    @staticmethod
+    def _parse_inline_triplet_row(
+        row: dict[str, Any],
+        *,
+        query_field: str,
+        index: int,
+    ) -> _MetaRowParseResult:
+        query_text: str = str(row[query_field])
+        pos_text: str = str(row["positive"])
+        neg_text: str = str(row["negative"])
+        qid: str = str(row.get("query_id") or row.get("qid") or index)
+        return _MetaRowParseResult(
+            qid=qid,
+            pos_ids=[""],
+            neg_ids=[""],
+            pos_scores=None,
+            neg_scores=None,
+            query_text=query_text,
+            pos_texts=[pos_text],
+            neg_texts=[neg_text],
+        )
+
+    @staticmethod
+    def _parse_query_positive_id_row(row: dict[str, Any]) -> _MetaRowParseResult:
+        qid: str = str(row["query_id"])
+        pos_id_value: Any | None = row.get("positive_id")
+        neg_id_value: Any | None = row.get("negative_id")
+        return _MetaRowParseResult(
+            qid=qid,
+            pos_ids=["" if pos_id_value is None else str(pos_id_value)],
+            neg_ids=["" if neg_id_value is None else str(neg_id_value)],
+            pos_scores=None,
+            neg_scores=None,
+            query_text=None,
+            pos_texts=None,
+            neg_texts=None,
+        )
+
+    @staticmethod
+    def _parse_pos_neg_doc_ids_row(
+        row: dict[str, Any],
+        *,
+        index: int,
+        num_positives: int,
+        num_negatives: int,
+        rng: random.Random,
+    ) -> _MetaRowParseResult:
+        qid: str = str(
+            row.get("query_id") or row.get("qid") or row.get("_id") or index
+        )
+        pos_ids: list[str] = [
+            str(doc_id) for doc_id in row.get("pos_doc_ids") or [] if doc_id
+        ]
+        neg_ids: list[str] = [
+            str(doc_id) for doc_id in row.get("neg_doc_ids") or [] if doc_id
+        ]
+        return _MetaRowParseResult(
+            qid=qid,
+            pos_ids=sample_items(pos_ids, num_positives, rng),
+            neg_ids=sample_items(neg_ids, num_negatives, rng),
+            pos_scores=None,
+            neg_scores=None,
+            query_text=None,
+            pos_texts=None,
+            neg_texts=None,
+        )
+
+    def _parse_labeled_doc_ids_row(
+        self,
+        row: dict[str, Any],
+        *,
+        num_positives: int,
+        num_negatives: int,
+        rng: random.Random,
+        score_values: Any | None,
+    ) -> _MetaRowParseResult:
+        qid: str = str(row["query_id"])
+        row_doc_ids: list[str] = [str(doc_id) for doc_id in row["doc_ids"]]
+        labels: list[float] = [float(value) for value in row["labels"]]
+        score_list: list[float] | None = None
+        if isinstance(score_values, (list, tuple)) and len(score_values) == len(
+            row_doc_ids
+        ):
+            score_list = [float(score) for score in score_values]
+
+        pos_pairs: list[tuple[str, float | None]] = []
+        neg_pairs: list[tuple[str, float | None]] = []
+        for idx, (doc_id, label) in enumerate(zip(row_doc_ids, labels)):
+            score: float | None = None
+            if score_list is not None:
+                score = score_list[idx]
+            if label > 0:
+                pos_pairs.append((doc_id, score))
+            else:
+                neg_pairs.append((doc_id, score))
+
+        pos_ids: list[str] = sample_items(
+            [doc_id for doc_id, _ in pos_pairs], num_positives, rng
+        )
+        neg_ids: list[str] = self._select_negative_ids(
+            neg_pairs, num_negatives=num_negatives, rng=rng
+        )
+        pos_scores: list[float] | None = None
+        neg_scores: list[float] | None = None
+        if isinstance(score_values, (list, tuple)) and len(score_values) == len(
+            row_doc_ids
+        ):
+            score_map: dict[str, float] = {
+                doc_id: float(score) for doc_id, score in zip(row_doc_ids, score_values)
+            }
+            pos_scores = [score_map.get(doc_id, float("nan")) for doc_id in pos_ids]
+            neg_scores = [score_map.get(doc_id, float("nan")) for doc_id in neg_ids]
+        return _MetaRowParseResult(
+            qid=qid,
+            pos_ids=pos_ids,
+            neg_ids=neg_ids,
+            pos_scores=pos_scores,
+            neg_scores=neg_scores,
+            query_text=None,
+            pos_texts=None,
+            neg_texts=None,
+        )
+
     def _row_to_meta_item(
         self,
         row: dict[str, Any],
@@ -421,106 +557,60 @@ class BaseDataset(abc.ABC):
         rng: random.Random,
     ) -> MetaItem:
         score_values: Any | None = self._resolve_row_score_values(row)
-        qid: str = ""
-        pos_ids: list[str] = []
-        neg_ids: list[str] = []
-        pos_scores: list[float] | None = None
-        neg_scores: list[float] | None = None
-        query_text: str | None = None
-        pos_texts: list[str] | None = None
-        neg_texts: list[str] | None = None
-
+        parsed: _MetaRowParseResult
         if "query" in row and "positive" in row and "negative" in row:
-            query_text = str(row["query"])
-            pos_texts = [str(row["positive"])]
-            neg_texts = [str(row["negative"])]
-            qid = str(row.get("query_id") or row.get("qid") or index)
-            pos_ids = [""]
-            neg_ids = [""]
+            parsed = self._parse_inline_triplet_row(
+                row,
+                query_field="query",
+                index=index,
+            )
         elif "anchor" in row and "positive" in row and "negative" in row:
-            query_text = str(row["anchor"])
-            pos_texts = [str(row["positive"])]
-            neg_texts = [str(row["negative"])]
-            qid = str(row.get("query_id") or row.get("qid") or index)
-            pos_ids = [""]
-            neg_ids = [""]
+            parsed = self._parse_inline_triplet_row(
+                row,
+                query_field="anchor",
+                index=index,
+            )
         elif "query_id" in row and "positive_id" in row:
-            qid = str(row["query_id"])
-            pos_id_value: Any | None = row.get("positive_id")
-            neg_id_value: Any | None = row.get("negative_id")
-            pos_ids = ["" if pos_id_value is None else str(pos_id_value)]
-            neg_ids = ["" if neg_id_value is None else str(neg_id_value)]
+            parsed = self._parse_query_positive_id_row(row)
         elif "pos_doc_ids" in row or "neg_doc_ids" in row:
-            qid = str(row.get("query_id") or row.get("qid") or row.get("_id") or index)
-            pos_ids = [
-                str(doc_id)
-                for doc_id in row.get("pos_doc_ids") or []
-                if doc_id
-            ]
-            neg_ids = [
-                str(doc_id)
-                for doc_id in row.get("neg_doc_ids") or []
-                if doc_id
-            ]
-            pos_ids = sample_items(pos_ids, num_positives, rng)
-            neg_ids = sample_items(neg_ids, num_negatives, rng)
+            parsed = self._parse_pos_neg_doc_ids_row(
+                row,
+                index=index,
+                num_positives=num_positives,
+                num_negatives=num_negatives,
+                rng=rng,
+            )
         elif "query_id" in row and "doc_ids" in row and "labels" in row:
-            qid = str(row["query_id"])
-            row_doc_ids = [str(doc_id) for doc_id in row["doc_ids"]]
-            labels = [float(value) for value in row["labels"]]
-            score_list: list[float] | None = None
-            if isinstance(score_values, (list, tuple)) and len(score_values) == len(
-                row_doc_ids
-            ):
-                score_list = [float(score) for score in score_values]
-
-            pos_pairs: list[tuple[str, float | None]] = []
-            neg_pairs: list[tuple[str, float | None]] = []
-            for idx, (doc_id, label) in enumerate(zip(row_doc_ids, labels)):
-                score: float | None = None
-                if score_list is not None:
-                    score = score_list[idx]
-                if label > 0:
-                    pos_pairs.append((doc_id, score))
-                else:
-                    neg_pairs.append((doc_id, score))
-
-            pos_ids = sample_items(
-                [doc_id for doc_id, _ in pos_pairs], num_positives, rng
+            parsed = self._parse_labeled_doc_ids_row(
+                row,
+                num_positives=num_positives,
+                num_negatives=num_negatives,
+                rng=rng,
+                score_values=score_values,
             )
-            neg_ids = self._select_negative_ids(
-                neg_pairs, num_negatives=num_negatives, rng=rng
-            )
-            if isinstance(score_values, (list, tuple)) and len(score_values) == len(
-                row_doc_ids
-            ):
-                score_map = {
-                    doc_id: float(score)
-                    for doc_id, score in zip(row_doc_ids, score_values)
-                }
-                pos_scores = [score_map.get(doc_id, float("nan")) for doc_id in pos_ids]
-                neg_scores = [score_map.get(doc_id, float("nan")) for doc_id in neg_ids]
         else:
             raise ValueError(f"Unsupported dataset row format: {row.keys()}")
 
+        pos_scores: list[float] | None = parsed.pos_scores
+        neg_scores: list[float] | None = parsed.neg_scores
         if pos_scores is None or neg_scores is None:
-            doc_ids: list[str] = pos_ids + neg_ids
+            doc_ids: list[str] = parsed.pos_ids + parsed.neg_ids
             inline_scores: list[float] | None = parse_inline_scores(
                 score_values, doc_ids
             )
             if inline_scores is not None and len(inline_scores) == len(doc_ids):
-                pos_scores = inline_scores[: len(pos_ids)]
-                neg_scores = inline_scores[len(pos_ids) :]
+                pos_scores = inline_scores[: len(parsed.pos_ids)]
+                neg_scores = inline_scores[len(parsed.pos_ids) :]
 
         return MetaItem(
-            qid=str(qid),
-            pos_ids=pos_ids,
-            neg_ids=neg_ids,
+            qid=str(parsed.qid),
+            pos_ids=parsed.pos_ids,
+            neg_ids=parsed.neg_ids,
             pos_scores=pos_scores,
             neg_scores=neg_scores,
-            query_text=query_text,
-            pos_texts=pos_texts,
-            neg_texts=neg_texts,
+            query_text=parsed.query_text,
+            pos_texts=parsed.pos_texts,
+            neg_texts=parsed.neg_texts,
         )
 
     def _select_negative_ids(

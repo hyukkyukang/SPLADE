@@ -12,9 +12,10 @@ torch_compile_mode: default
 # Static graph DDP is unstable for this backbone/head path and can trigger
 # reducer hook asserts; keep DDP in dynamic mode by default.
 static_graph: false
-find_unused_parameters: true
+find_unused_parameters: false
 batch_size: 4
 eval_batch_size: 2
 grad_accumulation: 2
-num_workers: 4
+num_workers: 8
+prefetch_factor: 4
 dataloader_multiprocessing_context: fork

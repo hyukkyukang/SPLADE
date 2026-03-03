@@ -178,6 +178,27 @@ class SPLADETrainingModule(L.LightningModule):
         sparsity_ratio: torch.Tensor = 1.0 - (mean_active_dims / vocab_dim)
         return mean_active_dims, sparsity_ratio
 
+    def _add_sparsity_metrics(
+        self,
+        *,
+        metrics: dict[str, torch.Tensor],
+        q_reps: torch.Tensor,
+        flat_doc_reps: torch.Tensor,
+        flat_doc_mask: torch.Tensor,
+    ) -> None:
+        q_active_dims: torch.Tensor
+        q_sparsity_ratio: torch.Tensor
+        q_active_dims, q_sparsity_ratio = self._compute_active_dims_and_sparsity(q_reps)
+        doc_active_dims: torch.Tensor
+        doc_sparsity_ratio: torch.Tensor
+        doc_active_dims, doc_sparsity_ratio = self._compute_active_dims_and_sparsity(
+            flat_doc_reps, flat_doc_mask
+        )
+        metrics["q_active_dims"] = q_active_dims
+        metrics["doc_active_dims"] = doc_active_dims
+        metrics["q_sparsity_ratio"] = q_sparsity_ratio
+        metrics["doc_sparsity_ratio"] = doc_sparsity_ratio
+
     def _training_step_shared(
         self,
         batch: dict[str, torch.Tensor],
@@ -307,18 +328,6 @@ class SPLADETrainingModule(L.LightningModule):
                 reg_total_frac_pre_reg: torch.Tensor = reg_total_contrib / (
                     pre_reg_loss.abs().clamp(min=eps)
                 )
-                q_active_dims: torch.Tensor
-                q_sparsity_ratio: torch.Tensor
-                q_active_dims, q_sparsity_ratio = self._compute_active_dims_and_sparsity(
-                    q_reps
-                )
-                doc_active_dims: torch.Tensor
-                doc_sparsity_ratio: torch.Tensor
-                doc_active_dims, doc_sparsity_ratio = (
-                    self._compute_active_dims_and_sparsity(
-                        flat_doc_reps_for_mag, flat_doc_mask_for_mag
-                    )
-                )
                 q_reg_sum_equiv: torch.Tensor = q_reg_fp32
                 d_reg_sum_equiv: torch.Tensor = d_reg_fp32
                 q_reg_mean_equiv: torch.Tensor = q_reg_fp32 / vocab_dim_tensor
@@ -338,10 +347,12 @@ class SPLADETrainingModule(L.LightningModule):
                 metrics["reg_total_frac_loss"] = reg_total_frac_loss
                 metrics["reg_total_frac_pre_reg"] = reg_total_frac_pre_reg
                 metrics["vocab_size"] = vocab_dim_tensor
-                metrics["q_active_dims"] = q_active_dims
-                metrics["doc_active_dims"] = doc_active_dims
-                metrics["q_sparsity_ratio"] = q_sparsity_ratio
-                metrics["doc_sparsity_ratio"] = doc_sparsity_ratio
+                self._add_sparsity_metrics(
+                    metrics=metrics,
+                    q_reps=q_reps,
+                    flat_doc_reps=flat_doc_reps_for_mag,
+                    flat_doc_mask=flat_doc_mask_for_mag,
+                )
                 if str(self.reg_cfg.type).lower() == "flops":
                     metrics["q_flops_proxy_sum_equiv"] = q_reg_sum_equiv
                     metrics["d_flops_proxy_sum_equiv"] = d_reg_sum_equiv
@@ -349,22 +360,12 @@ class SPLADETrainingModule(L.LightningModule):
                     metrics["d_flops_proxy_mean_equiv"] = d_reg_mean_equiv
         elif stage == "val":
             with torch.no_grad():
-                q_active_dims: torch.Tensor
-                q_sparsity_ratio: torch.Tensor
-                q_active_dims, q_sparsity_ratio = self._compute_active_dims_and_sparsity(
-                    q_reps
+                self._add_sparsity_metrics(
+                    metrics=metrics,
+                    q_reps=q_reps,
+                    flat_doc_reps=flat_doc_reps_for_mag,
+                    flat_doc_mask=flat_doc_mask_for_mag,
                 )
-                doc_active_dims: torch.Tensor
-                doc_sparsity_ratio: torch.Tensor
-                doc_active_dims, doc_sparsity_ratio = (
-                    self._compute_active_dims_and_sparsity(
-                        flat_doc_reps_for_mag, flat_doc_mask_for_mag
-                    )
-                )
-                metrics["q_active_dims"] = q_active_dims
-                metrics["doc_active_dims"] = doc_active_dims
-                metrics["q_sparsity_ratio"] = q_sparsity_ratio
-                metrics["doc_sparsity_ratio"] = doc_sparsity_ratio
 
         if return_reps:
             return metrics, {
@@ -418,6 +419,25 @@ class SPLADETrainingModule(L.LightningModule):
             doc_mask=doc_mask,
             world_size=int(self.trainer.world_size),
             global_rank=int(self.trainer.global_rank),
+        )
+
+    def _log_validation_metric(
+        self,
+        *,
+        name: str,
+        value: torch.Tensor | None,
+        batch_size: int,
+    ) -> None:
+        if value is None:
+            return
+        self.log(
+            name,
+            value.detach(),
+            on_step=False,
+            on_epoch=True,
+            prog_bar=False,
+            sync_dist=True,
+            batch_size=batch_size,
         )
 
     def _resolve_nanobeir_device(self) -> torch.device:
@@ -518,64 +538,20 @@ class SPLADETrainingModule(L.LightningModule):
             sync_dist=True,
             batch_size=batch_size,
         )
-        if "q_rep_magnitude" in metrics:
-            self.log(
-                "val_q_rep_magnitude",
-                metrics["q_rep_magnitude"].detach(),
-                on_step=False,
-                on_epoch=True,
-                prog_bar=False,
-                sync_dist=True,
-                batch_size=batch_size,
-            )
-        if "doc_rep_magnitude" in metrics:
-            self.log(
-                "val_doc_rep_magnitude",
-                metrics["doc_rep_magnitude"].detach(),
-                on_step=False,
-                on_epoch=True,
-                prog_bar=False,
-                sync_dist=True,
-                batch_size=batch_size,
-            )
-        if "q_active_dims" in metrics:
-            self.log(
-                "val_q_active_dims",
-                metrics["q_active_dims"].detach(),
-                on_step=False,
-                on_epoch=True,
-                prog_bar=False,
-                sync_dist=True,
-                batch_size=batch_size,
-            )
-        if "doc_active_dims" in metrics:
-            self.log(
-                "val_doc_active_dims",
-                metrics["doc_active_dims"].detach(),
-                on_step=False,
-                on_epoch=True,
-                prog_bar=False,
-                sync_dist=True,
-                batch_size=batch_size,
-            )
-        if "q_sparsity_ratio" in metrics:
-            self.log(
-                "val_q_sparsity_ratio",
-                metrics["q_sparsity_ratio"].detach(),
-                on_step=False,
-                on_epoch=True,
-                prog_bar=False,
-                sync_dist=True,
-                batch_size=batch_size,
-            )
-        if "doc_sparsity_ratio" in metrics:
-            self.log(
-                "val_doc_sparsity_ratio",
-                metrics["doc_sparsity_ratio"].detach(),
-                on_step=False,
-                on_epoch=True,
-                prog_bar=False,
-                sync_dist=True,
+        metric_names: tuple[tuple[str, str], ...] = (
+            ("val_q_rep_magnitude", "q_rep_magnitude"),
+            ("val_doc_rep_magnitude", "doc_rep_magnitude"),
+            ("val_q_active_dims", "q_active_dims"),
+            ("val_doc_active_dims", "doc_active_dims"),
+            ("val_q_sparsity_ratio", "q_sparsity_ratio"),
+            ("val_doc_sparsity_ratio", "doc_sparsity_ratio"),
+        )
+        log_name: str
+        metric_key: str
+        for log_name, metric_key in metric_names:
+            self._log_validation_metric(
+                name=log_name,
+                value=metrics.get(metric_key),
                 batch_size=batch_size,
             )
 

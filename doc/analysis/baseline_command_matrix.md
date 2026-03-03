@@ -2,19 +2,18 @@
 
 This matrix defines the baseline commands used for reproducible runtime/throughput tracking.
 
-## 1) Train Throughput Baseline (sidecar/hybrid/no-pretokenize)
+## 1) Train Throughput Baseline
 
 ```bash
-python script/benchmark/compare_pretokenize_variants.py \
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+python script/train.py \
   --config-name train_embeddinggemma_splade_v2_pp \
-  --model-name splade_v2_pp_embeddinggemma_300m_lsr \
-  --cuda-visible-devices 0,1,2,3 \
-  --output-json benchmark_results/pretokenize_compare_latest.json
+  training.num_devices=4 \
+  training.strategy=ddp
 ```
 
 Reference snapshot:
-- `benchmark_results/pretokenize_compare_latest.json`
-- `benchmark_results/pretokenize_compare_latest.md`
+- `benchmark_results/*train*`
 
 ## 2) Validation Runtime Baseline (MSMARCO rerank + NanoBEIR)
 
@@ -38,4 +37,3 @@ python script/evaluation.py \
 ```bash
 bash script/smoke_train_encode_index_eval.sh
 ```
-

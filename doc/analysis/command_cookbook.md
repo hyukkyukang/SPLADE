@@ -78,14 +78,3 @@ python script/index.py \
   encoding.index_dir=/abs/path/to/index_out
 ```
 
-## Pretokenize Benchmark
-
-Three-way sidecar/hybrid/no-pretokenize comparison:
-
-```bash
-python script/benchmark/compare_pretokenize_variants.py \
-  --config-name train_embeddinggemma_splade_v2_pp \
-  --model-name splade_v2_pp_embeddinggemma_300m_lsr \
-  --cuda-visible-devices 0,1,2,3
-```
-

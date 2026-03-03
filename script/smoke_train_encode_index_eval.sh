@@ -28,9 +28,7 @@ python script/train.py \
   training.mlflow.enabled=false \
   nanobeir.enabled=false \
   train_dataset.hf_max_samples=128 \
-  val_dataset.hf_max_samples=64 \
-  train_dataset.pretokenize.enabled=false \
-  val_dataset.pretokenize.enabled=false
+  val_dataset.hf_max_samples=64
 
 if [[ ! -f "${CHECKPOINT_PATH}" ]]; then
   echo "[smoke] missing checkpoint: ${CHECKPOINT_PATH}" >&2

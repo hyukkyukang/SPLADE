@@ -8,7 +8,7 @@ import unicodedata
 from pathlib import Path
 from typing import Any
 
-from transformers import AddedToken, PreTrainedTokenizerBase
+from transformers import AddedToken
 from transformers.tokenization_python import PreTrainedTokenizer
 
 try:
@@ -343,8 +343,6 @@ class AnnaTokenizer(PreTrainedTokenizer):
         token_ids_0: list[int],
         token_ids_1: list[int] | None = None,
     ) -> list[int]:
-        sep = self.sep_token_id
-        cls = self.cls_token_id
         if token_ids_1 is None:
             return [0] * (len(token_ids_0) + 2)
         return [0] * (len(token_ids_0) + 1) + [1] * (len(token_ids_1) + 1)
@@ -462,7 +460,9 @@ class AnnaTokenizerFast(AnnaTokenizer):
 
     @property
     def is_fast(self) -> bool:
-        return self._backend is not None
+        # Keep fast-tokenizer contract stable for HF auto-loading paths.
+        # Backend availability only affects implementation path, not class role.
+        return True
 
     def _tokenize(self, text: str) -> list[str]:
         if self._backend is None:

@@ -23,19 +23,12 @@ This document captures the current module boundaries after the SPLADE refactor.
 ## Data Pipeline (`src/data/pd_module`)
 
 - `train.py`
-  - High-level data module composition.
-- `pretokenize_lifecycle.py`
-  - Cache manifest validation, lock/done lifecycle, prepare/load decisions.
-- `pretokenize_writer.py`
-  - Cache shard writing and row-index generation.
-- `pretokenize_runtime_reader.py`
-  - Worker-local streaming cache setup and meta-row-pointer reads.
-- `pretokenize_row_materializer.py`
-  - `__getitem__` materialization to `TrainingDataItem`.
-- `pretokenize_backend.py`
-  - Backend protocol/FS implementation for pretokenize artifacts.
-- `token_store.py`
-  - Streaming token store over row indexes + sidecar/parquet shards.
+  - High-level training data module composition.
+  - Direct runtime tokenization-based `__getitem__` path.
+- `utils.py`
+  - Shared tokenization helpers and rerank input materialization.
+- `base.py`
+  - Dataset loading policy and required text/id artifact warmup hooks.
 
 ## Evaluation And Validation
 
@@ -52,4 +45,3 @@ This document captures the current module boundaries after the SPLADE refactor.
   - Central state-dict aliasing for checkpoint key compatibility.
 - `src/utils/metrics_io.py`
   - Shared metric serialization and validation-result formatting.
-

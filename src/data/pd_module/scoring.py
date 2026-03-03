@@ -6,16 +6,19 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 import tqdm
 from pathlib import Path
-from typing import Any, Callable, Iterable, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 from datasets import Dataset, DownloadConfig, load_dataset
 from omegaconf import DictConfig
-import torch
 from torch.utils.data import Dataset as TorchDataset
 
 from src.data.utils import id_to_idx, resolve_dataset_column
+from src.data.pd_module.scoring_runtime import (
+    run_prepare_data_on_primary,
+    run_setup_with_barrier,
+)
 from src.utils.logging import get_logger, log_if_rank_zero
 from src.utils.script_setup import normalize_optional_str
 
@@ -715,54 +718,43 @@ class ScoringPDModule(TorchDataset):
         self._positives_by_qid: dict[str, list[str]] | None = None
 
     def prepare_data(self) -> None:
-        if torch.distributed.is_available() and torch.distributed.is_initialized():
-            if int(torch.distributed.get_rank()) != 0:
-                return
-        local_files_only = _resolve_local_files_only(
-            self._scoring_cfg, is_primary=True
+        def _prepare(local_files_only: bool) -> None:
+            _apply_hf_offline_mode(local_files_only)
+            _ = self._load_score_dataset(local_files_only=local_files_only)
+            _ = self._load_query_dataset(local_files_only=local_files_only)
+            _ = self._load_corpus_dataset(local_files_only=local_files_only)
+            if self._positives_settings is not None and self._positives_settings.enabled:
+                cache_path_value: str | None = self._positives_settings.cache_path
+                if cache_path_value is None:
+                    download_config = _resolve_download_config(
+                        self._scoring_cfg, local_files_only=local_files_only
+                    )
+                    _ = load_dataset(
+                        self._positives_settings.hf_name,
+                        name=self._positives_settings.hf_subset,
+                        split=self._positives_settings.hf_split,
+                        cache_dir=self._positives_settings.hf_cache_dir,
+                        streaming=False,
+                        data_files=_normalize_data_files(
+                            self._positives_settings.hf_data_files
+                        ),
+                        download_config=download_config,
+                    )
+
+        run_prepare_data_on_primary(
+            local_files_only_for_rank=lambda is_primary: _resolve_local_files_only(
+                self._scoring_cfg, is_primary=is_primary
+            ),
+            prepare_fn=_prepare,
         )
-        _apply_hf_offline_mode(local_files_only)
-        _ = self._load_score_dataset(local_files_only=local_files_only)
-        _ = self._load_query_dataset(local_files_only=local_files_only)
-        _ = self._load_corpus_dataset(local_files_only=local_files_only)
-        if self._positives_settings is not None and self._positives_settings.enabled:
-            cache_path_value: str | None = self._positives_settings.cache_path
-            if cache_path_value is None:
-                download_config = _resolve_download_config(
-                    self._scoring_cfg, local_files_only=local_files_only
-                )
-                _ = load_dataset(
-                    self._positives_settings.hf_name,
-                    name=self._positives_settings.hf_subset,
-                    split=self._positives_settings.hf_split,
-                    cache_dir=self._positives_settings.hf_cache_dir,
-                    streaming=False,
-                    data_files=_normalize_data_files(
-                        self._positives_settings.hf_data_files
-                    ),
-                    download_config=download_config,
-                )
 
     def setup(self) -> None:
-        if torch.distributed.is_available() and torch.distributed.is_initialized():
-            is_primary = int(torch.distributed.get_rank()) == 0
-            local_files_only = _resolve_local_files_only(
+        run_setup_with_barrier(
+            local_files_only_for_rank=lambda is_primary: _resolve_local_files_only(
                 self._scoring_cfg, is_primary=is_primary
-            )
-            if is_primary:
-                self._load_all_datasets(local_files_only=local_files_only)
-            torch.distributed.barrier()
-            if not is_primary:
-                local_files_only = _resolve_local_files_only(
-                    self._scoring_cfg, is_primary=False
-                )
-                self._load_all_datasets(local_files_only=local_files_only)
-        else:
-            self._load_all_datasets(
-                local_files_only=_resolve_local_files_only(
-                    self._scoring_cfg, is_primary=True
-                )
-            )
+            ),
+            load_all_fn=self._load_all_datasets,
+        )
 
         query_id_column: str = _resolve_configured_column(
             self._score_dataset_cfg,
@@ -813,7 +805,7 @@ class ScoringPDModule(TorchDataset):
             if positives_enabled:
                 log_if_rank_zero(
                     logger,
-                    f"Collecting qids...",
+                    "Collecting qids...",
                     level="info",
                 )
                 allowed_qids: set[str] = _collect_qids(

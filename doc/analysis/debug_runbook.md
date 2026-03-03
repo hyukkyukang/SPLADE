@@ -1,35 +1,6 @@
 # Debug Runbook
 
-This runbook focuses on recurring failure modes in cache, DDP, compile, and MLflow.
-
-## Pretokenize Cache Issues
-
-Symptoms:
-- startup hangs before first step
-- missing sidecar/index/runtime key errors
-- stale lock file blocks cache build
-
-Checks:
-
-```bash
-ls -lah data/cache/pretokenized/<cache_name>
-```
-
-```bash
-python - <<'PY'
-from pathlib import Path
-import json
-p = Path("data/cache/pretokenized/<cache_name>/manifest.json")
-print(p.exists(), p)
-if p.exists():
-    print(json.loads(p.read_text())["cache_version"])
-PY
-```
-
-Actions:
-- clear stale lock/done artifacts only when no build is active
-- run with `train_dataset.pretokenize.overwrite=true` when schema changed
-- verify `storage_format`, `loading_mode`, and sidecar flags are consistent
+This runbook focuses on recurring failure modes in DDP, compile, and MLflow.
 
 ## DDP + Torch Compile Instability
 
@@ -70,7 +41,7 @@ nvidia-smi
 
 Actions:
 - reduce per-rank batch size, then re-test (`bs=16, ga=2` style probes)
-- verify dataloader workers and pretokenize mode
+- verify dataloader workers/prefetch settings and dataset IO path
 - ensure validation intervals are not too frequent for throughput
 
 ## MLflow Connectivity
@@ -92,4 +63,3 @@ Actions:
 - for local debug, disable MLflow:
   - `training.mlflow.enabled=false`
 - verify network path and server availability before rerun
-

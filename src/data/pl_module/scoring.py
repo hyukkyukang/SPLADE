@@ -4,7 +4,7 @@ import lightning as L
 import torch
 from omegaconf import DictConfig
 from torch.utils.data import DataLoader, Sampler
-from transformers import AutoTokenizer, PreTrainedTokenizerBase
+from transformers import PreTrainedTokenizerBase
 
 from src.data.pd_module.scoring import (
     ScoringItem,
@@ -13,6 +13,7 @@ from src.data.pd_module.scoring import (
 )
 from src.data.sampler import NonPaddingDistributedSampler
 from src.utils.script_setup import normalize_optional_str
+from src.utils.transformers import build_tokenizer
 
 
 class ScoringCollator:
@@ -44,17 +45,13 @@ class ScoringCollator:
     def _resolve_tokenizer(self) -> PreTrainedTokenizerBase:
         if self._tokenizer is None:
             name = self._tokenizer_name or self._model_name
-            self._tokenizer = AutoTokenizer.from_pretrained(
+            self._tokenizer = build_tokenizer(
                 name,
+                use_fast_tokenizer=bool(self._use_fast_tokenizer),
+                trust_remote_code=bool(self._trust_remote_code),
+                require_fast_tokenizer=bool(self._require_fast_tokenizer),
                 local_files_only=self._local_files_only,
-                use_fast=bool(self._use_fast_tokenizer),
-                trust_remote_code=self._trust_remote_code,
             )
-            if bool(self._require_fast_tokenizer) and not bool(self._tokenizer.is_fast):
-                raise ValueError(
-                    "Fast tokenizer is required for scoring but a slow tokenizer "
-                    f"was loaded: {name}"
-                )
         return self._tokenizer
 
     def __call__(self, batch: Iterable[ScoringItem | None]) -> dict[str, Any] | None:
@@ -88,6 +85,10 @@ class ScoringCollator:
         tokenizer = self._resolve_tokenizer()
         tokenize_chunk_size: int = int(self._tokenize_chunk_size)
         if tokenize_chunk_size <= 0:
+            tokenize_chunk_size = len(pair_queries)
+        if not isinstance(tokenizer, PreTrainedTokenizerBase):
+            # Test doubles and custom tokenizers are often stateless callables.
+            # Keep one-shot tokenization for deterministic call-observable behavior.
             tokenize_chunk_size = len(pair_queries)
         pair_tokens_by_key: dict[str, list[torch.Tensor]] = {}
         for start in range(0, len(pair_queries), tokenize_chunk_size):

@@ -47,6 +47,13 @@ class TrainDataModule(L.LightningDataModule):
         )
 
     # --- Protected methods ---
+    def _validation_enabled(self) -> bool:
+        raw_value: Any = self.cfg.training.get("limit_val_batches", 1.0)
+        try:
+            return float(raw_value) > 0.0
+        except (TypeError, ValueError):
+            return bool(raw_value)
+
     def _build_dataset(
         self,
         cfg: DictConfig,
@@ -150,13 +157,15 @@ class TrainDataModule(L.LightningDataModule):
     def prepare_data(self) -> None:
         train_dataset: TrainingPDModule = self.train_dataset
         train_dataset.prepare_data()
-        val_dataset: TrainingPDModule = self.val_dataset
-        val_dataset.prepare_data()
+        if self._validation_enabled():
+            val_dataset: TrainingPDModule = self.val_dataset
+            val_dataset.prepare_data()
 
     def setup(self, stage: str | None = None) -> None:
         _ = stage
         self.train_dataset.setup()
-        self.val_dataset.setup()
+        if self._validation_enabled():
+            self.val_dataset.setup()
 
     def train_dataloader(self) -> DataLoader:
         return self._make_dataloader(
@@ -166,7 +175,9 @@ class TrainDataModule(L.LightningDataModule):
             drop_last=True,
         )
 
-    def val_dataloader(self) -> DataLoader:
+    def val_dataloader(self) -> DataLoader | list[DataLoader]:
+        if not self._validation_enabled():
+            return []
         return self._make_dataloader(
             dataset=self.val_dataset,
             batch_size=int(self.cfg.training.eval_batch_size),

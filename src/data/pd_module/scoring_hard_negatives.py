@@ -1,8 +1,7 @@
 from dataclasses import dataclass
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Iterable, Mapping
 
 import pyarrow as pa
-import torch
 from datasets import Dataset, load_dataset
 from omegaconf import DictConfig
 from torch.utils.data import Dataset as TorchDataset
@@ -13,13 +12,19 @@ from src.data.pd_module.scoring import (
     _build_id_to_idx_map,
     _column_text_value,
     _apply_hf_offline_mode,
+    _dedupe_preserve_order,
     _load_dataset_from_config,
     _normalize_data_files,
+    _resolve_configured_column,
     _resolve_download_config,
     _resolve_local_files_only,
 )
+from src.data.pd_module.scoring_runtime import (
+    run_prepare_data_on_primary,
+    run_setup_with_barrier,
+)
 from src.data.utils import resolve_dataset_column
-from src.utils.logging import get_logger, log_if_rank_zero
+from src.utils.logging import get_logger
 from src.utils.script_setup import normalize_optional_str
 
 logger = get_logger("HardNegativesScoringPDModule")
@@ -50,39 +55,6 @@ def _parse_hard_negatives_settings(cfg: DictConfig) -> HardNegativesSettings:
         max_positives=max_positives,
         require_negatives=require_negatives,
     )
-
-
-def _resolve_configured_column(
-    configured: str | None,
-    column_names: Iterable[str],
-    candidates: Sequence[str],
-    *,
-    field_name: str,
-) -> str:
-    normalized: str | None = normalize_optional_str(configured)
-    if normalized is not None:
-        if normalized in column_names:
-            return normalized
-        log_if_rank_zero(
-            logger,
-            f"Configured {field_name}={normalized} not found; falling back.",
-            level="warning",
-        )
-    for name in candidates:
-        if name in column_names:
-            return name
-    raise ValueError(f"Unable to resolve column from {list(column_names)}")
-
-
-def _dedupe_preserve_order(items: Iterable[str]) -> list[str]:
-    seen: set[str] = set()
-    output: list[str] = []
-    for item in items:
-        if not item or item in seen:
-            continue
-        seen.add(item)
-        output.append(item)
-    return output
 
 
 def _coerce_id_list(values: Any) -> list[str]:
@@ -162,61 +134,50 @@ class HardNegativesScoringPDModule(TorchDataset):
         self._doc_text_lookup: Any | None = None
 
     def prepare_data(self) -> None:
-        if torch.distributed.is_available() and torch.distributed.is_initialized():
-            if int(torch.distributed.get_rank()) != 0:
-                return
-        local_files_only = _resolve_local_files_only(
-            self._scoring_cfg, is_primary=True
+        def _prepare(local_files_only: bool) -> None:
+            _apply_hf_offline_mode(local_files_only)
+            _ = self._load_score_dataset(local_files_only=local_files_only)
+            _ = self._load_query_dataset(local_files_only=local_files_only)
+            _ = self._load_corpus_dataset(local_files_only=local_files_only)
+
+        run_prepare_data_on_primary(
+            local_files_only_for_rank=lambda is_primary: _resolve_local_files_only(
+                self._scoring_cfg, is_primary=is_primary
+            ),
+            prepare_fn=_prepare,
         )
-        _apply_hf_offline_mode(local_files_only)
-        _ = self._load_score_dataset(local_files_only=local_files_only)
-        _ = self._load_query_dataset(local_files_only=local_files_only)
-        _ = self._load_corpus_dataset(local_files_only=local_files_only)
 
     def setup(self) -> None:
-        if torch.distributed.is_available() and torch.distributed.is_initialized():
-            is_primary = int(torch.distributed.get_rank()) == 0
-            local_files_only = _resolve_local_files_only(
+        run_setup_with_barrier(
+            local_files_only_for_rank=lambda is_primary: _resolve_local_files_only(
                 self._scoring_cfg, is_primary=is_primary
-            )
-            if is_primary:
-                self._load_all_datasets(local_files_only=local_files_only)
-            torch.distributed.barrier()
-            if not is_primary:
-                local_files_only = _resolve_local_files_only(
-                    self._scoring_cfg, is_primary=False
-                )
-                self._load_all_datasets(local_files_only=local_files_only)
-        else:
-            self._load_all_datasets(
-                local_files_only=_resolve_local_files_only(
-                    self._scoring_cfg, is_primary=True
-                )
-            )
+            ),
+            load_all_fn=self._load_all_datasets,
+        )
 
         query_id_column: str = _resolve_configured_column(
-            str(self._score_dataset_cfg.query_id_column),
+            self._score_dataset_cfg,
+            "query_id_column",
             self._query_dataset.column_names,
             ("query_id", "qid", "_id", "id"),
-            field_name="query_id_column",
         )
         query_text_column_name: str = _resolve_configured_column(
-            str(self._score_dataset_cfg.query_text_column),
+            self._score_dataset_cfg,
+            "query_text_column",
             self._query_dataset.column_names,
             ("text", "query"),
-            field_name="query_text_column",
         )
         corpus_id_column: str = _resolve_configured_column(
-            str(self._score_dataset_cfg.corpus_id_column),
+            self._score_dataset_cfg,
+            "corpus_id_column",
             self._corpus_dataset.column_names,
             ("doc_id", "corpus_id", "passage_id", "_id", "id"),
-            field_name="corpus_id_column",
         )
         corpus_text_column_name: str = _resolve_configured_column(
-            str(self._score_dataset_cfg.corpus_text_column),
+            self._score_dataset_cfg,
+            "corpus_text_column",
             self._corpus_dataset.column_names,
             ("text", "passage", "contents"),
-            field_name="corpus_text_column",
         )
 
         self._query_id_to_idx = _build_id_to_idx_map(
