@@ -4,6 +4,7 @@ import logging
 import math
 import os
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any, Sequence
 
 import matplotlib.pyplot as plt
@@ -11,6 +12,8 @@ import numpy as np
 import torch
 from datasets import Dataset, IterableDataset, load_dataset
 from transformers import AutoModelForMaskedLM, AutoTokenizer
+
+from src.utils.transformers import build_masked_lm_model, build_tokenizer
 
 LOGGER: logging.Logger = logging.getLogger("scripts.experiment.logit_stats")
 
@@ -68,8 +71,8 @@ class RunningLogitStats:
 
 
 @dataclass
-class RunningCountStats:
-    """Accumulate streaming statistics for count values."""
+class RunningScalarStats:
+    """Accumulate streaming statistics for scalar values."""
 
     count: int = 0
     sum: float = 0.0
@@ -78,7 +81,7 @@ class RunningCountStats:
     max_value: float = float("-inf")
 
     def update(self, values: torch.Tensor) -> None:
-        """Update running stats from a batch of counts."""
+        """Update running stats from a batch of scalar values."""
         values_fp32: torch.Tensor = values.float()
         batch_count: int = int(values_fp32.numel())
         if batch_count == 0:
@@ -117,6 +120,12 @@ class ModelResult:
     stats: dict[str, float]
     sample_values: np.ndarray
     vocab_survival: dict[str, float]
+    survived_vocab_logit_stats: dict[str, float]
+    pooled_activation_stats: dict[str, float]
+    nonzero_pooled_activation_stats: dict[str, float]
+    pooled_activation_l1_stats: dict[str, float]
+    pooled_activation_l2_stats: dict[str, float]
+    pooled_activation_max_stats: dict[str, float]
 
     def to_json(self) -> dict[str, Any]:
         """Convert to JSON-safe dict."""
@@ -172,6 +181,18 @@ def _normalize_optional_str(value: str | None) -> str | None:
     if normalized.lower() in {"", "none", "null"}:
         return None
     return normalized
+
+
+def _as_dict(value: Any) -> dict[str, Any]:
+    """Safely coerce mapping-like objects into plain dicts."""
+    if isinstance(value, dict):
+        return dict(value)
+    if hasattr(value, "items"):
+        try:
+            return {str(key): item for key, item in value.items()}
+        except Exception:  # pylint: disable=broad-except
+            return {}
+    return {}
 
 
 def _apply_dataset_shuffle(
@@ -301,6 +322,239 @@ def _sample_logits(
     return sample_values.numpy()
 
 
+def _resolve_checkpoint_path(model_name: str) -> Path | None:
+    """Resolve a checkpoint path from a model name/path when possible."""
+    model_path: Path = Path(model_name).expanduser()
+    if not model_path.exists():
+        return None
+    if model_path.is_file() and model_path.suffix == ".ckpt":
+        return model_path
+    if not model_path.is_dir():
+        return None
+
+    prioritized: tuple[str, ...] = ("best.ckpt", "last.ckpt", "mteb-best.ckpt")
+    candidate_name: str
+    for candidate_name in prioritized:
+        candidate_path: Path = model_path / "checkpoints" / candidate_name
+        if candidate_path.is_file():
+            return candidate_path
+    for candidate_name in prioritized:
+        candidate_path = model_path / candidate_name
+        if candidate_path.is_file():
+            return candidate_path
+
+    checkpoint_dir: Path = model_path / "checkpoints"
+    if checkpoint_dir.is_dir():
+        checkpoint_files: list[Path] = sorted(checkpoint_dir.glob("*.ckpt"))
+        if checkpoint_files:
+            return checkpoint_files[0]
+    checkpoint_files = sorted(model_path.glob("*.ckpt"))
+    if checkpoint_files:
+        return checkpoint_files[0]
+    return None
+
+
+def _load_checkpoint_payload(model_name: str) -> tuple[Path, dict[str, Any]] | None:
+    """Load checkpoint payload if model_name refers to a checkpoint source."""
+    checkpoint_path: Path | None = _resolve_checkpoint_path(model_name)
+    if checkpoint_path is None:
+        return None
+    checkpoint: Any = torch.load(str(checkpoint_path), map_location="cpu")
+    if not isinstance(checkpoint, dict):
+        return None
+    return checkpoint_path, checkpoint
+
+
+def _resolve_model_source_from_checkpoint(
+    checkpoint_path: Path, checkpoint: dict[str, Any]
+) -> str | None:
+    """Resolve base Hugging Face model source from checkpoint hyperparameters."""
+    hparams: dict[str, Any] = _as_dict(
+        checkpoint.get("hyper_parameters", checkpoint.get("hparams"))
+    )
+    model_hparams: dict[str, Any] = _as_dict(hparams.get("model"))
+    source_value: str | None = _normalize_optional_str(
+        str(model_hparams.get("huggingface_name"))
+        if model_hparams.get("huggingface_name") is not None
+        else None
+    )
+    if source_value is None:
+        return None
+
+    root_dir_path: str = str(Path.cwd())
+    root_dir_value: str | None = _normalize_optional_str(
+        str(hparams.get("root_dir_path")) if hparams.get("root_dir_path") is not None else None
+    )
+    if root_dir_value is not None:
+        root_dir_path = root_dir_value
+    source_value = source_value.replace("${root_dir_path}", root_dir_path)
+
+    candidate: Path = Path(source_value).expanduser()
+    if candidate.is_absolute():
+        return str(candidate) if candidate.exists() else source_value
+
+    search_roots: list[Path] = [Path.cwd(), checkpoint_path.parent]
+    if checkpoint_path.parent.name == "checkpoints":
+        search_roots.append(checkpoint_path.parent.parent)
+    search_roots.append(Path(root_dir_path).expanduser())
+
+    seen_roots: set[str] = set()
+    root: Path
+    for root in search_roots:
+        root_key: str = str(root.resolve())
+        if root_key in seen_roots:
+            continue
+        seen_roots.add(root_key)
+        resolved: Path = (root / candidate).resolve()
+        if resolved.exists():
+            return str(resolved)
+    return source_value
+
+
+def _extract_tensor_state_dict(state_dict_like: Any) -> dict[str, torch.Tensor]:
+    """Extract tensor parameters from a checkpoint state dict payload."""
+    if not isinstance(state_dict_like, dict):
+        return {}
+    tensors: dict[str, torch.Tensor] = {}
+    raw_key: Any
+    raw_value: Any
+    for raw_key, raw_value in state_dict_like.items():
+        if isinstance(raw_value, torch.Tensor):
+            tensors[str(raw_key)] = raw_value
+    return tensors
+
+
+def _extract_mlm_state_dict(
+    state_dict: dict[str, torch.Tensor],
+) -> dict[str, torch.Tensor]:
+    """Extract MLM encoder weights from a SPLADE Lightning checkpoint."""
+    prefixes: list[str] = [
+        "model.encoder._orig_mod.mlm.",
+        "encoder._orig_mod.mlm.",
+        "model._orig_mod.encoder.mlm.",
+        "model.encoder.mlm.",
+        "encoder.mlm.",
+        "model.mlm.",
+        "mlm.",
+    ]
+    mlm_state: dict[str, torch.Tensor] = {}
+    key: str
+    value: torch.Tensor
+    for key, value in state_dict.items():
+        normalized_key: str = key.replace("_orig_mod.", "")
+        stripped_key: str | None = None
+        prefix: str
+        for prefix in prefixes:
+            if normalized_key.startswith(prefix):
+                stripped_key = normalized_key[len(prefix) :]
+                break
+        if stripped_key is None:
+            continue
+        mlm_state[stripped_key] = value
+    return mlm_state
+
+
+def _load_splade_checkpoint_model(
+    model_name: str,
+    *,
+    trust_remote_code: bool,
+    local_files_only: bool,
+) -> Any | None:
+    """Load fine-tuned SPLADE MLM weights when a checkpoint source is provided."""
+    checkpoint_payload: tuple[Path, dict[str, Any]] | None = _load_checkpoint_payload(
+        model_name
+    )
+    if checkpoint_payload is None:
+        return None
+    checkpoint_path, checkpoint = checkpoint_payload
+    state_dict_like: Any = checkpoint.get("state_dict", checkpoint)
+    tensor_state: dict[str, torch.Tensor] = _extract_tensor_state_dict(state_dict_like)
+    if not tensor_state:
+        return None
+    mlm_state_dict: dict[str, torch.Tensor] = _extract_mlm_state_dict(tensor_state)
+    if not mlm_state_dict:
+        return None
+
+    base_model_source: str | None = _resolve_model_source_from_checkpoint(
+        checkpoint_path, checkpoint
+    )
+    if base_model_source is None:
+        LOGGER.warning(
+            "No model.huggingface_name found in checkpoint hparams: %s", checkpoint_path
+        )
+        return None
+
+    load_kwargs: dict[str, Any] = {
+        "trust_remote_code": trust_remote_code,
+        "local_files_only": local_files_only,
+    }
+    try:
+        model: Any = AutoModelForMaskedLM.from_pretrained(base_model_source, **load_kwargs)
+    except Exception:  # pylint: disable=broad-except
+        model = build_masked_lm_model(base_model_source)
+
+    incompatible: Any = model.load_state_dict(mlm_state_dict, strict=False)
+    missing_keys: list[str] = list(incompatible.missing_keys)
+    unexpected_keys: list[str] = list(incompatible.unexpected_keys)
+    if missing_keys or unexpected_keys:
+        LOGGER.warning(
+            "Checkpoint MLM load mismatch for %s (missing=%d unexpected=%d).",
+            model_name,
+            len(missing_keys),
+            len(unexpected_keys),
+        )
+    return model
+
+
+def _load_tokenizer(
+    model_name: str,
+    *,
+    trust_remote_code: bool,
+    local_files_only: bool,
+) -> Any:
+    """Load tokenizer with checkpoint/hparams source resolution."""
+    tokenizer_source: str = model_name
+    checkpoint_payload: tuple[Path, dict[str, Any]] | None = _load_checkpoint_payload(
+        model_name
+    )
+    if checkpoint_payload is not None:
+        checkpoint_path, checkpoint = checkpoint_payload
+        resolved_source: str | None = _resolve_model_source_from_checkpoint(
+            checkpoint_path, checkpoint
+        )
+        if resolved_source is not None:
+            tokenizer_source = resolved_source
+
+    try:
+        return build_tokenizer(
+            tokenizer_source,
+            use_fast_tokenizer=True,
+            trust_remote_code=trust_remote_code,
+            require_fast_tokenizer=False,
+            local_files_only=local_files_only,
+        )
+    except OSError as exc:
+        error_text: str = str(exc)
+        model_path: Path = Path(tokenizer_source)
+        vocab_path: Path = model_path / "vocab.txt"
+        if (
+            "Unable to load vocabulary from file" not in error_text
+            or not model_path.is_dir()
+            or not vocab_path.is_file()
+        ):
+            raise
+        LOGGER.warning(
+            "Retrying tokenizer load for local model with explicit vocab path: %s",
+            vocab_path,
+        )
+        return AutoTokenizer.from_pretrained(
+            tokenizer_source,
+            vocab_file=str(vocab_path),
+            trust_remote_code=trust_remote_code,
+            local_files_only=local_files_only,
+        )
+
+
 def _compute_model_logits_stats(
     model_name: str,
     texts: Sequence[str],
@@ -310,15 +564,40 @@ def _compute_model_logits_stats(
     sample_size_per_batch: int,
     device: torch.device,
     seed: int,
+    trust_remote_code: bool,
+    local_files_only: bool,
 ) -> ModelResult:
     """Compute streaming stats and sampled logits for a model."""
-    tokenizer: Any = AutoTokenizer.from_pretrained(model_name)
-    model: Any = AutoModelForMaskedLM.from_pretrained(model_name)
+    tokenizer: Any = _load_tokenizer(
+        model_name=model_name,
+        trust_remote_code=trust_remote_code,
+        local_files_only=local_files_only,
+    )
+    model: Any | None = _load_splade_checkpoint_model(
+        model_name=model_name,
+        trust_remote_code=trust_remote_code,
+        local_files_only=local_files_only,
+    )
+    if model is None:
+        load_kwargs: dict[str, Any] = {
+            "trust_remote_code": trust_remote_code,
+            "local_files_only": local_files_only,
+        }
+        try:
+            model = AutoModelForMaskedLM.from_pretrained(model_name, **load_kwargs)
+        except Exception:  # pylint: disable=broad-except
+            model = build_masked_lm_model(model_name)
     model.to(device)
     model.eval()
 
     stats: RunningLogitStats = RunningLogitStats()
-    vocab_survival_stats: RunningCountStats = RunningCountStats()
+    vocab_survival_stats: RunningScalarStats = RunningScalarStats()
+    survived_vocab_logit_stats: RunningScalarStats = RunningScalarStats()
+    pooled_activation_stats: RunningScalarStats = RunningScalarStats()
+    nonzero_pooled_activation_stats: RunningScalarStats = RunningScalarStats()
+    pooled_activation_l1_stats: RunningScalarStats = RunningScalarStats()
+    pooled_activation_l2_stats: RunningScalarStats = RunningScalarStats()
+    pooled_activation_max_stats: RunningScalarStats = RunningScalarStats()
     sample_chunks: list[np.ndarray] = []
     torch_generator: torch.Generator = torch.Generator(device="cpu")
     torch_generator.manual_seed(seed)
@@ -353,14 +632,31 @@ def _compute_model_logits_stats(
             )
             sample_chunks.append(sample_chunk)
 
-            token_scores: torch.Tensor = torch.log1p(torch.relu(logits))
-            mask: torch.Tensor = attention_mask.unsqueeze(-1).to(token_scores.dtype)
-            neg_inf: torch.Tensor = token_scores.new_tensor(float("-inf"))
-            masked_scores: torch.Tensor = token_scores.masked_fill(mask == 0, neg_inf)
-            pooled_max: torch.Tensor = torch.clamp(
-                masked_scores.max(dim=1).values, min=0.0
+            valid_vocab_mask: torch.Tensor = attention_mask.unsqueeze(-1).to(
+                dtype=torch.bool
             )
-            survival_counts: torch.Tensor = (pooled_max > 0).sum(dim=1)
+            neg_inf: torch.Tensor = logits.new_tensor(float("-inf"))
+            masked_logits: torch.Tensor = logits.masked_fill(~valid_vocab_mask, neg_inf)
+            pooled_max_logits: torch.Tensor = masked_logits.max(dim=1).values
+            survived_vocab_logits: torch.Tensor = pooled_max_logits[
+                pooled_max_logits > 0
+            ]
+            survived_vocab_logit_stats.update(survived_vocab_logits)
+
+            # SPLADE vector space after pooling + activation.
+            pooled_activation: torch.Tensor = torch.log1p(torch.relu(pooled_max_logits))
+            pooled_activation_stats.update(pooled_activation)
+            nonzero_pooled_activation_stats.update(
+                pooled_activation[pooled_activation > 0]
+            )
+            pooled_activation_l1_stats.update(pooled_activation.sum(dim=1))
+            pooled_activation_l2_stats.update(
+                torch.linalg.vector_norm(pooled_activation, ord=2, dim=1)
+            )
+            pooled_activation_max_stats.update(pooled_activation.max(dim=1).values)
+
+            # SPLADE-style survival uses log1p(relu(logits)); it is positive iff logit > 0.
+            survival_counts: torch.Tensor = (pooled_max_logits > 0).sum(dim=1)
             vocab_survival_stats.update(survival_counts)
             batch_start = batch_end
 
@@ -376,11 +672,18 @@ def _compute_model_logits_stats(
     survival_payload["std_fraction"] = survival_payload["std"] / vocab_size_value
     survival_payload["min_fraction"] = survival_payload["min"] / vocab_size_value
     survival_payload["max_fraction"] = survival_payload["max"] / vocab_size_value
+    survived_vocab_payload: dict[str, float] = survived_vocab_logit_stats.finalize()
     result: ModelResult = ModelResult(
         model_name=model_name,
         stats=stats.finalize(),
         sample_values=sample_values,
         vocab_survival=survival_payload,
+        survived_vocab_logit_stats=survived_vocab_payload,
+        pooled_activation_stats=pooled_activation_stats.finalize(),
+        nonzero_pooled_activation_stats=nonzero_pooled_activation_stats.finalize(),
+        pooled_activation_l1_stats=pooled_activation_l1_stats.finalize(),
+        pooled_activation_l2_stats=pooled_activation_l2_stats.finalize(),
+        pooled_activation_max_stats=pooled_activation_max_stats.finalize(),
     )
     return result
 
@@ -450,7 +753,17 @@ def _plot_histogram(
 def _parse_args() -> argparse.Namespace:
     """Parse CLI arguments."""
     parser: argparse.ArgumentParser = argparse.ArgumentParser(
-        description="Compare MLM logit distributions for BERT vs DistilBERT."
+        description="Compute MLM logit distribution statistics for one or more models."
+    )
+    parser.add_argument(
+        "--model_names",
+        type=str,
+        nargs="+",
+        default=[
+            "bert-base-uncased",
+            "distilbert-base-uncased",
+        ],
+        help="One or more model names/paths to evaluate.",
     )
     parser.add_argument(
         "--output_dir",
@@ -543,6 +856,16 @@ def _parse_args() -> argparse.Namespace:
         help="Number of logits to sample per batch for histograms.",
     )
     parser.add_argument(
+        "--trust_remote_code",
+        action="store_true",
+        help="Enable trust_remote_code for AutoTokenizer/AutoModel loading.",
+    )
+    parser.add_argument(
+        "--local_files_only",
+        action="store_true",
+        help="Load model/tokenizer from local files only.",
+    )
+    parser.add_argument(
         "--seed",
         type=int,
         default=13,
@@ -588,10 +911,9 @@ def main() -> None:
     stats_path: str = os.path.join(output_dir, "logit_stats.json")
     plot_path: str = os.path.join(output_dir, "logit_histogram.png")
 
-    model_names: list[str] = [
-        "bert-base-uncased",
-        "distilbert-base-uncased",
-    ]
+    model_names: list[str] = [str(model_name) for model_name in args.model_names]
+    if not model_names:
+        raise RuntimeError("At least one model name/path is required.")
 
     model_results: list[ModelResult] = []
     for model_name in model_names:
@@ -604,17 +926,22 @@ def main() -> None:
             sample_size_per_batch=int(args.sample_size_per_batch),
             device=device,
             seed=int(args.seed),
+            trust_remote_code=bool(args.trust_remote_code),
+            local_files_only=bool(args.local_files_only),
         )
         model_results.append(result)
 
     payload: dict[str, Any] = {
         "settings": {
             "device": str(device),
+            "model_names": list(model_names),
             "sample_count": int(args.sample_count),
             "batch_size": int(args.batch_size),
             "max_length": int(args.max_length),
             "sample_size_per_batch": int(args.sample_size_per_batch),
             "seed": int(args.seed),
+            "trust_remote_code": bool(args.trust_remote_code),
+            "local_files_only": bool(args.local_files_only),
             "msmarco_name": str(args.msmarco_name),
             "msmarco_query_subset": str(args.msmarco_query_subset),
             "msmarco_fallback_subset": msmarco_fallback,

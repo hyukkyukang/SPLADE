@@ -1,0 +1,12 @@
+# @package model
+defaults:
+  - _base
+
+name: splade_v2_pp_anna_trained_pruned_hangul
+huggingface_name: ${root_dir_path}/data/model/trained_anna_base_hf_pruned_hangul
+trust_remote_code: true
+use_fast_tokenizer: true
+require_fast_tokenizer: true
+query_pooling: max
+doc_pooling: max
+sparse_activation: log1p_relu

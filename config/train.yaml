@@ -1,6 +1,6 @@
 # Training entrypoint config
 seed: 10
-log_dir_base: "log/train"
+log_dir_base: "log/train/${model.name}"
 tag: null
 log_dir: ${tagged_log_dir:${log_dir_base},${tag}}
 root_dir_path: "."
@@ -9,7 +9,7 @@ root_dir_path: "."
 defaults:
   - model: splade_v2
   - dataset@train_dataset: msmarco
-  - dataset@val_dataset: msmarco
+  - dataset@val_dataset: msmarco_dev_small_negatives
   - training: splade_v2
   - testing: default
   # The following overrides are necessary to make the logging colorized.
@@ -22,8 +22,6 @@ train_dataset:
   max_padding: ${training.max_padding}
 
 val_dataset:
-  hf_name: sentence-transformers/msmarco
-  hf_subset: triplets
   hf_max_samples: ${training.val_sample_size}
   hf_skip_samples: 0
   max_padding: ${training.max_padding}
@@ -32,8 +30,9 @@ nanobeir:
   enabled: true
   run_every_n_val: 1
   datasets: [msmarco, nfcorpus, nq]
-  batch_size: ${testing.batch_size}
-  use_cpu: ${training.use_cpu}
+  batch_size: ${training.eval_batch_size}
+  max_seq_length: ${train_dataset.max_doc_length}
+  use_cpu: false
   cache_dir: null
   save_json: true
 

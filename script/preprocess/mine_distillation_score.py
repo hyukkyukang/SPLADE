@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import re
@@ -240,6 +241,13 @@ def _merge_rank_outputs(cfg: DictConfig, trainer: L.Trainer) -> None:
 
     output_path: Path = _resolve_output_path(scoring_cfg)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    merge_dedupe: bool = bool(scoring_cfg.merge_dedupe)
+    merge_dedupe_key: str = str(scoring_cfg.merge_dedupe_key)
+    merge_skip_invalid_json: bool = bool(scoring_cfg.merge_skip_invalid_json)
+    seen_keys: set[str] = set()
+    duplicate_rows: int = 0
+    invalid_rows: int = 0
+    missing_key_rows: int = 0
     with output_path.open("w", encoding="utf-8") as output_handle:
         for rank in range(world_size):
             rank_path: Path = _append_rank_suffix(output_path, rank)
@@ -252,8 +260,43 @@ def _merge_rank_outputs(cfg: DictConfig, trainer: L.Trainer) -> None:
                 continue
             with rank_path.open("r", encoding="utf-8") as rank_handle:
                 for line in rank_handle:
+                    if not line.strip():
+                        continue
+                    if not merge_dedupe and not merge_skip_invalid_json:
+                        output_handle.write(line)
+                        continue
+                    try:
+                        payload = json.loads(line)
+                    except json.JSONDecodeError:
+                        invalid_rows += 1
+                        if merge_skip_invalid_json:
+                            continue
+                        output_handle.write(line)
+                        continue
+                    if not merge_dedupe:
+                        output_handle.write(line)
+                        continue
+                    key_value = payload.get(merge_dedupe_key)
+                    if key_value is None:
+                        missing_key_rows += 1
+                        output_handle.write(line)
+                        continue
+                    key = str(key_value)
+                    if key in seen_keys:
+                        duplicate_rows += 1
+                        continue
+                    seen_keys.add(key)
                     output_handle.write(line)
     log_if_rank_zero(logger, f"Merged rank outputs into {output_path}")
+    if merge_dedupe or merge_skip_invalid_json:
+        log_if_rank_zero(
+            logger,
+            "Merge cleanup: "
+            f"dedupe={merge_dedupe} key={merge_dedupe_key} "
+            f"dropped_duplicates={duplicate_rows} "
+            f"skipped_invalid={invalid_rows} "
+            f"missing_key={missing_key_rows}.",
+        )
 
 
 def _count_jsonl_rows(path: Path) -> int:

@@ -1,5 +1,4 @@
 import json
-import logging
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -8,14 +7,14 @@ from typing import Any, Callable, Iterable
 import lightning as L
 import torch
 from omegaconf import DictConfig
-from transformers import AutoModelForSequenceClassification, T5EncoderModel
+from transformers import AutoModelForSequenceClassification, T5Config, T5EncoderModel
 from transformers.modeling_outputs import SequenceClassifierOutput
 
 from src.model.pl_module.utils import resolve_cudagraph_mark_step, validate_torch_compile_mode
-from src.utils.logging import log_if_rank_zero
+from src.utils.logging import get_logger, log_if_rank_zero
 from src.utils.script_setup import normalize_optional_str
 
-logger: logging.Logger = logging.getLogger("CrossEncoderScoringModule")
+logger = get_logger("CrossEncoderScoringModule")
 
 
 @dataclass(frozen=True)
@@ -30,7 +29,7 @@ class _RowPayload:
 @dataclass
 class _RowState:
     payload: _RowPayload
-    scores: list[float | None]
+    scores: list[float]
     remaining: int
 
 
@@ -42,16 +41,13 @@ def _append_rank_suffix(path: Path, rank: int) -> Path:
     return path.with_name(f"{path.name}.rank{rank}")
 
 
-def _extract_scores(logits: torch.Tensor) -> list[float]:
-    """Convert model logits to a flat list of scores."""
+def _extract_scores_tensor(logits: torch.Tensor) -> torch.Tensor:
+    """Convert model logits to a detached 1D CPU tensor."""
     if logits.ndim == 2 and logits.shape[1] > 1:
         scores_tensor: torch.Tensor = logits[:, 0]
     else:
         scores_tensor = logits.squeeze(-1)
-    scores: list[float] = [
-        float(value) for value in scores_tensor.detach().cpu().tolist()
-    ]
-    return scores
+    return scores_tensor.detach().to(device="cpu", dtype=torch.float32)
 
 
 def _strip_score_fields(row: dict[str, Any], score_key: str) -> dict[str, Any]:
@@ -60,9 +56,19 @@ def _strip_score_fields(row: dict[str, Any], score_key: str) -> dict[str, Any]:
 
 
 class T5EncoderRerank(torch.nn.Module):
-    def __init__(self, base_model_name: str, checkpoint_path: str) -> None:
+    def __init__(
+        self,
+        base_model_name: str,
+        checkpoint_path: str,
+        *,
+        config_name: str | None = None,
+    ) -> None:
         super().__init__()
-        self.model = T5EncoderModel.from_pretrained(base_model_name)
+        if config_name is not None:
+            config = T5Config.from_pretrained(config_name)
+            self.model = T5EncoderModel(config)
+        else:
+            self.model = T5EncoderModel.from_pretrained(base_model_name)
         self.config = self.model.config
         hidden_size: int = int(self.config.d_model)
         self.first_transform = torch.nn.Linear(hidden_size, hidden_size)
@@ -114,7 +120,14 @@ class CrossEncoderScoringModule(L.LightningModule):
                     "scoring.model_checkpoint_path must be set for "
                     "model_backend=t5_encoder_rerank."
                 )
-            self.model = T5EncoderRerank(self.model_name, checkpoint_path)
+            config_name: str | None = normalize_optional_str(
+                scoring_cfg.model_config_name
+            )
+            self.model = T5EncoderRerank(
+                self.model_name,
+                checkpoint_path,
+                config_name=config_name,
+            )
         else:
             raise ValueError(
                 "scoring.model_backend must be one of: auto_seq_cls, "
@@ -230,7 +243,7 @@ class CrossEncoderScoringModule(L.LightningModule):
                     labels=labels,
                     doc_sources=doc_sources,
                 ),
-                scores=[None] * len(doc_ids),
+                scores=[0.0] * len(doc_ids),
                 remaining=len(doc_ids),
             )
             row_queue.append(row_idx)
@@ -245,31 +258,35 @@ class CrossEncoderScoringModule(L.LightningModule):
                     "doc_ids": payload.doc_ids,
                     "labels": payload.labels,
                     "doc_sources": payload.doc_sources,
-                    self.score_key: [float(score) for score in state.scores],
+                    self.score_key: state.scores,
                 }
                 yield output_row
 
         total_pairs: int = len(pair_row_ids)
         start_idx = 0
+        pair_token_items: list[tuple[str, torch.Tensor]] = list(pair_tokens.items())
+        token_batch: dict[str, torch.Tensor] = {}
         with torch.inference_mode():
             while start_idx < total_pairs:
                 end_idx = min(start_idx + self.batch_size, total_pairs)
-                token_batch: dict[str, torch.Tensor] = {
-                    key: value[start_idx:end_idx].to(
+                token_batch.clear()
+                key: str
+                value: torch.Tensor
+                for key, value in pair_token_items:
+                    token_batch[key] = value[start_idx:end_idx].to(
                         self.device, non_blocking=True
                     )
-                    for key, value in pair_tokens.items()
-                }
                 if self._torch_compile_mark_step is not None:
                     self._torch_compile_mark_step()
                 outputs = self.model(**token_batch)
-                batch_scores: list[float] = _extract_scores(outputs.logits)
-                for offset, score in enumerate(batch_scores):
+                batch_scores: torch.Tensor = _extract_scores_tensor(outputs.logits)
+                offset: int
+                for offset in range(int(batch_scores.shape[0])):
                     pair_idx = start_idx + offset
                     row_id = pair_row_ids[pair_idx]
                     doc_idx = pair_doc_idxs[pair_idx]
                     state = row_states[row_id]
-                    state.scores[doc_idx] = score
+                    state.scores[doc_idx] = float(batch_scores[offset].item())
                     state.remaining -= 1
                 yield from _flush_ready()
                 start_idx = end_idx

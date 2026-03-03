@@ -1,0 +1,36 @@
+meta_hf_name: sentence-transformers/msmarco
+meta_hf_subset: triplets
+train_split: train
+val_split: validation
+allow_missing_val_split: true
+hf_cache_dir: null
+
+meta_query_id_column: query_id
+meta_positive_id_column: positive_id
+meta_query_text_column: query
+meta_positive_text_column: positive
+
+query_subset: queries
+query_split: train
+query_id_column: query_id
+query_text_column: query
+
+corpus_subset: corpus
+corpus_split: train
+corpus_id_column: passage_id
+corpus_text_column: passage
+
+target_size: 30000
+stopword_df_ratio: 0.15
+min_df: 5
+include_queries: false
+max_meta_rows: 500000
+max_docs: 500000
+
+spacy_model: en_core_web_trf
+spacy_batch_size: 128
+spacy_n_process: 1
+normalizer: simple
+allow_simple_fallback: true
+
+output_dir: outputs/model_creation/embeddinggemma_splade/vocab

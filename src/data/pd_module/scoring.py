@@ -1,4 +1,3 @@
-import logging
 import os
 import re
 import sqlite3
@@ -17,10 +16,10 @@ import torch
 from torch.utils.data import Dataset as TorchDataset
 
 from src.data.utils import id_to_idx, resolve_dataset_column
-from src.utils.logging import log_if_rank_zero
+from src.utils.logging import get_logger, log_if_rank_zero
 from src.utils.script_setup import normalize_optional_str
 
-logger: logging.Logger = logging.getLogger("ScoringPDModule")
+logger = get_logger("ScoringPDModule")
 
 
 @dataclass(frozen=True)
@@ -373,7 +372,7 @@ def _build_doc_text_lookup_for_corpus(
     corpus_text_column_name: str,
     scoring_cfg: DictConfig,
     score_dataset_cfg: DictConfig,
-) -> _DocTextLookup | _SqliteDocTextLookup:
+) -> "_DocTextLookup | _SqliteDocTextLookup":
     backend = _resolve_doc_lookup_backend(scoring_cfg)
     cache_size: int = int(scoring_cfg.doc_text_cache_size)
     if backend == "dict":

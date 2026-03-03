@@ -6,7 +6,8 @@ split: train
 corpus_split: ${.split}
 hf_split: ${.split}
 
-max_query_length: 256
+# MSMARCO max query token number is 87, 128 is a good compromise
+max_query_length: 128
 max_doc_length: 256
 max_padding: true
 num_negatives: 1
@@ -29,6 +30,13 @@ hf_data_files: null
 query_corpus_hf_name: null
 query_corpus_hf_cache_dir: null
 query_corpus_hf_data_files: null
+query_lookup_hf_name: null
+query_lookup_hf_subset: null
+query_lookup_hf_split: train
+query_lookup_hf_cache_dir: null
+query_lookup_hf_data_files: null
+query_lookup_id_column: query_id
+query_lookup_text_column: text
 max_queries: null
 qrels_hf_name: null
 qrels_hf_subset: null
@@ -70,3 +78,25 @@ score_duplicate_policy: error
 score_log_every: 0
 score_progress_bar: false
 score_progress_refresh: 0.5
+
+pretokenize:
+  enabled: true
+  output_dir: data/cache/pretokenized/${..name}
+  overwrite: false
+  storage_format: hybrid
+  loading_mode: streaming
+  streaming_index_backend: sqlite
+  streaming_use_meta_row_pointer: true
+  streaming_max_cached_shards: 8
+  streaming_row_cache_size: 50000
+  streaming_index_cache_size: 100000
+  streaming_sqlite_cache_size_kib: 131072
+  streaming_sqlite_mmap_size: 1073741824
+  streaming_numpy_sidecar: false
+  tokenizers_parallelism: true
+  query_shard_size: 200000
+  doc_shard_size: 200000
+  parquet_row_group_size: null
+  write_dtype: int32
+  allow_runtime_tokenize_fallback: false
+  require_cache_complete: true

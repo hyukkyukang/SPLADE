@@ -1,3 +1,4 @@
+name: SPLADE
 services:
     SPLADE:
         image: hyukkyukang/splade:latest
@@ -13,29 +14,18 @@ services:
 
         environment:
             - TZ=Asia/Seoul
-            - UID=${UID}
-            - GID=${GID}
-
+            - HOST_UID=${UID}
+            - HOST_GID=${GID}
+            - SSL_CERT_FILE=/home/user/.local/share/ca-certificates/combined-ca-bundle.crt
+            - CURL_CA_BUNDLE=/home/user/.local/share/ca-certificates/combined-ca-bundle.crt
+            - REQUESTS_CA_BUNDLE=/home/user/.local/share/ca-certificates/combined-ca-bundle.crt
         volumes:
             - /etc/timezone:/etc/timezone:ro
             - /home/hyukkyukang/SPLADE:/home/user/SPLADE
             - /mnt/ex-disk-1/hyukkyukang:/mnt/ex-disk-1/hyukkyukang/
+            - ${HOME}/.local/share/ca-certificates:/host-ca-certificates:ro
         working_dir: /home/user/SPLADE
-        command: |
-            bash -c '
-              set -e
-              echo "export PATH=/home/user/.local/bin:$PATH" >> /home/user/.bashrc
-              # Not sure why, but below two lines are necessary to correctly change
-              # the owner of /home/user/ and folders in there
-              echo "user" | sudo -S chmod 777 /home/user/
-              echo "user" | sudo -S chmod 777 /home/user/.*
-              # echo "user" | sudo -S chmod 777 /home/user/.cache
-              # echo "user" | sudo -S chmod 777 /home/user/.local
-              echo "user" | sudo -S chmod 777 /tmp/
-              echo "user" | sudo -S groupmod -g ${GID} user
-              echo "user" | sudo -S usermod -u ${UID} -g ${GID} user
-              tail -f /dev/null
-            '
+        command: /bin/bash /home/user/SPLADE/docker/container-init.sh
         deploy:
             resources:
                 reservations:

@@ -1,0 +1,13 @@
+# @package model
+defaults:
+  - _base
+
+name: splade_v2_pp_embeddinggemma_300m
+huggingface_name: google/embeddinggemma-300m
+huggingface_model_class: AutoModelForCausalLM
+query_pooling: max
+doc_pooling: max
+sparse_activation: log1p_relu
+use_fast_tokenizer: true
+require_fast_tokenizer: true
+freeze_backbone: true

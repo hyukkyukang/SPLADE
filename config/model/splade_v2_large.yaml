@@ -1,0 +1,8 @@
+# @package model
+defaults:
+  - _base
+
+name: splade_v2_large
+huggingface_name: bert-large-uncased
+query_pooling: max
+doc_pooling: max

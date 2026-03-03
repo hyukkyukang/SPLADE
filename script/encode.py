@@ -11,20 +11,16 @@ from src.model.pl_module import SPLADEEncodeModule
 from src.utils.logging import get_logger, log_if_rank_zero
 from src.utils.model_utils import apply_checkpoint_model_config
 from src.utils.script_setup import (
-    configure_script_environment,
+    configure_default_entrypoint_environment,
     initialize_run,
     resolve_trainer_settings,
 )
 
 logger: logging.Logger = get_logger(__name__, __file__)
 
-configure_script_environment(
+configure_default_entrypoint_environment(
     load_env=True,
-    set_tokenizers_parallelism=True,
     set_matmul_precision=True,
-    suppress_lightning_tips=True,
-    suppress_httpx=True,
-    suppress_dataloader_workers=True,
 )
 
 

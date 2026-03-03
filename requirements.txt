@@ -3,7 +3,7 @@ transformers
 sentence-transformers
 lightning[extra]
 torchmetrics
-wandb
+mlflow
 python-dotenv
 hydra-core
 hydra-colorlog
@@ -16,6 +16,7 @@ scipy
 numba
 faiss-cpu
 setuptools
+maturin
 h5py
 
 # For validation
@@ -30,6 +31,7 @@ pytest-cov
 matplotlib
 seaborn
 pandas
+spacy
 
 # # This is required to download LoTTE dataset
 inscriptis==2.6.0 # This is required to support ir-datasets in Python 3.14.

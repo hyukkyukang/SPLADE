@@ -1,4 +1,3 @@
-import logging
 from dataclasses import dataclass
 from typing import Any, Iterable, Sequence
 
@@ -8,11 +7,13 @@ from omegaconf import DictConfig
 from sentence_transformers import SparseEncoder
 from sentence_transformers.models import Normalize
 from sentence_transformers.sparse_encoder.models import MLMTransformer, SpladePooling
-from src.utils.model_utils import resolve_model_dtype
-from src.utils.transformers import build_tokenizer
 from transformers import PreTrainedTokenizerBase
 
-logger: logging.Logger = logging.getLogger("src.utils.sparse_encoder")
+from src.utils.logging import get_logger
+from src.utils.model_utils import resolve_model_dtype
+from src.utils.transformers import build_tokenizer, resolve_model_name_or_path
+
+logger = get_logger("src.utils.sparse_encoder")
 
 
 @dataclass
@@ -176,7 +177,7 @@ class DocOnlySparseEncoderAdapter:
             text_list = [str(item) for item in sentences]
 
         if not text_list:
-            vocab_size: int = int(self.model.encoder.mlm.config.vocab_size)
+            vocab_size: int = int(self.model.encoder.vocab_size)
             empty: torch.Tensor = torch.empty(
                 (0, vocab_size), dtype=self.model.encoder.mlm.dtype, device=self.device
             )
@@ -279,9 +280,12 @@ def build_doc_only_sparse_encoder_adapter(
 ) -> DocOnlySparseEncoderAdapter:
     """Build a NanoBEIR adapter for SPLADE-doc query encoding."""
     tokenizer: PreTrainedTokenizerBase = build_tokenizer(
-        str(cfg.model.huggingface_name)
+        str(cfg.model.huggingface_name),
+        use_fast_tokenizer=bool(cfg.model.use_fast_tokenizer),
+        trust_remote_code=bool(cfg.model.trust_remote_code),
+        require_fast_tokenizer=bool(cfg.model.require_fast_tokenizer),
     )
-    max_length: int = int(cfg.model.max_input_length)
+    max_length: int = int(cfg.nanobeir.max_seq_length)
     return DocOnlySparseEncoderAdapter(
         model=model,
         tokenizer=tokenizer,
@@ -337,14 +341,15 @@ def _build_mlm_transformer(cfg: DictConfig) -> MLMTransformer:
         model_args["torch_dtype"] = dtype
     config_args["tie_word_embeddings"] = bool(cfg.model.tie_word_embeddings)
 
-    max_input_length: int = int(cfg.model.max_input_length)
-    tokenizer_args: dict[str, Any] = {"model_max_length": max_input_length}
+    max_seq_length: int = int(cfg.nanobeir.max_seq_length)
+    tokenizer_args: dict[str, Any] = {"model_max_length": max_seq_length}
     nanobeir_cfg: DictConfig = cfg.nanobeir
     cache_dir: str | None = nanobeir_cfg.cache_dir
+    model_name_or_path: str = resolve_model_name_or_path(str(cfg.model.huggingface_name))
 
     mlm_transformer: MLMTransformer = MLMTransformer(
-        model_name_or_path=str(cfg.model.huggingface_name),
-        max_seq_length=max_input_length,
+        model_name_or_path=model_name_or_path,
+        max_seq_length=max_seq_length,
         model_args=model_args,
         tokenizer_args=tokenizer_args,
         config_args=config_args,

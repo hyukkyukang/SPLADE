@@ -7,6 +7,43 @@ on:
     branches: [main]
 
 jobs:
+  lint-typecheck:
+    name: Lint-and-Typecheck
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.12"
+
+    - name: Install lint/typecheck tools
+      run: |
+        python -m pip install --upgrade pip
+        pip install ruff mypy
+
+    - name: Ruff (syntax/undefined checks)
+      run: |
+        ruff check src script test --select E9,F63,F7,F82
+
+    - name: Mypy (targeted modules)
+      run: |
+        mypy --explicit-package-bases --config-file mypy.ini \
+          src/utils/checkpoint_compat.py \
+          src/utils/evaluation_mode.py \
+          src/utils/metrics_io.py \
+          src/model/pl_module/compile_policy.py \
+          src/model/pl_module/loss_service.py \
+          src/model/pl_module/metrics_service.py \
+          src/model/pl_module/validation_service.py \
+          src/model/pl_module/nanobeir_runner.py \
+          src/data/pd_module/pretokenize_backend.py \
+          src/data/pd_module/pretokenize_lifecycle.py \
+          src/data/pd_module/pretokenize_writer.py \
+          src/data/pd_module/pretokenize_runtime_reader.py \
+          src/data/pd_module/pretokenize_row_materializer.py
+
   Run-unittest:
     name: Run-unittest
     runs-on: ubuntu-latest
@@ -56,8 +93,17 @@ jobs:
         pip install -r requirements.txt
         pip install faiss-cpu
         pip install --upgrade "numpy>=2.1,<2.4"
-        pip install unittest-xml-reporting coverage
+        pip install pytest pytest-cov coverage
         pip cache purge
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Build and install anna_fast_rs
+      run: |
+        cd script/preprocess/anna/native/anna_fast_rs
+        maturin build --release -i python
+        pip install --force-reinstall target/wheels/*.whl
 
     # ─────────────────────────────────── auth ─────────────────────────────────────────
     - name: Hugging Face login
@@ -74,10 +120,10 @@ jobs:
         python -c "from datasets import load_dataset; load_dataset('BeIR/nfcorpus', 'queries', trust_remote_code=True)"
         python -c "from datasets import load_dataset; load_dataset('BeIR/nfcorpus', 'corpus', trust_remote_code=True)"
 
-    # ────────────────────────────── generate JUnit XML via xmlrunner ────────────────────────────
-    - name: Run unittest
+    # ────────────────────────────── run pytest with JUnit XML ────────────────────────────
+    - name: Run pytest
       working-directory: ${{ env.working-directory }}
-      run: python -m xmlrunner
+      run: pytest -q test --junitxml=pytest-results.xml
 
     # ─────────────────────────────── publish results ─────────────────────────────────
     - name: Report test results
@@ -85,12 +131,12 @@ jobs:
       if: success() || failure()
       with:
           name: Python Unittest
-          path: ./*.xml
+          path: ./pytest-results.xml
           reporter: java-junit
         
     # ────────────────────────────── run coverage ──────────────────────────────
     - name: Run tests with coverage
-      run: coverage run -m unittest discover -s tests
+      run: pytest -q test --cov=src --cov-report=xml --cov-report=term
 
     - name: Upload coverage to Codecov
       uses: codecov/codecov-action@v5

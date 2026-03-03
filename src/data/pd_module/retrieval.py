@@ -1,4 +1,3 @@
-import logging
 import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping
@@ -17,22 +16,16 @@ from src.data.pd_module import PDModule
 from src.data.pd_module.utils import tokenize_text
 from src.data.utils import resolve_dataset_column
 from src.utils.dist import is_rank_zero, maybe_barrier
-from src.utils.logging import log_if_rank_zero
+from src.utils.logging import get_logger, log_if_rank_zero
+from src.utils.normalize import normalize_optional_str
 
-logger: logging.Logger = logging.getLogger("RetrievalPDModule")
+logger = get_logger("RetrievalPDModule")
 
 
 class RetrievalPDModule(PDModule):
     """Retrieval PyTorch datasets module for evaluation/inference."""
 
     # --- Special methods ---
-    @staticmethod
-    def _normalize_optional_str(value: Any | None) -> str | None:
-        if value is None:
-            return None
-        normalized: str = str(value).strip()
-        return normalized if normalized else None
-
     def __init__(
         self,
         cfg: DictConfig,
@@ -54,7 +47,7 @@ class RetrievalPDModule(PDModule):
         self._filter_queries_with_positives: bool = bool(
             self.cfg.filter_queries_with_positives
         )
-        cache_path_value: str | None = self._normalize_optional_str(
+        cache_path_value: str | None = normalize_optional_str(
             self.cfg.triplet_positive_cache_path
         )
         self._triplet_positive_cache_path: str | None = cache_path_value
@@ -82,17 +75,17 @@ class RetrievalPDModule(PDModule):
                 text_cache_dir if text_cache_dir is not None else self.cfg.hf_cache_dir
             )
         )
-        self.qrels_hf_name: str | None = self._normalize_optional_str(
+        self.qrels_hf_name: str | None = normalize_optional_str(
             self.cfg.qrels_hf_name
         )
-        self.qrels_hf_subset: str | None = self._normalize_optional_str(
+        self.qrels_hf_subset: str | None = normalize_optional_str(
             self.cfg.qrels_hf_subset
         )
-        qrels_split_override: str | None = self._normalize_optional_str(
+        qrels_split_override: str | None = normalize_optional_str(
             self.cfg.qrels_hf_split
         )
         self.qrels_hf_split: str = qrels_split_override or self.hf_split
-        qrels_cache_override: str | None = self._normalize_optional_str(
+        qrels_cache_override: str | None = normalize_optional_str(
             self.cfg.qrels_hf_cache_dir
         )
         self.qrels_hf_cache_dir: str | None = (

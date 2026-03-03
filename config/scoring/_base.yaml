@@ -7,6 +7,9 @@ num_devices: null
 num_workers: 4
 prefetch_factor: 2
 max_rows: null
+merge_dedupe: true
+merge_dedupe_key: query_id
+merge_skip_invalid_json: true
 torch_compile: true
 torch_compile_mode: default
 run_predict: true
@@ -25,7 +28,12 @@ doc_lookup_chunk_size: 100000
 doc_lookup_query_chunk_size: 900
 tokenize_chunk_size: 2048
 model_backend: auto_seq_cls
+model_config_name: null
 model_checkpoint_path: null
+tokenizer_name: null
+trust_remote_code: false
+use_fast_tokenizer: true
+require_fast_tokenizer: false
 postprocess:
   enabled: true
   cleanup_jsonl: true

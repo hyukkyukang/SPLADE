@@ -1,0 +1,49 @@
+# Validation entrypoint config
+seed: 10
+log_dir_base: "log/validation"
+tag: null
+log_dir: ${tagged_log_dir:${log_dir_base},${tag}}
+root_dir_path: "."
+
+defaults:
+  - _self_
+  - model: splade_v1
+  - dataset@train_dataset: msmarco
+  - dataset@val_dataset: msmarco_dev_small_negatives
+  - training: splade_v2_pp
+  - testing: default
+  - override hydra/job_logging: colorlog_custom
+
+validation:
+  checkpoint_path: null
+  # Load model/train_dataset/val_dataset/training/nanobeir from checkpoint
+  # hyper_parameters to reproduce training-time validation behavior.
+  use_checkpoint_config: true
+  # Keep true to mirror training-time validation behavior:
+  # reranking-style MSMARCO validation + NanoBEIR validation.
+  include_nanobeir: true
+  output_json_path: ${log_dir}/validation_metrics.json
+
+nanobeir:
+  enabled: true
+  run_every_n_val: 1
+  datasets: [msmarco, nfcorpus, nq]
+  batch_size: ${training.eval_batch_size}
+  max_seq_length: ${train_dataset.max_doc_length}
+  use_cpu: false
+  cache_dir: null
+  save_json: true
+
+hydra:
+  output_subdir: null
+  run:
+    dir: ${log_dir}
+  job_logging:
+    handlers:
+      console:
+        class: logging.StreamHandler
+        formatter: colorlog
+        stream: ext://sys.stdout
+      file:
+        class: logging.FileHandler
+        filename: ${log_dir}/validation.log

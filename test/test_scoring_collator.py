@@ -35,6 +35,7 @@ class ScoringCollatorTest(unittest.TestCase):
         tokenizer = DummyTokenizer()
         collator = ScoringCollator(
             model_name="dummy",
+            tokenizer_name=None,
             max_length=8,
             tokenize_chunk_size=2,
             local_files_only=True,

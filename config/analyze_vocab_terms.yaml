@@ -1,0 +1,55 @@
+# Vocab term analysis entrypoint config
+seed: 10
+log_dir_base: "log/analysis/vocab_terms/${model.name}/${dataset.name}"
+tag: null
+log_dir: ${tagged_log_dir:${log_dir_base},${tag}}
+root_dir_path: "."
+
+# Defaults
+defaults:
+  - model: splade_v2_pp_distil
+  - dataset: msmarco
+  - _self_
+  # The following overrides are necessary to make the logging colorized.
+  - override hydra/job_logging: colorlog_custom
+
+analysis:
+  checkpoint_path: /home/user/SPLADE/log/train/splade_v2_pp_distil/no_tag/checkpoints/best.ckpt
+  split: ${dataset.split}
+  hf_name: ${dataset.hf_name}
+  hf_subset: ${dataset.hf_subset}
+  hf_cache_dir: ${dataset.hf_cache_dir}
+  hf_data_files: ${dataset.hf_data_files}
+  query_id_column: query_id
+  positive_id_column: positive_id
+  query_text_column: query
+  positive_text_column: positive
+  query_subset_name: ${dataset.query_subset_name}
+  query_id_column_name: ${dataset.query_id_column}
+  query_text_column_name: ${dataset.query_text_column}
+  corpus_subset_name: ${dataset.corpus_subset_name}
+  corpus_id_column_name: ${dataset.corpus_id_column}
+  corpus_text_column_name: ${dataset.corpus_text_column}
+  sample_count: 10
+  shuffle: true
+  seed: ${seed}
+  max_input_length: ${dataset.max_doc_length}
+  batch_size: 4
+  top_k: 50
+  min_weight: 0.0
+  use_cpu: false
+  output_path: ${log_dir}/vocab_terms.json
+
+hydra:
+  output_subdir: null
+  run:
+    dir: ${log_dir}
+  job_logging:
+    handlers:
+      console:
+        class: logging.StreamHandler
+        formatter: colorlog
+        stream: ext://sys.stdout
+      file:
+        class: logging.FileHandler
+        filename: ${log_dir}/vocab_terms.log

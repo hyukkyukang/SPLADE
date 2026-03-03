@@ -101,11 +101,50 @@ class PDModule(PyTorchDataset):
             max_padding=self.max_padding,
         )
 
+    def _requires_query_text_dataset(self) -> bool:
+        """Whether this module needs the query text dataset during iteration."""
+        return False
+
+    def _requires_corpus_text_dataset(self) -> bool:
+        """Whether this module needs the corpus text dataset during iteration."""
+        return False
+
+    def _requires_query_id_to_idx(self) -> bool:
+        """Whether this module needs the query id->index cache."""
+        return False
+
+    def _requires_corpus_id_to_idx(self) -> bool:
+        """Whether this module needs the corpus id->index cache."""
+        return False
+
+    def _prepare_required_text_artifacts(self) -> None:
+        """
+        Warm only the text artifacts required by the concrete PD module.
+
+        This runs in setup() so heavy lazy loads do not happen inside worker
+        processes during the first __getitem__ calls.
+        """
+        if not self.use_hf:
+            return
+        requires_query_text: bool = self._requires_query_text_dataset()
+        requires_corpus_text: bool = self._requires_corpus_text_dataset()
+        requires_query_id_to_idx: bool = self._requires_query_id_to_idx()
+        requires_corpus_id_to_idx: bool = self._requires_corpus_id_to_idx()
+
+        if requires_query_text or requires_query_id_to_idx:
+            _ = self.dataset.query_dataset
+        if requires_corpus_text or requires_corpus_id_to_idx:
+            _ = self.dataset.corpus_dataset
+        if requires_query_id_to_idx:
+            _ = self.dataset.query_dataset_id_to_idx
+        if requires_corpus_id_to_idx:
+            _ = self.dataset.corpus_dataset_id_to_idx
+
     # --- Public methods ---
     def prepare_data(self) -> None:
+        # Keep prepare_data lightweight: prepare metadata/downloads only.
         self.dataset.prepare_meta_dataset()
-        if self.use_hf:
-            self.dataset.prepare_text_datasets()
 
     def setup(self) -> None:
         _ = self.meta_dataset
+        self._prepare_required_text_artifacts()

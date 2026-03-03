@@ -70,3 +70,15 @@ class RerankingPDModule(PDModule):
                 max_docs=max_docs,
             )
         return self._collator
+
+    def _requires_query_text_dataset(self) -> bool:
+        return True
+
+    def _requires_corpus_text_dataset(self) -> bool:
+        return True
+
+    def _requires_query_id_to_idx(self) -> bool:
+        return True
+
+    def _requires_corpus_id_to_idx(self) -> bool:
+        return True

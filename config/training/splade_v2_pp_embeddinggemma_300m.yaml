@@ -1,0 +1,20 @@
+# @package training
+defaults:
+  - splade_v2_pp
+
+name: splade_v2_pp_embeddinggemma_300m
+
+# EmbeddingGemma uses a much larger vocab head than BERT-family backbones.
+# Enable SPLADE v2++ speed optimizations now that compact sparse head is available.
+torch_compile: true
+torch_compile_loss: true
+torch_compile_mode: default
+# Static graph DDP is unstable for this backbone/head path and can trigger
+# reducer hook asserts; keep DDP in dynamic mode by default.
+static_graph: false
+find_unused_parameters: true
+batch_size: 4
+eval_batch_size: 2
+grad_accumulation: 2
+num_workers: 4
+dataloader_multiprocessing_context: fork

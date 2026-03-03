@@ -1,0 +1,18 @@
+# @package training
+defaults:
+  - _base
+
+name: splade_v2_anna
+
+batch_size: 32
+eval_batch_size: 8
+grad_accumulation: 1
+# Turn off to avoid PyTorch DDP runtime bug 
+static_graph: true
+
+regularization:
+  query_weight: 0.0002
+  doc_weight: 0.0001
+  type: flops
+  paper_faithful: true
+  schedule_steps: 50000

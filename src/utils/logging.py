@@ -3,6 +3,7 @@ import logging
 import os
 import sys
 import time
+import warnings
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from typing import Any, Generator, Iterator, Optional, TextIO
 
@@ -319,6 +320,17 @@ def suppress_lightning_recommendation_tips() -> None:
 
 def suppress_dataloader_workers_warning() -> None:
     logging.getLogger("torch.utils.data").setLevel(logging.WARNING)
+
+
+def suppress_urllib3_insecure_request_warning() -> None:
+    """Suppress urllib3 warnings for intentionally unverified HTTPS requests."""
+    try:
+        import urllib3
+        from urllib3.exceptions import InsecureRequestWarning
+    except ImportError:
+        return
+    warnings.filterwarnings("ignore", category=InsecureRequestWarning)
+    urllib3.disable_warnings(InsecureRequestWarning)
 
 
 def suppress_accumulate_grad_stream_mismatch_warning() -> None:

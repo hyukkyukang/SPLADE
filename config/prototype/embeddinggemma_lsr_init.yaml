@@ -1,0 +1,9 @@
+base_model: google/embeddinggemma-300m
+vocab_artifact_dir: outputs/embeddinggemma_lsr/vocab
+output_dir: outputs/embeddinggemma_lsr/model_init
+alpha: 0.1
+fragment_threshold: 4
+trust_remote_code: false
+local_files_only: false
+dtype: float32
+device: auto

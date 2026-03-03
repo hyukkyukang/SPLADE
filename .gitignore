@@ -7,6 +7,9 @@ __pycache__/
 venv/
 .vscode/
 .idea/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
 outputs/
 checkpoints/
 indexes/
@@ -15,5 +18,16 @@ indexes/
 *.ckpt
 
 /data/
+/data
 /reference_code/
 /log/
+/log
+/benchmark_results/
+/script/experiment/output/
+/tmp_*.py
+/tmp_*.md
+/tmp_*.json
+/tmp_*.log
+/usc102103_train.json
+/new_*_Electrical_Electronics_testset_*_list.json
+/script/preprocess/anna/native/anna_fast_rs/target/

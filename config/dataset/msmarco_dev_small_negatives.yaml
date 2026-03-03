@@ -1,0 +1,39 @@
+# @package dataset
+defaults:
+  - _base@_here_
+
+name: msmarco_dev_small_negatives
+type: msmarco_dev_small_negatives
+split: colbertv2
+corpus_split: train
+
+hf_name: antoinelouis/msmarco-dev-small-negatives
+hf_subset: negatives
+hf_cache_dir: null
+hf_max_samples: 4096
+hf_skip_samples: 0
+hf_data_files: null
+
+query_corpus_hf_name: sentence-transformers/msmarco
+query_corpus_hf_cache_dir: null
+query_corpus_hf_data_files: null
+query_lookup_hf_name: Hyukkyu/beir-msmarco
+query_lookup_hf_subset: queries
+query_lookup_hf_split: train
+query_lookup_hf_cache_dir: null
+query_lookup_hf_data_files: null
+query_lookup_id_column: _id
+query_lookup_text_column: text
+
+num_positives: 1
+num_negatives: 100
+
+# Column names for query/corpus datasets.
+query_subset_name: queries
+query_split_name: train
+query_id_column: query_id
+query_text_column: query
+corpus_subset_name: corpus
+corpus_split_name: train
+corpus_id_column: passage_id
+corpus_text_column: passage

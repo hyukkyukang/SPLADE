@@ -33,6 +33,7 @@ def build_splade_model(cfg: DictConfig, *, use_cpu: bool) -> SpladeModel:
     doc_only: bool = doc_only_flag or name_value.endswith(("_doc", "-doc"))
     return SpladeModel(
         model_name=cfg.model.huggingface_name,
+        huggingface_model_class=str(cfg.model.huggingface_model_class),
         query_pooling=cfg.model.query_pooling,
         doc_pooling=cfg.model.doc_pooling,
         sparse_activation=cfg.model.sparse_activation,
@@ -41,6 +42,7 @@ def build_splade_model(cfg: DictConfig, *, use_cpu: bool) -> SpladeModel:
         normalize=cfg.model.normalize,
         doc_only=doc_only,
         tie_word_embeddings=cfg.model.tie_word_embeddings,
+        freeze_backbone=bool(cfg.model.get("freeze_backbone", False)),
     )
 
 
@@ -164,7 +166,7 @@ def _load_checkpoint_hparams(checkpoint_path: str) -> DictConfig | None:
 
 
 def _extract_model_config(root_cfg: DictConfig) -> DictConfig | None:
-    """Extract model config from a root Hydra/W&B config."""
+    """Extract model config from a root Hydra experiment config."""
     if "model" not in root_cfg:
         return None
     model_cfg: Any = root_cfg.model
@@ -271,12 +273,16 @@ def apply_checkpoint_model_config(
     *,
     logger: logging.Logger,
     exclude_keys: Iterable[str] = (
+        # Runtime/model-source path can be machine-specific or change after training.
+        "huggingface_name",
         "encode_path",
         "index_path",
         "encode_dir",
         "index_dir",
         "sparse_top_k",
         "sparse_min_weight",
+        # Deprecated: NanoBEIR/SentenceTransformers length now lives under cfg.nanobeir.
+        "max_input_length",
     ),
 ) -> DictConfig:
     """Override cfg.model with checkpoint model config, preserving runtime fields."""
@@ -300,7 +306,6 @@ def apply_checkpoint_model_config(
         "doc_pooling",
         "sparse_activation",
         "normalize",
-        "max_input_length",
     )
     runtime_model_cfg: DictConfig | None = cfg.model if "model" in cfg else None
     log_if_rank_zero(logger, f"Loading checkpoint model config from {checkpoint_path}.")

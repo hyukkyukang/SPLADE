@@ -1,3 +1,4 @@
+import os
 from functools import cached_property
 from typing import Any
 
@@ -8,8 +9,11 @@ from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from transformers import PreTrainedTokenizerBase
 
+from src.data.pl_module.common import build_model_tokenizer
 from src.data.pd_module import TrainingPDModule
-from src.utils.transformers import build_tokenizer
+
+# Backward-compatible alias used by tests and external monkey patches.
+build_tokenizer = build_model_tokenizer
 
 
 class TrainDataModule(L.LightningDataModule):
@@ -19,9 +23,9 @@ class TrainDataModule(L.LightningDataModule):
     def __init__(self, cfg: DictConfig) -> None:
         super().__init__()
         self.cfg: DictConfig = cfg
-        self.tokenizer: PreTrainedTokenizerBase = build_tokenizer(
-            self.cfg.model.huggingface_name
-        )
+        # Run prepare_data once globally (rank 0) under DDP.
+        self.prepare_data_per_node = False
+        self.tokenizer: PreTrainedTokenizerBase = build_tokenizer(self.cfg.model)
 
     # --- Property methods ---
     @cached_property
@@ -30,6 +34,7 @@ class TrainDataModule(L.LightningDataModule):
             self.cfg.train_dataset,
             load_teacher_scores=None,
             require_teacher_scores=None,
+            cache_namespace="train",
         )
 
     @cached_property
@@ -38,6 +43,7 @@ class TrainDataModule(L.LightningDataModule):
             self.cfg.val_dataset,
             load_teacher_scores=False,
             require_teacher_scores=False,
+            cache_namespace="val",
         )
 
     # --- Protected methods ---
@@ -46,6 +52,7 @@ class TrainDataModule(L.LightningDataModule):
         cfg: DictConfig,
         load_teacher_scores: bool | None,
         require_teacher_scores: bool | None,
+        cache_namespace: str | None = None,
     ) -> TrainingPDModule:
         uses_hf: bool = cfg.hf_name is not None
         if not uses_hf:
@@ -72,6 +79,7 @@ class TrainDataModule(L.LightningDataModule):
             seed=int(self.cfg.seed),
             load_teacher_scores=resolved_load,
             require_teacher_scores=resolved_require,
+            cache_namespace=cache_namespace,
         )
 
     def _build_sampler(
@@ -120,6 +128,22 @@ class TrainDataModule(L.LightningDataModule):
             dataloader_kwargs["sampler"] = sampler
         if prefetch_factor is not None:
             dataloader_kwargs["prefetch_factor"] = prefetch_factor
+        if num_workers > 0:
+            raw_context_value: Any | None = self.cfg.training.get(
+                "dataloader_multiprocessing_context"
+            )
+            context_value: str | None = None
+            if raw_context_value is not None:
+                normalized_context: str = str(raw_context_value).strip().lower()
+                if normalized_context and normalized_context not in {"none", "null"}:
+                    context_value = normalized_context
+            elif os.name == "posix":
+                # Python 3.14 defaults to forkserver, which is expensive for our
+                # heavy HF dataset/tokenizer stack. Use fork on Linux for faster
+                # startup and better page-cache sharing across workers.
+                context_value = "fork"
+            if context_value is not None:
+                dataloader_kwargs["multiprocessing_context"] = context_value
         return DataLoader(**dataloader_kwargs)
 
     # --- Public methods ---

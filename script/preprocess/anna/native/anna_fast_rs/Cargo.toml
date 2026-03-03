@@ -1,0 +1,13 @@
+[package]
+name = "anna_fast_rs"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "anna_fast_rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.28", features = ["extension-module"] }
+unicode-normalization = "0.1"
+unicode-general-category = "1.0"

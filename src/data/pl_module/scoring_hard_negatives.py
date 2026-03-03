@@ -7,6 +7,7 @@ from torch.utils.data import DataLoader, Sampler
 
 from src.data.pd_module.scoring_hard_negatives import HardNegativesScoringPDModule
 from src.data.pl_module.scoring import ScoringCollator
+from src.utils.script_setup import normalize_optional_str
 from src.data.pd_module.scoring import _resolve_local_files_only
 from src.data.sampler import NonPaddingDistributedSampler
 
@@ -48,6 +49,7 @@ class ScoringHardNegativesDataModule(L.LightningDataModule):
         )
         collator = ScoringCollator(
             model_name=str(scoring_cfg.model_name),
+            tokenizer_name=normalize_optional_str(scoring_cfg.tokenizer_name),
             max_length=int(scoring_cfg.max_length),
             tokenize_chunk_size=int(scoring_cfg.tokenize_chunk_size),
             local_files_only=local_files_only,

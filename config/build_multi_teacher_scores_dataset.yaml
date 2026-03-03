@@ -1,0 +1,94 @@
+# Build one train split with 5 cross-encoder columns + teacher_scores
+seed: 10
+log_dir_base: "log"
+tag: null
+log_dir: ${tagged_log_dir:${log_dir_base},${tag}}
+root_dir_path: "."
+
+defaults:
+  - _self_
+  - override hydra/job_logging: colorlog_custom
+
+input_defaults: &input_defaults
+  path: null
+  format: auto
+  score_key: scores
+  query_id_key: query_id
+  doc_ids_key: doc_ids
+  labels_key: labels
+  output_score_key: null
+  hf_name: null
+  hf_subset: null
+  hf_split: train
+  hf_cache_dir: null
+  hf_data_files: null
+
+inputs:
+  - <<: *input_defaults
+    name: minilm_l6_v2
+    output_score_key: score_minilm_l6_v2
+    path: data/hard_negatives/scores/msmarco_hardneg_100_minilm_l6_v2_scores.jsonl
+  - <<: *input_defaults
+    name: rankt53b_repro
+    output_score_key: score_rankt53b_repro
+    path: data/hard_negatives/scores/msmarco_hardneg_100_rankt53b_repro_scores.jsonl
+  - <<: *input_defaults
+    name: debertav3
+    output_score_key: score_debertav3
+    path: data/hard_negatives/scores/msmarco_hardneg_100_debertav3_scores.jsonl
+  - <<: *input_defaults
+    name: debertav2
+    output_score_key: score_debertav2
+    path: data/hard_negatives/scores/msmarco_hardneg_100_debertav2_scores.jsonl
+  - <<: *input_defaults
+    name: electra
+    output_score_key: score_electra
+    path: data/hard_negatives/scores/msmarco_hardneg_100_electra_scores.jsonl
+
+merge:
+  output_path: data/hard_negatives/msmarco_hardneg_100_multi_teacher_scores.jsonl
+  teacher_score_key: teacher_scores
+  output_query_id_key: query_id
+  output_doc_ids_key: doc_ids
+  output_labels_key: labels
+  store_normalized_score_columns: false
+  normalized_score_suffix: _normalized
+  overwrite: true
+  strict_alignment: true
+  strict_labels: true
+  require_labels: true
+  validate_finite_scores: true
+  flush_every: 1000
+  max_rows: null
+
+normalization:
+  enabled: true
+  epsilon: 1e-6
+
+postprocess:
+  enabled: true
+  parquet_path: null
+  cleanup_jsonl: true
+  require_count_match: true
+
+upload:
+  enabled: false
+  repo_id: Hyukkyu/msmarco-hardneg-100-multi-teacher-scores
+  split: train
+  private: false
+  hf_token: null
+  commit_message: Add multi-teacher scores train split
+
+hydra:
+  output_subdir: null
+  run:
+    dir: ${log_dir}
+  job_logging:
+    handlers:
+      console:
+        class: logging.StreamHandler
+        formatter: colorlog
+        stream: ext://sys.stdout
+      file:
+        class: logging.FileHandler
+        filename: ${log_dir}/build_multi_teacher_scores_dataset.log

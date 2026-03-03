@@ -1,4 +1,3 @@
-import logging
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
@@ -25,10 +24,11 @@ from src.model.pl_module.utils import (
 )
 from src.model.retriever.sparse.neural.splade import SpladeModel
 from src.utils import is_rank_zero, log_if_rank_zero
+from src.utils.logging import get_logger
 from src.utils.model_utils import resolve_tagged_output_dir
 from src.utils.transformers import build_tokenizer
 
-logger: logging.Logger = logging.getLogger("SPLADEEncodeModule")
+logger = get_logger("SPLADEEncodeModule")
 
 
 class SPLADEEncodeModule(L.LightningModule):
@@ -40,8 +40,22 @@ class SPLADEEncodeModule(L.LightningModule):
         self.cfg: DictConfig = cfg
         self.model: SpladeModel = self._load_model()
         self._tokenizer: PreTrainedTokenizerBase = build_tokenizer(
-            self.cfg.model.huggingface_name
+            str(self.cfg.model.huggingface_name),
+            use_fast_tokenizer=bool(self.cfg.model.use_fast_tokenizer),
+            trust_remote_code=bool(self.cfg.model.trust_remote_code),
+            require_fast_tokenizer=bool(self.cfg.model.require_fast_tokenizer),
         )
+        if bool(self.cfg.model.require_fast_tokenizer) and not bool(
+            self._tokenizer.is_fast
+        ):
+            raise ValueError(
+                "Fast tokenizer is required but a slow tokenizer was loaded: "
+                f"{self.cfg.model.huggingface_name}"
+            )
+        if self._tokenizer.pad_token is None:
+            self._tokenizer.pad_token = (
+                self._tokenizer.eos_token or self._tokenizer.cls_token
+            )
         self._writer: SparseShardWriter | None = None
         self._async_writer: AsyncSparseWriter | None = None
         self._exclude_token_ids_tensor: torch.Tensor | None = None
@@ -55,12 +69,12 @@ class SPLADEEncodeModule(L.LightningModule):
             self.cfg.encoding.get("async_write_queue_size", 8)
         )
         self._torch_compile_mark_step: Callable[[], None] | None = None
-        self._sparsify_core_topk: Callable[
-            ..., tuple[torch.Tensor, torch.Tensor, torch.Tensor]
-        ] | None = None
-        self._sparsify_core_threshold: Callable[
-            ..., tuple[torch.Tensor, torch.Tensor, torch.Tensor]
-        ] | None = None
+        self._sparsify_core_topk: (
+            Callable[..., tuple[torch.Tensor, torch.Tensor, torch.Tensor]] | None
+        ) = None
+        self._sparsify_core_threshold: (
+            Callable[..., tuple[torch.Tensor, torch.Tensor, torch.Tensor]] | None
+        ) = None
         self._setup_torch_compile()
 
     # --- Protected methods ---
@@ -115,10 +129,7 @@ class SPLADEEncodeModule(L.LightningModule):
     def _sparsify_batch(
         self, vectors: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        if (
-            self._sparsify_core_topk is None
-            and self._sparsify_core_threshold is None
-        ):
+        if self._sparsify_core_topk is None and self._sparsify_core_threshold is None:
             return sparsify_batch_gpu_csr(
                 vectors,
                 exclude_token_ids=self._exclude_token_ids_tensor,
@@ -188,7 +199,7 @@ class SPLADEEncodeModule(L.LightningModule):
             config_text: str = OmegaConf.to_yaml(self.cfg, resolve=True)
             config_path.write_text(config_text, encoding="utf-8")
             log_if_rank_zero(logger, f"Saved encoding config to {config_path}.")
-        vocab_size: int = int(self.model.encoder.mlm.config.vocab_size)
+        vocab_size: int = int(self.model.encoder.vocab_size)
         exclude_token_ids: list[int] = self._resolve_exclude_token_ids()
         writer_cfg = SparseWriterConfig(
             output_dir=encode_path,

@@ -1,14 +1,13 @@
-from typing import Any
-
 import lightning as L
-import torch
 from omegaconf import DictConfig
 from torch.utils.data import DataLoader
-from torch.utils.data.distributed import DistributedSampler
 from transformers import PreTrainedTokenizerBase
 
+from src.data.pl_module.common import (
+    build_inference_dataloader,
+    build_model_tokenizer,
+)
 from src.data.pd_module import EncodePDModule
-from src.utils.transformers import build_tokenizer
 
 
 class EncodeDataModule(L.LightningDataModule):
@@ -18,9 +17,7 @@ class EncodeDataModule(L.LightningDataModule):
     def __init__(self, cfg: DictConfig) -> None:
         super().__init__()
         self.cfg: DictConfig = cfg
-        self.tokenizer: PreTrainedTokenizerBase = build_tokenizer(
-            self.cfg.model.huggingface_name
-        )
+        self.tokenizer: PreTrainedTokenizerBase = build_model_tokenizer(self.cfg.model)
         self._dataset: EncodePDModule | None = None
 
     # --- Property methods ---
@@ -44,23 +41,17 @@ class EncodeDataModule(L.LightningDataModule):
 
     def predict_dataloader(self) -> DataLoader:
         num_workers: int = int(self.cfg.encoding.num_workers)
-        prefetch_factor: int | None = None
-        if num_workers > 0:
-            prefetch_factor = int(self.cfg.encoding.prefetch_factor)
-        sampler: DistributedSampler | None = None
-        if torch.distributed.is_available() and torch.distributed.is_initialized():
-            sampler = DistributedSampler(self.dataset, shuffle=False)
-        dataloader_kwargs: dict[str, Any] = {
-            "dataset": self.dataset,
-            "batch_size": int(self.cfg.encoding.batch_size),
-            "num_workers": num_workers,
-            "collate_fn": self.dataset.collator,
-            "drop_last": False,
-            "pin_memory": not bool(self.cfg.encoding.use_cpu),
-        }
-        if sampler is not None:
-            dataloader_kwargs["sampler"] = sampler
-            dataloader_kwargs["shuffle"] = False
-        if prefetch_factor is not None:
-            dataloader_kwargs["prefetch_factor"] = prefetch_factor
-        return DataLoader(**dataloader_kwargs)
+        prefetch_factor: int | None = (
+            int(self.cfg.encoding.prefetch_factor) if num_workers > 0 else None
+        )
+        return build_inference_dataloader(
+            dataset=self.dataset,
+            batch_size=int(self.cfg.encoding.batch_size),
+            num_workers=num_workers,
+            collate_fn=self.dataset.collator,
+            use_cpu=bool(self.cfg.encoding.use_cpu),
+            shuffle=False,
+            drop_last=False,
+            distributed_shuffle=False,
+            prefetch_factor=prefetch_factor,
+        )

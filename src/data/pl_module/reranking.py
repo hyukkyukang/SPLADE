@@ -1,14 +1,13 @@
-from typing import Any
-
 import lightning as L
-import torch
 from omegaconf import DictConfig
 from torch.utils.data import DataLoader
-from torch.utils.data.distributed import DistributedSampler
 from transformers import PreTrainedTokenizerBase
 
+from src.data.pl_module.common import (
+    build_inference_dataloader,
+    build_model_tokenizer,
+)
 from src.data.pd_module import RerankingPDModule
-from src.utils.transformers import build_tokenizer
 
 
 class RerankingDataModule(L.LightningDataModule):
@@ -18,9 +17,7 @@ class RerankingDataModule(L.LightningDataModule):
     def __init__(self, cfg: DictConfig) -> None:
         super().__init__()
         self.cfg: DictConfig = cfg
-        self.tokenizer: PreTrainedTokenizerBase = build_tokenizer(
-            self.cfg.model.huggingface_name
-        )
+        self.tokenizer: PreTrainedTokenizerBase = build_model_tokenizer(self.cfg.model)
         self._dataset: RerankingPDModule | None = None
 
     # --- Property methods ---
@@ -38,24 +35,16 @@ class RerankingDataModule(L.LightningDataModule):
 
     # --- Protected methods ---
     def _build_dataloader(self, *, shuffle: bool) -> DataLoader:
-        num_workers: int = int(self.cfg.testing.num_workers)
-        sampler: DistributedSampler | None = (
-            DistributedSampler(self.dataset, shuffle=shuffle)
-            if torch.distributed.is_available() and torch.distributed.is_initialized()
-            else None
+        return build_inference_dataloader(
+            dataset=self.dataset,
+            batch_size=int(self.cfg.testing.batch_size),
+            num_workers=int(self.cfg.testing.num_workers),
+            collate_fn=self.dataset.collator,
+            use_cpu=bool(self.cfg.testing.use_cpu),
+            shuffle=bool(shuffle),
+            drop_last=False,
+            distributed_shuffle=bool(shuffle),
         )
-        dataloader_kwargs: dict[str, Any] = {
-            "dataset": self.dataset,
-            "batch_size": int(self.cfg.testing.batch_size),
-            "num_workers": num_workers,
-            "collate_fn": self.dataset.collator,
-            "shuffle": shuffle if sampler is None else False,
-            "drop_last": False,
-            "pin_memory": not bool(self.cfg.testing.use_cpu),
-        }
-        if sampler is not None:
-            dataloader_kwargs["sampler"] = sampler
-        return DataLoader(**dataloader_kwargs)
 
     # --- Public methods ---
     def prepare_data(self) -> None:

@@ -1,11 +1,10 @@
-import logging
 from typing import Any
 
 import pyarrow as pa
 
-from src.utils.logging import log_if_rank_zero
+from src.utils.logging import get_logger, log_if_rank_zero
 
-logger: logging.Logger = logging.getLogger("src.data.utils")
+logger = get_logger("src.data.utils")
 
 
 def resolve_dataset_column(dataset: Any, column_name: str) -> pa.Array:

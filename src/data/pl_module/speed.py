@@ -1,14 +1,13 @@
-from typing import Any
-
 import lightning as L
-import torch
 from omegaconf import DictConfig
 from torch.utils.data import DataLoader
-from torch.utils.data.distributed import DistributedSampler
 from transformers import PreTrainedTokenizerBase
 
+from src.data.pl_module.common import (
+    build_inference_dataloader,
+    build_model_tokenizer,
+)
 from src.data.pd_module import RetrievalPDModule
-from src.utils.transformers import build_tokenizer
 
 
 class RetrievalSpeedDataModule(L.LightningDataModule):
@@ -18,9 +17,7 @@ class RetrievalSpeedDataModule(L.LightningDataModule):
     def __init__(self, cfg: DictConfig) -> None:
         super().__init__()
         self.cfg: DictConfig = cfg
-        self.tokenizer: PreTrainedTokenizerBase = build_tokenizer(
-            self.cfg.model.huggingface_name
-        )
+        self.tokenizer: PreTrainedTokenizerBase = build_model_tokenizer(self.cfg.model)
         self._dataset: RetrievalPDModule | None = None
 
     # --- Property methods ---
@@ -59,20 +56,13 @@ class RetrievalSpeedDataModule(L.LightningDataModule):
 
     # --- Protected methods ---
     def _build_dataloader(self, batch_size: int) -> DataLoader:
-        num_workers: int = int(self.cfg.testing.num_workers)
-        sampler: DistributedSampler | None = (
-            DistributedSampler(self.dataset, shuffle=False)
-            if torch.distributed.is_available() and torch.distributed.is_initialized()
-            else None
+        return build_inference_dataloader(
+            dataset=self.dataset,
+            batch_size=int(batch_size),
+            num_workers=int(self.cfg.testing.num_workers),
+            collate_fn=self.dataset.collator,
+            use_cpu=bool(self.cfg.testing.use_cpu),
+            shuffle=False,
+            drop_last=False,
+            distributed_shuffle=False,
         )
-        dataloader_kwargs: dict[str, Any] = {
-            "dataset": self.dataset,
-            "batch_size": batch_size,
-            "num_workers": num_workers,
-            "collate_fn": self.dataset.collator,
-            "sampler": sampler,
-            "shuffle": False,
-            "drop_last": False,
-            "pin_memory": not bool(self.cfg.testing.use_cpu),
-        }
-        return DataLoader(**dataloader_kwargs)

@@ -1,11 +1,15 @@
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 import torch
 from torch import nn
 from torch.nn import functional as F
-from transformers import AutoModelForMaskedLM
+from transformers import PreTrainedModel
 
 from src.utils.logging import suppress_output_if_not_rank_zero
+from src.utils.transformers import build_masked_lm_model, resolve_model_name_or_path
+
+_COMPACT_HEAD_FILENAME: str = "splade_compact_head.pt"
 
 
 class _Log1pRelu(nn.Module):
@@ -40,15 +44,57 @@ def _resolve_activation_module(activation: str) -> nn.Module:
     raise ValueError(f"Unsupported sparse activation: {activation}")
 
 
+def _extract_hidden_module(model: PreTrainedModel) -> nn.Module:
+    """Resolve the base transformer module that returns last_hidden_state."""
+    if hasattr(model, "model"):
+        module: Any = getattr(model, "model")
+        if isinstance(module, nn.Module):
+            return module
+    if hasattr(model, "base_model"):
+        module = getattr(model, "base_model")
+        if isinstance(module, nn.Module):
+            return module
+    if hasattr(model, "get_decoder"):
+        decoder_fn: Any = getattr(model, "get_decoder")
+        if callable(decoder_fn):
+            module = decoder_fn()
+            if isinstance(module, nn.Module):
+                return module
+    raise ValueError("Unable to resolve hidden-state backbone module from model.")
+
+
+def _resolve_compact_head_path(
+    model_name: str,
+    model: PreTrainedModel,
+) -> Path | None:
+    """Return compact-head artifact path when available."""
+    resolved_source: str = resolve_model_name_or_path(model_name)
+    model_dir: Path = Path(resolved_source).expanduser()
+    if not model_dir.is_dir():
+        return None
+    candidates: list[Path] = []
+    config_file: Any = getattr(model.config, "splade_compact_head_file", None)
+    if config_file is not None and str(config_file).strip():
+        candidates.append(model_dir / str(config_file))
+    candidates.append(model_dir / _COMPACT_HEAD_FILENAME)
+    candidate: Path
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 class SpladeEncoder(nn.Module):
     # --- Special methods ---
     def __init__(
         self,
         model_name: str,
         sparse_activation: str,
+        huggingface_model_class: str = "AutoModelForMaskedLM",
         attn_implementation: Optional[str] = None,
         dtype: Optional[torch.dtype] = None,
         tie_word_embeddings: bool = False,
+        freeze_backbone: bool = False,
     ) -> None:
         super().__init__()
         kwargs: dict[str, Any] = {}
@@ -57,17 +103,158 @@ class SpladeEncoder(nn.Module):
         if dtype is not None:
             kwargs["dtype"] = dtype
         kwargs["tie_word_embeddings"] = tie_word_embeddings
-        # Load the masked language model backbone.
-        self.mlm: AutoModelForMaskedLM
+        # Load the configured language-model backbone.
+        self.mlm: PreTrainedModel
         # Avoid duplicate load reports on non-zero ranks.
         with suppress_output_if_not_rank_zero():
-            self.mlm = AutoModelForMaskedLM.from_pretrained(model_name, **kwargs)
+            self.mlm = build_masked_lm_model(
+                model_name,
+                model_class_name=huggingface_model_class,
+                **kwargs,
+            )
         self.sparse_activation: str = sparse_activation
         self.activation: nn.Module = _resolve_activation_module(sparse_activation)
         self._neg_inf: torch.Tensor
         self.register_buffer("_neg_inf", torch.tensor(float("-inf")), persistent=False)
+        self._output_vocab_size: int = int(self.mlm.config.vocab_size)
+        self.compact_head: nn.Linear | None = None
+        self._hidden_model: nn.Module | None = None
+        self.register_buffer(
+            "_compact_token_ids",
+            torch.empty((0,), dtype=torch.long),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_token_id_to_output_index",
+            torch.empty((0,), dtype=torch.long),
+            persistent=False,
+        )
+        self._setup_compact_head(model_name=model_name, dtype=dtype)
+        self.freeze_backbone: bool = bool(freeze_backbone)
+        if self.freeze_backbone:
+            self._freeze_backbone_params()
 
     # --- Protected methods ---
+    def _setup_compact_head(
+        self, *, model_name: str, dtype: Optional[torch.dtype]
+    ) -> None:
+        """Load an optional compact output head for faster SPLADE logits."""
+        artifact_path: Path | None = _resolve_compact_head_path(model_name, self.mlm)
+        if artifact_path is None:
+            return
+
+        payload: Any = torch.load(str(artifact_path), map_location="cpu")
+        if not isinstance(payload, dict):
+            raise ValueError(f"Invalid compact-head payload at {artifact_path}.")
+        raw_weight: Any = payload.get("weight")
+        if not isinstance(raw_weight, torch.Tensor) or raw_weight.ndim != 2:
+            raise ValueError(
+                f"Compact-head weight is missing or invalid at {artifact_path}."
+            )
+
+        raw_bias: Any = payload.get("bias")
+        has_bias: bool = isinstance(raw_bias, torch.Tensor) and raw_bias.ndim == 1
+        out_features: int = int(raw_weight.shape[0])
+        in_features: int = int(raw_weight.shape[1])
+        compact_head: nn.Linear = nn.Linear(
+            in_features=in_features,
+            out_features=out_features,
+            bias=has_bias,
+        )
+        compact_head.weight.data.copy_(
+            raw_weight.to(
+                dtype=compact_head.weight.dtype,
+                device=compact_head.weight.device,
+            )
+        )
+        if has_bias and compact_head.bias is not None:
+            compact_head.bias.data.copy_(
+                raw_bias.to(
+                    dtype=compact_head.bias.dtype, device=compact_head.bias.device
+                )
+            )
+        if dtype is not None:
+            compact_head = compact_head.to(dtype=dtype)
+
+        token_ids: torch.Tensor = torch.empty((0,), dtype=torch.long)
+        raw_token_ids: Any = payload.get("token_ids")
+        if isinstance(raw_token_ids, torch.Tensor):
+            token_ids = raw_token_ids.to(dtype=torch.long).flatten().cpu()
+        elif isinstance(raw_token_ids, list):
+            token_ids = torch.tensor(
+                [int(token_id) for token_id in raw_token_ids],
+                dtype=torch.long,
+            )
+
+        self.compact_head = compact_head
+        self._hidden_model = _extract_hidden_module(self.mlm)
+        self._output_vocab_size = out_features
+        if int(token_ids.numel()) == out_features:
+            self._compact_token_ids = token_ids
+            max_token_id: int = int(token_ids.max().item()) if out_features > 0 else -1
+            if max_token_id >= 0:
+                token_id_to_output_index: torch.Tensor = torch.full(
+                    (max_token_id + 1,),
+                    fill_value=-1,
+                    dtype=torch.long,
+                )
+                token_id_to_output_index[token_ids] = torch.arange(
+                    out_features, dtype=torch.long
+                )
+                self._token_id_to_output_index = token_id_to_output_index
+            else:
+                self._token_id_to_output_index = torch.empty((0,), dtype=torch.long)
+
+    def _freeze_backbone_params(self) -> None:
+        """Freeze backbone params while keeping the active sparse head trainable."""
+        parameter: nn.Parameter
+        for parameter in self.mlm.parameters():
+            parameter.requires_grad_(False)
+
+        if self.compact_head is not None:
+            for parameter in self.compact_head.parameters():
+                parameter.requires_grad_(True)
+        else:
+            output_head: Any = self.mlm.get_output_embeddings()
+            if isinstance(output_head, nn.Module):
+                for parameter in output_head.parameters():
+                    parameter.requires_grad_(True)
+        self.mlm.eval()
+
+    def build_exclude_mask(self, exclude_ids: torch.Tensor) -> torch.Tensor:
+        """Build an output-dimension mask from tokenizer token ids."""
+        if int(exclude_ids.numel()) == 0:
+            return torch.empty((0,), dtype=torch.bool)
+        compact_token_ids: torch.Tensor = self._compact_token_ids
+        if int(compact_token_ids.numel()) > 0:
+            return torch.isin(
+                compact_token_ids,
+                exclude_ids.to(device=compact_token_ids.device, dtype=torch.long),
+            )
+        vocab_size: int = int(self._output_vocab_size)
+        mask: torch.Tensor = torch.zeros(vocab_size, dtype=torch.bool)
+        valid_ids: torch.Tensor = exclude_ids[
+            (exclude_ids >= 0) & (exclude_ids < vocab_size)
+        ]
+        if int(valid_ids.numel()) > 0:
+            mask[valid_ids] = True
+        return mask
+
+    @property
+    def vocab_size(self) -> int:
+        return int(self._output_vocab_size)
+
+    @property
+    def token_id_to_output_index(self) -> torch.Tensor:
+        return self._token_id_to_output_index
+
+    def train(self, mode: bool = True) -> "SpladeEncoder":
+        super().train(mode)
+        if self.freeze_backbone:
+            # Keep backbone deterministic when it is frozen.
+            self.mlm.eval()
+        return self
+
     def _pool_sparse(
         self,
         token_scores: torch.Tensor,
@@ -95,8 +282,30 @@ class SpladeEncoder(nn.Module):
         attention_mask: torch.Tensor,
         pooling_mode: torch.Tensor,
     ) -> torch.Tensor:
-        outputs: Any = self.mlm(input_ids=input_ids, attention_mask=attention_mask)
-        logits: torch.Tensor = outputs.logits
+        logits: torch.Tensor
+        if self.compact_head is None:
+            outputs: Any = self.mlm(input_ids=input_ids, attention_mask=attention_mask)
+            if not hasattr(outputs, "logits"):
+                raise ValueError(
+                    "Selected Hugging Face model class does not expose token logits; "
+                    "SPLADE requires per-token vocabulary logits for sparse pooling."
+                )
+            logits = outputs.logits
+        else:
+            if self._hidden_model is None:
+                raise ValueError("Compact head is enabled but hidden model is missing.")
+            hidden_outputs: Any = self._hidden_model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                return_dict=True,
+            )
+            if not hasattr(hidden_outputs, "last_hidden_state"):
+                raise ValueError(
+                    "Hidden-state backbone does not expose last_hidden_state."
+                )
+            hidden_states: torch.Tensor = hidden_outputs.last_hidden_state
+            compact_head: nn.Linear = self.compact_head
+            logits = compact_head(hidden_states.to(dtype=compact_head.weight.dtype))
         token_scores: torch.Tensor = self.activation(logits)
         embeddings: torch.Tensor = self._pool_sparse(
             token_scores, attention_mask, pooling_mode
@@ -125,6 +334,7 @@ class SpladeModel(nn.Module):
     def __init__(
         self,
         model_name: str,
+        huggingface_model_class: str,
         query_pooling: str,
         doc_pooling: str,
         sparse_activation: str,
@@ -133,15 +343,18 @@ class SpladeModel(nn.Module):
         normalize: bool = False,
         doc_only: bool = False,
         tie_word_embeddings: bool = False,
+        freeze_backbone: bool = False,
     ) -> None:
         super().__init__()
         # Build encoder shared by query and document pooling.
         self.encoder: SpladeEncoder = SpladeEncoder(
             model_name=model_name,
             sparse_activation=sparse_activation,
+            huggingface_model_class=huggingface_model_class,
             attn_implementation=attn_implementation,
             dtype=dtype,
             tie_word_embeddings=tie_word_embeddings,
+            freeze_backbone=freeze_backbone,
         )
         self.query_pooling: str = query_pooling
         self.doc_pooling: str = doc_pooling
@@ -170,10 +383,7 @@ class SpladeModel(nn.Module):
         self.normalize: bool = normalize
         self.doc_only: bool = bool(doc_only)
         exclude_token_ids: torch.Tensor = self._build_query_exclude_token_ids()
-        vocab_size: int = int(self.encoder.mlm.config.vocab_size)
-        exclude_mask: torch.Tensor = self._build_query_exclude_mask(
-            exclude_token_ids, vocab_size
-        )
+        exclude_mask: torch.Tensor = self.encoder.build_exclude_mask(exclude_token_ids)
         self.register_buffer(
             "_query_exclude_token_ids", exclude_token_ids, persistent=False
         )
@@ -238,37 +448,45 @@ class SpladeModel(nn.Module):
         unique_ids: list[int] = sorted(set(candidate_ids))
         return torch.tensor(unique_ids, dtype=torch.long)
 
-    def _build_query_exclude_mask(
-        self, exclude_ids: torch.Tensor, vocab_size: int
-    ) -> torch.Tensor:
-        """Build a vocab-sized mask for excluded query tokens."""
-        if int(exclude_ids.numel()) == 0:
-            return torch.empty((0,), dtype=torch.bool)
-        mask: torch.Tensor = torch.zeros(int(vocab_size), dtype=torch.bool)
-        mask[exclude_ids] = True
-        return mask
-
     def _encode_query_terms(
         self, input_ids: torch.Tensor, attention_mask: torch.Tensor
     ) -> torch.Tensor:
         """Encode queries as a bag-of-words over input tokens."""
         batch_size: int = int(input_ids.shape[0])
-        vocab_size: int = int(self.encoder.mlm.config.vocab_size)
+        vocab_size: int = int(self.encoder.vocab_size)
         device: torch.device = input_ids.device
         dtype: torch.dtype = self.encoder.mlm.dtype
 
         token_ids: torch.Tensor = input_ids.to(dtype=torch.long)
         # Mask out padding and special tokens before counting terms.
         token_mask: torch.Tensor = attention_mask.to(dtype=torch.bool)
-        exclude_mask: torch.Tensor = self._query_exclude_mask
-        if int(exclude_mask.numel()) > 0:
-            exclude_mask = exclude_mask.to(device=device)
-            token_mask = token_mask & ~exclude_mask[token_ids]
-        token_values: torch.Tensor = token_mask.to(dtype=dtype)
+        exclude_ids: torch.Tensor = self._query_exclude_token_ids
+        if int(exclude_ids.numel()) > 0:
+            token_mask = token_mask & ~torch.isin(
+                token_ids, exclude_ids.to(device=device, dtype=torch.long)
+            )
         bow: torch.Tensor = torch.zeros(
             (batch_size, vocab_size), dtype=dtype, device=device
         )
-        # Accumulate term counts for each query in the batch.
+        token_id_to_output_index: torch.Tensor = self.encoder.token_id_to_output_index
+        if int(token_id_to_output_index.numel()) > 0:
+            token_id_to_output_index = token_id_to_output_index.to(device=device)
+            mapped_ids: torch.Tensor = torch.full_like(token_ids, fill_value=-1)
+            in_range_mask: torch.Tensor = token_ids < int(
+                token_id_to_output_index.shape[0]
+            )
+            if bool(in_range_mask.any()):
+                mapped_ids[in_range_mask] = token_id_to_output_index[
+                    token_ids[in_range_mask]
+                ]
+            valid_mask: torch.Tensor = token_mask & (mapped_ids >= 0)
+            if bool(valid_mask.any()):
+                safe_ids: torch.Tensor = mapped_ids.masked_fill(~valid_mask, 0)
+                token_values: torch.Tensor = valid_mask.to(dtype=dtype)
+                bow.scatter_add_(1, safe_ids, token_values)
+            return bow
+        # Default path: output ids are tokenizer ids.
+        token_values = token_mask.to(dtype=dtype)
         bow.scatter_add_(1, token_ids, token_values)
         return bow
 

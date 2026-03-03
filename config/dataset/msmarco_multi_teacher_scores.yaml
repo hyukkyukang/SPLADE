@@ -1,0 +1,38 @@
+# @package dataset
+defaults:
+  - _base@_here_
+
+name: msmarco_multi_teacher_scores
+type: msmarco_distill_scores
+split: train
+
+# Multi-teacher scored metadata rows
+# (query_id/doc_ids/labels + 5 model score columns + teacher_scores).
+hf_name: Hyukkyu/msmarco-hard-negatives-scores
+hf_subset: null
+hf_cache_dir: null
+hf_max_samples: null
+hf_skip_samples: 0
+hf_data_files: null
+
+query_corpus_hf_name: sentence-transformers/msmarco
+query_corpus_hf_cache_dir: null
+query_corpus_hf_data_files: null
+
+# Read distillation targets from teacher_scores by default.
+score_scores_column: teacher_scores
+
+# Column names for query/corpus datasets.
+query_id_column: query_id
+query_text_column: query
+corpus_id_column: passage_id
+corpus_text_column: passage
+
+num_negatives: 8
+num_positives: 1
+
+negative_sampling:
+  strategy: topk
+  top_k: null
+  random_k: null
+  random_pool: null

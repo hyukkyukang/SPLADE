@@ -63,9 +63,15 @@ class EncodePDModule(PDModule):
         self._corpus_indices = list(range(dataset_len))
         return self._corpus_indices
 
+    def _requires_corpus_text_dataset(self) -> bool:
+        return True
+
     # --- Public methods ---
     def setup(self) -> None:
+        self._prepare_required_text_artifacts()
         _ = self._resolve_corpus_indices()
 
     def prepare_data(self) -> None:
-        _ = self.dataset.corpus_dataset
+        # Encode datasets can be BEIR-style and may not expose meta_dataset.
+        # Keep prepare_data lightweight and defer text loading to setup().
+        pass

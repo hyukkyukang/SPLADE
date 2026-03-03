@@ -1,5 +1,4 @@
 import json
-import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Sequence
@@ -8,7 +7,9 @@ import numba
 import numpy as np
 import torch
 
-logger: logging.Logger = logging.getLogger("src.index.sparse")
+from src.utils.logging import get_logger
+
+logger = get_logger("src.index.sparse")
 
 
 def resolve_numpy_dtype(dtype_name: str) -> np.dtype:

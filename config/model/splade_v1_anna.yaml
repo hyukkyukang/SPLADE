@@ -1,0 +1,11 @@
+# @package model
+defaults:
+  - _base
+
+name: splade_v1_anna
+huggingface_name: ${root_dir_path}/data/model/anna_base_hf
+trust_remote_code: true
+use_fast_tokenizer: true
+require_fast_tokenizer: true
+query_pooling: sum
+doc_pooling: sum

@@ -8,8 +8,9 @@ import torch
 import torch.multiprocessing as mp
 
 from src.index.sparse import SparseShardWriter
+from src.utils.logging import get_logger
 
-logger: logging.Logger = logging.getLogger("src.index.async_writer")
+logger = get_logger("src.index.async_writer")
 
 
 @dataclass(frozen=True)

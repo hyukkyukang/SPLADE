@@ -16,6 +16,10 @@ from src.utils.logging import (
     suppress_httpx_logging,
     suppress_pytorch_lightning_tips,
 )
+from src.utils.normalize import (
+    normalize_optional_path as _normalize_optional_path_impl,
+    normalize_optional_str as _normalize_optional_str_impl,
+)
 from src.utils.seed import set_seed
 from src.utils.trainer import (
     get_cpu_trainer_kwargs,
@@ -36,11 +40,10 @@ def normalize_tag(tag: object | None) -> str | None:
 
 
 def _resolve_tagged_log_dir(log_dir_base: str, tag: str | None) -> str:
-    """Build the log directory, appending the tag when provided."""
+    """Build the log directory, appending {tag|no_tag} as final segment."""
     tag_value: str | None = normalize_tag(tag)
-    if tag_value is None:
-        return log_dir_base
-    return os.path.join(log_dir_base, tag_value)
+    tag_segment: str = tag_value if tag_value is not None else "no_tag"
+    return os.path.join(log_dir_base, tag_segment)
 
 
 def _register_tagged_log_dir_resolver() -> None:
@@ -99,6 +102,22 @@ def configure_script_environment(
         suppress_dataloader_workers_warning()
 
 
+def configure_default_entrypoint_environment(
+    *,
+    load_env: bool,
+    set_matmul_precision: bool = True,
+) -> None:
+    """Configure the standard runtime environment for script entrypoints."""
+    configure_script_environment(
+        load_env=bool(load_env),
+        set_tokenizers_parallelism=True,
+        set_matmul_precision=bool(set_matmul_precision),
+        suppress_lightning_tips=True,
+        suppress_httpx=True,
+        suppress_dataloader_workers=True,
+    )
+
+
 def initialize_run(
     cfg: DictConfig,
     *,
@@ -116,22 +135,12 @@ def initialize_run(
 
 def normalize_optional_path(value: Any) -> str | None:
     """Normalize optional path-like values from configs."""
-    if value is None:
-        return None
-    text: str = str(value).strip()
-    return text if text else None
+    return _normalize_optional_path_impl(value)
 
 
 def normalize_optional_str(value: Any) -> str | None:
     """Normalize optional string values from configs."""
-    if value is None:
-        return None
-    text: str = str(value).strip()
-    if not text:
-        return None
-    if text.lower() in {"none", "null"}:
-        return None
-    return text
+    return _normalize_optional_str_impl(value)
 
 
 def resolve_trainer_settings(cfg_section: DictConfig) -> tuple[dict[str, Any], str]:

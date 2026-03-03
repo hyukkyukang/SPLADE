@@ -52,6 +52,7 @@ class LossComputer(nn.Module):
         loss_type: str,
         temperature: float,
         distill_enabled: bool,
+        include_main_loss_when_distilling: bool,
         distill_losses: list[tuple[str, float]],
         reg_query_weight: float,
         reg_doc_weight: float,
@@ -62,6 +63,9 @@ class LossComputer(nn.Module):
         self.loss_type: str = loss_type.replace("-", "_").lower()
         self.temperature: float = float(temperature)
         self.distill_enabled: bool = bool(distill_enabled)
+        self.include_main_loss_when_distilling: bool = bool(
+            include_main_loss_when_distilling
+        )
         self.reg_query_weight: float = float(reg_query_weight)
         self.reg_doc_weight: float = float(reg_doc_weight)
         self.reg_type: str = str(reg_type).lower()
@@ -74,9 +78,7 @@ class LossComputer(nn.Module):
         )
         self._main_loss_fn: _MainLossFn = self._resolve_main_loss_fn(self.loss_type)
         self._distill_losses: list[_DistillLossSpec] = (
-            self._resolve_distill_losses(distill_losses)
-            if self.distill_enabled
-            else []
+            self._resolve_distill_losses(distill_losses) if self.distill_enabled else []
         )
         self._reg_query_fn: _RegLossFn = self._resolve_reg_loss_fn(
             self.reg_type, enabled=self.reg_query_weight > 0
@@ -246,30 +248,27 @@ class LossComputer(nn.Module):
         pos_mask: torch.Tensor,
         doc_mask: torch.Tensor,
     ) -> torch.Tensor:
-        """Compute margin-MSE over positive/negative score differences."""
+        """Compute MarginMSE over all valid positive/negative pairs per query."""
         valid_teacher: torch.Tensor = torch.isfinite(teacher_scores)
-        pos_valid: torch.Tensor = pos_mask & doc_mask
-        neg_valid: torch.Tensor = (~pos_mask) & doc_mask
-        has_pos: torch.Tensor = pos_valid.any(dim=1)
-        has_neg: torch.Tensor = neg_valid.any(dim=1)
-        valid_rows: torch.Tensor = has_pos & has_neg
-        valid_rows_float: torch.Tensor = valid_rows.to(dtype=scores.dtype)
-        valid_count: torch.Tensor = valid_rows_float.sum().clamp(min=1.0)
+        valid_docs: torch.Tensor = doc_mask & valid_teacher
+        pos_valid: torch.Tensor = pos_mask & valid_docs
+        neg_valid: torch.Tensor = (~pos_mask) & valid_docs
 
-        pos_indices: torch.Tensor = pos_valid.float().argmax(dim=1)
-        neg_indices: torch.Tensor = neg_valid.float().argmax(dim=1)
-        row_indices: torch.Tensor = torch.arange(scores.shape[0], device=scores.device)
+        # Build every (positive, negative) pair in each row:
+        # pair_mask[b, i, j] == True means doc i is a valid positive and doc j
+        # is a valid negative for query b.
+        pair_mask: torch.Tensor = pos_valid.unsqueeze(2) & neg_valid.unsqueeze(1)
+        pair_mask_float: torch.Tensor = pair_mask.to(dtype=scores.dtype)
+        pair_count: torch.Tensor = pair_mask_float.sum().clamp(min=1.0)
 
-        student_pos: torch.Tensor = scores[row_indices, pos_indices]
-        student_neg: torch.Tensor = scores[row_indices, neg_indices]
-        safe_teacher: torch.Tensor = torch.where(valid_teacher, teacher_scores, scores)
-        teacher_pos: torch.Tensor = safe_teacher[row_indices, pos_indices]
-        teacher_neg: torch.Tensor = safe_teacher[row_indices, neg_indices]
-        margin_diff: torch.Tensor = (student_pos - student_neg) - (
-            teacher_pos - teacher_neg
+        safe_teacher: torch.Tensor = torch.where(valid_docs, teacher_scores, scores)
+        student_margin: torch.Tensor = scores.unsqueeze(2) - scores.unsqueeze(1)
+        teacher_margin: torch.Tensor = (
+            safe_teacher.unsqueeze(2) - safe_teacher.unsqueeze(1)
         )
-        loss_values: torch.Tensor = margin_diff.pow(2) * valid_rows_float
-        return loss_values.sum() / valid_count
+        margin_error: torch.Tensor = (student_margin - teacher_margin).pow(2)
+        loss_sum: torch.Tensor = (margin_error * pair_mask_float).sum()
+        return loss_sum / pair_count
 
     def _reg_loss_noop(
         self, reps: torch.Tensor, row_mask: torch.Tensor
@@ -354,6 +353,7 @@ class LossComputer(nn.Module):
         doc_mask: torch.Tensor,
         teacher_scores: torch.Tensor,
         lambda_scale: torch.Tensor,
+        main_loss_type_override: str | None = None,
     ) -> tuple[
         torch.Tensor,
         torch.Tensor,
@@ -368,16 +368,23 @@ class LossComputer(nn.Module):
         loss: torch.Tensor
         pairwise_loss: torch.Tensor
         in_batch_loss: torch.Tensor
-        if self.distill_enabled:
-            # When distilling, optimize only distillation + regularization.
+        use_main_loss: bool = (
+            not self.distill_enabled or self.include_main_loss_when_distilling
+        )
+        main_loss_fn: _MainLossFn = self._main_loss_fn
+        if main_loss_type_override is not None:
+            override_loss_type: str = str(main_loss_type_override).replace("-", "_").lower()
+            main_loss_fn = self._resolve_main_loss_fn(override_loss_type)
+        if use_main_loss:
+            loss, pairwise_loss, in_batch_loss = main_loss_fn(
+                pairwise_scores, q_reps, doc_reps, pos_mask, doc_mask
+            )
+        else:
+            # Distillation-only mode keeps retrieval objective disabled.
             zero = pairwise_scores.new_zeros(())
             loss = zero
             pairwise_loss = zero
             in_batch_loss = zero
-        else:
-            loss, pairwise_loss, in_batch_loss = self._main_loss_fn(
-                pairwise_scores, q_reps, doc_reps, pos_mask, doc_mask
-            )
 
         distill_loss: torch.Tensor = pairwise_scores.new_zeros(())
         distill_losses: dict[str, torch.Tensor] = {}

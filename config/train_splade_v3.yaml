@@ -1,15 +1,17 @@
 # Training entrypoint config for SPLADE-v3
 seed: 10
-log_dir_base: "log/train"
+log_dir_base: "log/train/${model.name}"
 tag: null
 log_dir: ${tagged_log_dir:${log_dir_base},${tag}}
 root_dir_path: "."
+# Guardrail: SPLADE-v3 training should use finalized ensemble scores.
+required_train_dataset_name: msmarco_spladev3_scores
 
 # Defaults
 defaults:
   - model: splade_v3
   - dataset@train_dataset: msmarco_spladev3_scores
-  - dataset@val_dataset: msmarco
+  - dataset@val_dataset: msmarco_dev_small_negatives
   - training: splade_v3
   - testing: default
   # The following overrides are necessary to make the logging colorized.
@@ -22,8 +24,6 @@ train_dataset:
   max_padding: ${training.max_padding}
 
 val_dataset:
-  hf_name: sentence-transformers/msmarco
-  hf_subset: triplets
   hf_max_samples: ${training.val_sample_size}
   hf_skip_samples: 0
   max_padding: ${training.max_padding}
@@ -36,6 +36,7 @@ nanobeir:
   run_every_n_val: 1
   datasets: [msmarco, nfcorpus, nq]
   batch_size: ${testing.batch_size}
+  max_seq_length: ${train_dataset.max_doc_length}
   use_cpu: ${training.use_cpu}
   cache_dir: null
   save_json: true

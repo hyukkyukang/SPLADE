@@ -4,6 +4,15 @@ defaults:
 
 name: splade_v2_pp
 
+torch_compile: true
+torch_compile_loss: true
+batch_size: 32
+eval_batch_size: 8
+grad_accumulation: 1
+static_graph: true
+find_unused_parameters: false
+gradient_as_bucket_view: false
+
 regularization:
   query_weight: 0.0002
   doc_weight: 0.0001

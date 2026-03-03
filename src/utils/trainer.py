@@ -18,9 +18,15 @@ def get_cpu_trainer_kwargs(cfg_section: DictConfig) -> dict[str, Any]:
     if strategy_name == "ddp":
         if num_devices > 1:
             use_static_graph: bool = bool(cfg_section.static_graph)
+            find_unused_parameters: bool = bool(
+                cfg_section.get("find_unused_parameters", False)
+            )
+            if find_unused_parameters:
+                use_static_graph = False
             kwargs["strategy"] = DDPStrategy(
                 timeout=timedelta(hours=DDP_TIMEOUT_HOURS),
                 static_graph=use_static_graph,
+                find_unused_parameters=find_unused_parameters,
             )
         else:
             kwargs["strategy"] = "auto"
@@ -46,10 +52,40 @@ def get_gpu_trainer_kwargs(cfg_section: DictConfig) -> dict[str, Any]:
 
     if strategy_name == "ddp":
         use_static_graph: bool = bool(cfg_section.static_graph)
+        find_unused_parameters: bool = bool(
+            cfg_section.get("find_unused_parameters", False)
+        )
+        # torch.compile + DDP static graph can trigger reducer hook asserts
+        # in cudagraph-heavy compile modes. Use a safer dynamic DDP setup by
+        # default unless the user explicitly disables this safeguard.
+        compile_enabled: bool = bool(cfg_section.get("torch_compile", False))
+        compile_mode: str = str(cfg_section.get("torch_compile_mode", "default"))
+        compile_mode_normalized: str = compile_mode.strip().lower()
+        compile_safe_modes: set[str] = {
+            "max-autotune",
+            "max-autotune-no-cudagraphs",
+            "reduce-overhead",
+        }
+        compile_ddp_safe_mode: bool = bool(
+            cfg_section.get("torch_compile_ddp_safe_mode", True)
+        )
+        if (
+            compile_enabled
+            and compile_ddp_safe_mode
+            and compile_mode_normalized in compile_safe_modes
+        ):
+            find_unused_parameters = True
+            use_static_graph = False
+        gradient_as_bucket_view: bool = bool(
+            cfg_section.get("gradient_as_bucket_view", True)
+        )
+        if find_unused_parameters:
+            use_static_graph = False
         kwargs["strategy"] = DDPStrategy(
             timeout=timedelta(hours=DDP_TIMEOUT_HOURS),
             static_graph=use_static_graph,
-            gradient_as_bucket_view=True,
+            find_unused_parameters=find_unused_parameters,
+            gradient_as_bucket_view=gradient_as_bucket_view,
         )
     elif strategy_name == "fsdp":
         kwargs["strategy"] = FSDPStrategy(timeout=timedelta(hours=DDP_TIMEOUT_HOURS))

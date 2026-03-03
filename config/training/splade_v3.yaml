@@ -6,6 +6,7 @@ name: splade_v3
 
 distill:
   enabled: true
+  include_main_loss: true
   weight: 1.0
   loss: kl
   losses:

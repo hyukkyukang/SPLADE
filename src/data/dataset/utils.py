@@ -3,15 +3,7 @@ from typing import Any
 
 from omegaconf import DictConfig
 
-
-def normalize_optional_str(value: Any) -> str | None:
-    if value is None:
-        return None
-    if isinstance(value, str):
-        normalized: str = value.strip().lower()
-        if normalized in {"", "none", "null"}:
-            return None
-    return str(value)
+from src.utils.normalize import normalize_optional_str
 
 
 def require_cfg_str(cfg: DictConfig, key: str) -> str:

@@ -12,6 +12,7 @@ from src.data.pd_module.scoring import (
     _resolve_local_files_only,
 )
 from src.data.sampler import NonPaddingDistributedSampler
+from src.utils.script_setup import normalize_optional_str
 
 
 class ScoringCollator:
@@ -21,27 +22,42 @@ class ScoringCollator:
         self,
         *,
         model_name: str,
+        tokenizer_name: str | None,
         max_length: int,
         tokenize_chunk_size: int,
         local_files_only: bool,
+        trust_remote_code: bool = False,
+        use_fast_tokenizer: bool = True,
+        require_fast_tokenizer: bool = False,
         tokenizer: PreTrainedTokenizerBase | None = None,
     ) -> None:
         self._model_name: str = model_name
+        self._tokenizer_name: str | None = tokenizer_name
         self._max_length: int = max_length
         self._tokenize_chunk_size: int = tokenize_chunk_size
         self._local_files_only: bool = local_files_only
+        self._trust_remote_code: bool = trust_remote_code
+        self._use_fast_tokenizer: bool = use_fast_tokenizer
+        self._require_fast_tokenizer: bool = require_fast_tokenizer
         self._tokenizer: PreTrainedTokenizerBase | None = tokenizer
 
     def _resolve_tokenizer(self) -> PreTrainedTokenizerBase:
         if self._tokenizer is None:
+            name = self._tokenizer_name or self._model_name
             self._tokenizer = AutoTokenizer.from_pretrained(
-                self._model_name, local_files_only=self._local_files_only
+                name,
+                local_files_only=self._local_files_only,
+                use_fast=bool(self._use_fast_tokenizer),
+                trust_remote_code=self._trust_remote_code,
             )
+            if bool(self._require_fast_tokenizer) and not bool(self._tokenizer.is_fast):
+                raise ValueError(
+                    "Fast tokenizer is required for scoring but a slow tokenizer "
+                    f"was loaded: {name}"
+                )
         return self._tokenizer
 
-    def __call__(
-        self, batch: Iterable[ScoringItem | None]
-    ) -> dict[str, Any] | None:
+    def __call__(self, batch: Iterable[ScoringItem | None]) -> dict[str, Any] | None:
         items: list[ScoringItem] = [item for item in batch if item is not None]
         if not items:
             return None
@@ -131,14 +147,16 @@ class ScoringDataModule(L.LightningDataModule):
             is_primary = int(torch.distributed.get_rank()) == 0
         else:
             is_primary = True
-        local_files_only = _resolve_local_files_only(
-            scoring_cfg, is_primary=is_primary
-        )
+        local_files_only = _resolve_local_files_only(scoring_cfg, is_primary=is_primary)
         collator = ScoringCollator(
             model_name=str(scoring_cfg.model_name),
+            tokenizer_name=normalize_optional_str(scoring_cfg.tokenizer_name),
             max_length=int(scoring_cfg.max_length),
             tokenize_chunk_size=int(scoring_cfg.tokenize_chunk_size),
             local_files_only=local_files_only,
+            trust_remote_code=bool(scoring_cfg.trust_remote_code),
+            use_fast_tokenizer=bool(scoring_cfg.use_fast_tokenizer),
+            require_fast_tokenizer=bool(scoring_cfg.require_fast_tokenizer),
         )
         sampler: Sampler[int] | None = None
         if torch.distributed.is_available() and torch.distributed.is_initialized():

@@ -1,0 +1,7 @@
+# @package encoding
+defaults:
+  - _base
+
+batch_size: 512
+
+name: bert_large

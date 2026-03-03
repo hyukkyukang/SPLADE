@@ -1,5 +1,4 @@
 import json
-import logging
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 
@@ -14,9 +13,9 @@ from src.model.pl_module.utils import (
     validate_torch_compile_mode,
 )
 from src.model.retriever.sparse.neural.splade import SpladeModel
-from src.utils.logging import log_if_rank_zero
+from src.utils.logging import get_logger, log_if_rank_zero
 
-logger: logging.Logger = logging.getLogger("RetrievalSearchLightningModule")
+logger = get_logger("RetrievalSearchLightningModule")
 
 
 def _append_rank_suffix(path: Path, rank: int) -> Path:

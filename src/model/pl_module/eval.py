@@ -1,4 +1,3 @@
-import logging
 from typing import Any, Callable, Dict, List
 
 import lightning as L
@@ -14,9 +13,9 @@ from src.model.pl_module.utils import (
     validate_torch_compile_mode,
 )
 from src.model.retriever.sparse.neural.splade import SpladeModel
-from src.utils.logging import log_if_rank_zero
+from src.utils.logging import get_logger, log_if_rank_zero
 
-logger: logging.Logger = logging.getLogger("RetrievalEvalLightningModule")
+logger = get_logger("RetrievalEvalLightningModule")
 
 
 class RetrievalEvalLightningModule(L.LightningModule):

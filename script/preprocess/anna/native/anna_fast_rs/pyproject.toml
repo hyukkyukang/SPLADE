@@ -1,0 +1,9 @@
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "anna_fast_rs"
+version = "0.1.0"
+description = "Rust ANNA tokenizer backend"
+requires-python = ">=3.10"

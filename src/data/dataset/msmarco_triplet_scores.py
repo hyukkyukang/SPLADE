@@ -1,15 +1,14 @@
 import heapq
-import logging
 import math
 from typing import Any, Iterable, Sequence
 
 from datasets import Dataset, load_dataset
 from src.data.dataset.base import BaseDataset
 from src.data.dataset.utils import normalize_optional_str
-from src.utils.logging import is_rank_zero, log_if_rank_zero
+from src.utils.logging import get_logger, is_rank_zero, log_if_rank_zero
 from tqdm import tqdm
 
-logger: logging.Logger = logging.getLogger("MSMARCOTripletScoresDataset")
+logger = get_logger("MSMARCOTripletScoresDataset")
 
 
 def _resolve_column(

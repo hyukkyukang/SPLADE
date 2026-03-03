@@ -1,0 +1,19 @@
+base_model: google/embeddinggemma-300m
+vocab_artifact_dir: outputs/model_creation/embeddinggemma_splade/vocab
+output_dir: outputs/model_creation/embeddinggemma_splade/hf_backbone
+
+alpha: 0.1
+fragment_threshold: 4
+term_batch_size: 256
+max_target_terms: null
+
+add_all_target_terms: true
+allow_unresolved_terms: false
+zero_non_target_lm_head: true
+non_target_bias: 0.0
+untie_word_embeddings: true
+
+trust_remote_code: false
+local_files_only: false
+dtype: float32
+device: auto

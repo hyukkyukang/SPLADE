@@ -24,7 +24,10 @@ DTYPE_MAP: Dict[str, torch.dtype] = {
 DEFAULT_ALIGNMENT: int = 128
 DEFAULT_DEVICE_SELECTION: str = "all"
 DEFAULT_LOG_INTERVAL_SECONDS: float = 5.0
-DEFAULT_MEMORY_FRACTION: float = 0.6
+# Use minimal GPU memory while keeping full utilization (small matmuls still saturate GPU).
+DEFAULT_MEMORY_FRACTION: float = 0.01
+# Cap total tensor memory so we never allocate more than this, regardless of GPU size.
+MAX_TARGET_MEMORY_BYTES: int = 64 * 1024 * 1024  # 64 MiB
 DEFAULT_WARMUP_STEPS: int = 10
 MIN_MATRIX_SIZE: int = 256
 
@@ -75,8 +78,11 @@ class GpuBurner:
         free_bytes, total_bytes = torch.cuda.mem_get_info()
         _unused_total_bytes: int = total_bytes
 
-        # Target a safe fraction of free memory to avoid OOM.
-        target_bytes: int = int(float(free_bytes) * self._memory_fraction)
+        # Target a small fraction of free memory, capped to keep footprint minimal.
+        target_bytes: int = min(
+            int(float(free_bytes) * self._memory_fraction),
+            MAX_TARGET_MEMORY_BYTES,
+        )
         bytes_per_element: int = torch.empty(
             (), dtype=self._dtype, device=self._device
         ).element_size()
@@ -275,7 +281,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "--memory-fraction",
         type=float,
         default=DEFAULT_MEMORY_FRACTION,
-        help="Fraction of free GPU memory used for auto size.",
+        help="Fraction of free GPU memory used for auto size (capped at %d MiB)."
+        % (MAX_TARGET_MEMORY_BYTES // (1024 * 1024)),
     )
     parser.add_argument(
         "--alignment",

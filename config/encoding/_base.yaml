@@ -2,8 +2,8 @@
 name: encoding_base
 
 batch_size: 1024
-num_workers: 10
-prefetch_factor: 4
+num_workers: 8
+prefetch_factor: 2
 max_padding: true
 
 precision: bf16-mixed
@@ -16,14 +16,14 @@ num_devices: null
 
 checkpoint_path: null
 
-encode_dir: "log/encode"
-index_dir: "log/index"
+encode_dir: "data/embed"
+index_dir: "data/index"
 index_tag: ${tag}
 
 shard_max_docs: 100000
 value_dtype: float32
 sparse_min_weight: 0.0
-sparse_top_k: 512
+sparse_top_k: 1024
 wand_block_size: 256
 
 async_write: true

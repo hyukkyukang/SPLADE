@@ -21,9 +21,9 @@ from src.data.dataset.utils import (
     sample_items,
 )
 from src.data.utils import id_to_idx, resolve_dataset_column
-from src.utils.logging import loading_status
+from src.utils.logging import get_logger, loading_status
 
-logger: logging.Logger = logging.getLogger("BaseDataset")
+logger = get_logger("BaseDataset")
 
 QUERY_SUBSET_NAME_KEY: str = "query_subset_name"
 QUERY_SPLIT_NAME_KEY: str = "query_split_name"
@@ -61,6 +61,27 @@ class BaseDataset(abc.ABC):
         )
         self.query_corpus_hf_data_files: Mapping[str, Any] | None = (
             self.cfg.query_corpus_hf_data_files
+        )
+        self.query_lookup_hf_name: str | None = normalize_optional_str(
+            self.cfg.get("query_lookup_hf_name")
+        )
+        self.query_lookup_hf_subset: str | None = normalize_optional_str(
+            self.cfg.get("query_lookup_hf_subset")
+        )
+        self.query_lookup_hf_split: str = str(
+            self.cfg.get("query_lookup_hf_split", "train")
+        )
+        self.query_lookup_hf_cache_dir: str | None = normalize_optional_str(
+            self.cfg.get("query_lookup_hf_cache_dir")
+        )
+        self.query_lookup_hf_data_files: Mapping[str, Any] | None = self.cfg.get(
+            "query_lookup_hf_data_files"
+        )
+        self.query_lookup_id_column: str = str(
+            self.cfg.get("query_lookup_id_column", "query_id")
+        )
+        self.query_lookup_text_column: str = str(
+            self.cfg.get("query_lookup_text_column", "text")
         )
         self.use_hf: bool = bool(
             self.hf_name is not None or self.query_corpus_hf_name is not None
@@ -215,6 +236,24 @@ class BaseDataset(abc.ABC):
         """Return the dataset providing training metadata rows."""
         return self._resolve_meta_dataset()
 
+    @cached_property
+    def query_lookup_dataset(self) -> Dataset | None:
+        """Optional fallback query-text dataset used for missing query ids."""
+        if self.query_lookup_hf_name is None:
+            return None
+        with self._loading(
+            logger,
+            f"query lookup dataset for {self.query_lookup_hf_name}",
+            only_once=True,
+        ):
+            return self._load_hf_dataset(
+                self.query_lookup_hf_name,
+                self.query_lookup_hf_subset,
+                self.query_lookup_hf_split,
+                self.query_lookup_hf_cache_dir,
+                self.query_lookup_hf_data_files,
+            )
+
     @property
     def query_id_column_name(self) -> str:
         """Return the column name for query IDs."""
@@ -259,6 +298,18 @@ class BaseDataset(abc.ABC):
         return id_to_idx(
             resolve_dataset_column(self.corpus_dataset, self.corpus_id_column_name),
             "Mapping corpus ids to indices",
+            enable_tqdm,
+        )
+
+    @cached_property
+    def query_lookup_id_to_idx(self) -> dict[str, int]:
+        lookup_dataset: Dataset | None = self.query_lookup_dataset
+        if lookup_dataset is None:
+            return {}
+        enable_tqdm: bool = self.rank_id == 0 and self.worker_id == 0
+        return id_to_idx(
+            resolve_dataset_column(lookup_dataset, self.query_lookup_id_column),
+            "Mapping query lookup ids to indices",
             enable_tqdm,
         )
 
@@ -343,6 +394,23 @@ class BaseDataset(abc.ABC):
     def _get_corpus_text_from_id(self, doc_id: str) -> str:
         return self.corpus_text(self.corpus_dataset_id_to_idx[doc_id])
 
+    def _resolve_row_score_values(self, row: dict[str, Any]) -> Any | None:
+        configured_score_column: str | None = normalize_optional_str(
+            self.cfg.get("score_scores_column")
+        )
+        candidate_keys: list[str] = []
+        if configured_score_column is not None:
+            candidate_keys.append(configured_score_column)
+        candidate_keys.extend(["teacher_scores", "scores", "score"])
+        seen: set[str] = set()
+        for key in candidate_keys:
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            if key in row:
+                return row.get(key)
+        return None
+
     def _row_to_meta_item(
         self,
         row: dict[str, Any],
@@ -352,9 +420,7 @@ class BaseDataset(abc.ABC):
         num_negatives: int,
         rng: random.Random,
     ) -> MetaItem:
-        score_values: Any | None = (
-            row.get("score") if "score" in row else row.get("scores")
-        )
+        score_values: Any | None = self._resolve_row_score_values(row)
         qid: str = ""
         pos_ids: list[str] = []
         neg_ids: list[str] = []
@@ -607,6 +673,25 @@ class BaseDataset(abc.ABC):
     def prepare_text_datasets(self) -> None:
         _ = self.query_dataset
         _ = self.corpus_dataset
+
+    def lookup_query_texts(self, qids: list[str]) -> dict[str, str]:
+        lookup_dataset: Dataset | None = self.query_lookup_dataset
+        if lookup_dataset is None:
+            return {}
+        id_to_idx_map: dict[str, int] = self.query_lookup_id_to_idx
+        query_texts: dict[str, str] = {}
+        qid: str
+        for qid in qids:
+            qid_text: str = str(qid)
+            query_idx: int = int(id_to_idx_map.get(qid_text, -1))
+            if query_idx < 0:
+                continue
+            row: dict[str, Any] = dict(lookup_dataset[int(query_idx)])
+            raw_text: Any | None = row.get(self.query_lookup_text_column)
+            text: str = "" if raw_text is None else str(raw_text).strip()
+            if text:
+                query_texts[qid_text] = text
+        return query_texts
 
     def query_text(self, idx: int) -> str:
         """Get the text of a query."""

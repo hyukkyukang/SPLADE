@@ -1,4 +1,3 @@
-import logging
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -20,10 +19,10 @@ from src.data.pd_module.scoring import (
     _resolve_local_files_only,
 )
 from src.data.utils import resolve_dataset_column
-from src.utils.logging import log_if_rank_zero
+from src.utils.logging import get_logger, log_if_rank_zero
 from src.utils.script_setup import normalize_optional_str
 
-logger: logging.Logger = logging.getLogger("HardNegativesScoringPDModule")
+logger = get_logger("HardNegativesScoringPDModule")
 
 
 @dataclass(frozen=True)

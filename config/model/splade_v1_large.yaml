@@ -1,0 +1,9 @@
+# @package model
+defaults:
+  - _base
+
+name: splade_v1_large
+huggingface_name: bert-large-uncased
+query_pooling: sum
+doc_pooling: sum
+
