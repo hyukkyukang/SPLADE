@@ -1,4 +1,4 @@
-# NanoBEIR proxy evaluation config
+# MTEB sparse proxy evaluation config
 seed: 10
 log_dir_base: "log"
 tag: null
@@ -21,7 +21,7 @@ nanobeir:
 
 mlflow:
   enabled: true
-  experiment_name: NanoBEIR
+  experiment_name: MTEB
   tracking_uri: ${oc.env:MLFLOW_TRACKING_URI,null}
   run_name: ${oc.env:MLFLOW_RUN_NAME,null}
   tags: {}
@@ -38,4 +38,4 @@ hydra:
         stream: ext://sys.stdout
       file:
         class: logging.FileHandler
-        filename: ${log_dir}/evaluate_nanobeir.log
+        filename: ${log_dir}/evaluate_mteb.log

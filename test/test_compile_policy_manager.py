@@ -60,6 +60,20 @@ class _DummyModel(torch.nn.Module):
         self._doc_encoder_fn = self._doc_encoder_wrapper
 
 
+class _DeviceTrackingModule(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.register_buffer("_marker", torch.zeros((1,)))
+        self.to_call_count: int = 0
+
+    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return input_ids
+
+    def to(self, *args, **kwargs):  # type: ignore[override]
+        self.to_call_count += 1
+        return super().to(*args, **kwargs)
+
+
 def _build_training_cfg(**overrides: object):
     base = {
         "training": {
@@ -122,6 +136,62 @@ class CompilePolicyManagerTest(unittest.TestCase):
         self.assertEqual(compile_mock.call_count, 2)
         self.assertIsNotNone(manager._compiled_query_encoder_fn)
         self.assertIsNotNone(manager._compiled_doc_encoder_fn)
+
+    def test_prepare_for_device_moves_wrapper_modules(self) -> None:
+        model = _DummyModel(freeze_backbone=True, vocab_size=30522)
+        manager = TrainingCompilePolicyManager(
+            model=model,
+            logger=get_logger("test.compile_policy.prepare.wrapper"),
+        )
+        manager.torch_compile_enabled = True
+        manager.torch_compile_full_model = False
+        query_module = _DeviceTrackingModule()
+        doc_module = _DeviceTrackingModule()
+        manager._compiled_query_encoder_fn = query_module
+        manager._compiled_doc_encoder_fn = doc_module
+
+        manager.prepare_for_device(device=torch.device("meta"), use_compiled=True)
+
+        self.assertEqual(query_module._marker.device.type, "meta")
+        self.assertEqual(doc_module._marker.device.type, "meta")
+        self.assertGreater(query_module.to_call_count, 0)
+        self.assertGreater(doc_module.to_call_count, 0)
+
+    def test_prepare_for_device_moves_full_compiled_model(self) -> None:
+        model = _DummyModel(freeze_backbone=True, vocab_size=30522)
+        manager = TrainingCompilePolicyManager(
+            model=model,
+            logger=get_logger("test.compile_policy.prepare.full"),
+        )
+        manager.torch_compile_enabled = True
+        manager.torch_compile_full_model = True
+        compiled_model = _DeviceTrackingModule()
+        manager.compiled_model = compiled_model
+
+        manager.prepare_for_device(device=torch.device("meta"), use_compiled=True)
+
+        self.assertEqual(compiled_model._marker.device.type, "meta")
+        self.assertGreater(compiled_model.to_call_count, 0)
+
+    def test_prepare_for_device_noop_when_not_using_compiled(self) -> None:
+        model = _DummyModel(freeze_backbone=True, vocab_size=30522)
+        manager = TrainingCompilePolicyManager(
+            model=model,
+            logger=get_logger("test.compile_policy.prepare.noop"),
+        )
+        manager.torch_compile_enabled = True
+        manager.torch_compile_full_model = False
+        query_module = _DeviceTrackingModule()
+        doc_module = _DeviceTrackingModule()
+        manager._compiled_query_encoder_fn = query_module
+        manager._compiled_doc_encoder_fn = doc_module
+
+        manager.prepare_for_device(device=torch.device("meta"), use_compiled=False)
+
+        self.assertEqual(query_module._marker.device.type, "cpu")
+        self.assertEqual(doc_module._marker.device.type, "cpu")
+        self.assertEqual(query_module.to_call_count, 0)
+        self.assertEqual(doc_module.to_call_count, 0)
 
 
 if __name__ == "__main__":

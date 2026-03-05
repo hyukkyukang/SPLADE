@@ -57,12 +57,13 @@ class NanoBEIREvaluationRunner:
             reason: str | None
             compatible, reason = resolve_nanobeir_compatibility(self.cfg)
             if not compatible:
+                self._force_adapter_fallback = True
                 log_if_rank_zero(
                     self.logger,
-                    f"NanoBEIR evaluation disabled; {reason}",
+                    "NanoBEIR SparseEncoder path disabled; using direct SPLADE "
+                    f"adapter path instead. Reason: {reason}",
                     level="warning",
                 )
-                self.enabled = False
 
         if self.enabled and not self.dataset_names:
             log_if_rank_zero(
@@ -139,11 +140,12 @@ class NanoBEIREvaluationRunner:
             torch.cuda.ipc_collect()
 
     def _resolve_device(self, training_device: torch.device) -> torch.device:
-        if self.doc_only_enabled:
+        if self.doc_only_enabled or self._force_adapter_fallback:
             if self.use_cpu:
                 log_if_rank_zero(
                     self.logger,
-                    "NanoBEIR use_cpu ignored for SPLADE-doc; using training device.",
+                    "NanoBEIR use_cpu ignored for direct SPLADE adapter path; "
+                    "using training device.",
                     level="warning",
                 )
             return training_device
@@ -212,14 +214,15 @@ class NanoBEIREvaluationRunner:
                     f"path for subsequent validations. Root cause: {exc}",
                     level="warning",
                 )
+                adapter_device: torch.device = training_device
                 doc_cache = build_doc_only_sparse_encoder_adapter(
                     cfg=self.cfg,
                     model=eval_model,
-                    device=device,
+                    device=adapter_device,
                     batch_size=self.batch_size,
                 )
                 self._doc_only_encoder = doc_cache
-                self._doc_only_device = device
+                self._doc_only_device = adapter_device
                 sparse_encoder = doc_cache
 
         evaluator: SparseNanoBEIREvaluator

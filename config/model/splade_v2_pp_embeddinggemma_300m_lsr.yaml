@@ -11,4 +11,3 @@ sparse_activation: log1p_relu
 use_fast_tokenizer: true
 require_fast_tokenizer: true
 tie_word_embeddings: false
-freeze_backbone: true

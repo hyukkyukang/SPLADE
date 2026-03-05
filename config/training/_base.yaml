@@ -1,6 +1,8 @@
 # @package training
 defaults:
-  # Select optimizer via `optimizer@training=adam|adamw` to keep weight_decay in sync.
+  # Select optimizer via
+  # `optimizer@training=adam|adamw`
+  # to keep weight_decay in sync.
   - /optimizer@_global_.training: adam
 
 name: splade
@@ -10,9 +12,9 @@ batch_size: 32
 eval_batch_size: 16
 # Validation keeps 100 candidates/query for metrics, but encodes doc candidates
 # in micro-batches to cap peak VRAM.
-validation_doc_encode_chunk_size: 10
+validation_doc_encode_chunk_size: 20
 grad_accumulation: 1
-num_workers: 2
+num_workers: 4
 prefetch_factor: 2
 dataloader_multiprocessing_context: null
 max_padding: true
@@ -32,6 +34,8 @@ torch_compile: true
 torch_compile_loss: true
 # Options: default, reduce-overhead, and max-autotune.
 torch_compile_mode: max-autotune
+# Validation can use a different compile mode than training.
+torch_compile_validation_mode: default
 # For very large vocab MLM heads (e.g., ANNAvocab), Triton GEMM autotune can
 # hit illegal-address errors; force ATen GEMM backends in that regime.
 torch_compile_force_aten_gemm_for_large_vocab: true
@@ -46,8 +50,8 @@ torch_compile_skip_query_encoder_for_large_vocab: false
 torch_compile_skip_doc_encoder_for_large_vocab: false
 # Enable safer DDP settings for compile-heavy modes by default.
 torch_compile_ddp_safe_mode: true
-# Keep training compile enabled, but run validation in eager mode.
-disable_compile_for_validation: true
+# Keep torch.compile enabled during validation by default.
+disable_compile_for_validation: false
 strategy: ddp
 static_graph: true
 find_unused_parameters: false
@@ -125,6 +129,10 @@ mlflow:
   server_cert_path: ${oc.env:MLFLOW_TRACKING_SERVER_CERT_PATH,null}
   client_cert_path: ${oc.env:MLFLOW_TRACKING_CLIENT_CERT_PATH,null}
   system_metrics_enabled: ${oc.decode:${oc.env:MLFLOW_ENABLE_SYSTEM_METRICS_LOGGING,true}}
+  # Sample system metrics every 30s (MLflow default is 10s) to reduce overhead.
+  system_metrics_sampling_interval: ${oc.decode:${oc.env:MLFLOW_SYSTEM_METRICS_SAMPLING_INTERVAL,30}}
+  # Log each collected sample as one metric point.
+  system_metrics_samples_before_logging: ${oc.decode:${oc.env:MLFLOW_SYSTEM_METRICS_SAMPLES_BEFORE_LOGGING,1}}
   tags: {}
   log_model: false
   save_dir: ${log_dir}

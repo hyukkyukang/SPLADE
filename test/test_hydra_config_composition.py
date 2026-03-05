@@ -23,6 +23,8 @@ class HydraConfigCompositionTest(unittest.TestCase):
         )
         self.assertEqual(str(cfg.model.name), "splade_v2_pp")
         self.assertEqual(str(cfg.training.name), "splade_v2_pp")
+        self.assertFalse(bool(cfg.training.disable_compile_for_validation))
+        self.assertEqual(str(cfg.training.torch_compile_validation_mode), "default")
         self.assertIn("train_dataset", cfg)
         self.assertIn("val_dataset", cfg)
 
@@ -65,6 +67,22 @@ class HydraConfigCompositionTest(unittest.TestCase):
         )
         self.assertEqual(str(cfg.model.name), "splade_v2_pp")
         self.assertEqual(str(cfg.evaluation.type), "retrieval")
+
+    def test_nanobeir_evaluation_config_uses_nanobeir_experiment(self) -> None:
+        cfg = self._compose(
+            config_name="evaluate_nanobeir",
+            overrides=["model=splade_v2_pp"],
+        )
+        self.assertEqual(str(cfg.mlflow.experiment_name), "NanoBEIR")
+        self.assertTrue(bool(cfg.mlflow.enabled))
+
+    def test_mteb_evaluation_config_uses_mteb_experiment(self) -> None:
+        cfg = self._compose(
+            config_name="evaluate_mteb",
+            overrides=["model=splade_v2_pp"],
+        )
+        self.assertEqual(str(cfg.mlflow.experiment_name), "MTEB")
+        self.assertTrue(bool(cfg.mlflow.enabled))
 
 
 if __name__ == "__main__":

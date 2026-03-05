@@ -1,3 +1,4 @@
+import inspect
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -63,6 +64,17 @@ def _extract_hidden_module(model: PreTrainedModel) -> nn.Module:
     raise ValueError("Unable to resolve hidden-state backbone module from model.")
 
 
+def _supports_use_cache_forward(module: nn.Module) -> bool:
+    """Return True when module.forward accepts a use_cache keyword."""
+    forward_fn: Any = getattr(module, "forward", None)
+    if not callable(forward_fn):
+        return False
+    try:
+        return "use_cache" in inspect.signature(forward_fn).parameters
+    except (TypeError, ValueError):
+        return False
+
+
 def _resolve_compact_head_path(
     model_name: str,
     model: PreTrainedModel,
@@ -117,6 +129,12 @@ class SpladeEncoder(nn.Module):
         self._neg_inf: torch.Tensor
         self.register_buffer("_neg_inf", torch.tensor(float("-inf")), persistent=False)
         self._output_vocab_size: int = int(self.mlm.config.vocab_size)
+        self._mlm_forward_supports_use_cache: bool = _supports_use_cache_forward(
+            self.mlm
+        )
+        self._hidden_forward_supports_use_cache: bool = False
+        if hasattr(self.mlm.config, "use_cache"):
+            self.mlm.config.use_cache = False
         self.compact_head: nn.Linear | None = None
         self._hidden_model: nn.Module | None = None
         self.register_buffer(
@@ -188,7 +206,15 @@ class SpladeEncoder(nn.Module):
 
         self.compact_head = compact_head
         self._hidden_model = _extract_hidden_module(self.mlm)
+        self._hidden_forward_supports_use_cache = _supports_use_cache_forward(
+            self._hidden_model
+        )
+        hidden_config: Any = getattr(self._hidden_model, "config", None)
+        if hidden_config is not None and hasattr(hidden_config, "use_cache"):
+            hidden_config.use_cache = False
         self._output_vocab_size = out_features
+        self._drop_unused_mlm_head_for_compact_path()
+        self._freeze_unused_mlm_params_for_compact_path()
         if int(token_ids.numel()) == out_features:
             self._compact_token_ids = token_ids
             max_token_id: int = int(token_ids.max().item()) if out_features > 0 else -1
@@ -204,6 +230,62 @@ class SpladeEncoder(nn.Module):
                 self._token_id_to_output_index = token_id_to_output_index
             else:
                 self._token_id_to_output_index = torch.empty((0,), dtype=torch.long)
+
+    def _drop_unused_mlm_head_for_compact_path(self) -> None:
+        """Drop output-head params that compact path never uses."""
+        if self.compact_head is None:
+            return
+        set_output_embeddings_fn: Any = getattr(self.mlm, "set_output_embeddings", None)
+        if callable(set_output_embeddings_fn):
+            try:
+                set_output_embeddings_fn(None)
+                return
+            except Exception:
+                pass
+
+        get_output_embeddings_fn: Any = getattr(self.mlm, "get_output_embeddings", None)
+        output_head: Any = None
+        if callable(get_output_embeddings_fn):
+            try:
+                output_head = get_output_embeddings_fn()
+            except Exception:
+                output_head = None
+        if not isinstance(output_head, nn.Module):
+            return
+
+        for attr_name in ("lm_head", "score", "classifier"):
+            if not hasattr(self.mlm, attr_name):
+                continue
+            try:
+                candidate: Any = getattr(self.mlm, attr_name)
+            except Exception:
+                continue
+            if candidate is output_head:
+                setattr(self.mlm, attr_name, nn.Identity())
+                return
+
+        child_name: str
+        child_module: nn.Module
+        for child_name, child_module in self.mlm.named_children():
+            if child_module is output_head:
+                setattr(self.mlm, child_name, nn.Identity())
+                return
+
+    def _freeze_unused_mlm_params_for_compact_path(self) -> None:
+        """Disable gradients for MLM-only params that compact path never reads."""
+        if self.compact_head is None or self._hidden_model is None:
+            return
+        used_param_ids: set[int] = {
+            id(parameter) for parameter in self.compact_head.parameters()
+        }
+        used_param_ids.update(
+            id(parameter) for parameter in self._hidden_model.parameters()
+        )
+        parameter: nn.Parameter
+        for parameter in self.mlm.parameters():
+            if id(parameter) in used_param_ids:
+                continue
+            parameter.requires_grad_(False)
 
     def _freeze_backbone_params(self) -> None:
         """Freeze backbone params while keeping the active sparse head trainable."""
@@ -284,7 +366,13 @@ class SpladeEncoder(nn.Module):
     ) -> torch.Tensor:
         logits: torch.Tensor
         if self.compact_head is None:
-            outputs: Any = self.mlm(input_ids=input_ids, attention_mask=attention_mask)
+            mlm_kwargs: dict[str, Any] = {
+                "input_ids": input_ids,
+                "attention_mask": attention_mask,
+            }
+            if self._mlm_forward_supports_use_cache:
+                mlm_kwargs["use_cache"] = False
+            outputs: Any = self.mlm(**mlm_kwargs)
             if not hasattr(outputs, "logits"):
                 raise ValueError(
                     "Selected Hugging Face model class does not expose token logits; "
@@ -294,11 +382,14 @@ class SpladeEncoder(nn.Module):
         else:
             if self._hidden_model is None:
                 raise ValueError("Compact head is enabled but hidden model is missing.")
-            hidden_outputs: Any = self._hidden_model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                return_dict=True,
-            )
+            hidden_kwargs: dict[str, Any] = {
+                "input_ids": input_ids,
+                "attention_mask": attention_mask,
+                "return_dict": True,
+            }
+            if self._hidden_forward_supports_use_cache:
+                hidden_kwargs["use_cache"] = False
+            hidden_outputs: Any = self._hidden_model(**hidden_kwargs)
             if not hasattr(hidden_outputs, "last_hidden_state"):
                 raise ValueError(
                     "Hidden-state backbone does not expose last_hidden_state."

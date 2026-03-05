@@ -9,6 +9,7 @@ from src.model.pl_module.compile_policy import TrainingCompilePolicyManager
 from src.model.pl_module.loss_service import LossRegularizationService
 from src.model.pl_module.metrics_service import TrainingMetricsService
 from src.model.pl_module.nanobeir_runner import NanoBEIREvaluationRunner
+from src.model.pl_module.utils import validate_torch_compile_mode
 from src.model.pl_module.validation_service import ValidationMetricsAccumulator
 from src.model.retriever.sparse.neural.splade import SpladeModel
 from src.utils.logging import get_logger, log_if_rank_zero
@@ -80,9 +81,12 @@ class SPLADETrainingModule(L.LightningModule):
         self._doc_only_flag: bool = bool(self.model.doc_only)
         self._eager_loss_computer: LossComputer | None = None
         self._compiled_loss_computer: Any | None = None
-        self._compile_policy = TrainingCompilePolicyManager(
+        self._compiled_validation_loss_computer: Any | None = None
+        self._train_compile_policy = TrainingCompilePolicyManager(
             model=self.model, logger=logger
         )
+        self._validation_compile_policy: TrainingCompilePolicyManager | None = None
+        self._compile_policy: TrainingCompilePolicyManager = self._train_compile_policy
         # Loss compilation is optional to avoid fragile Inductor/Triton paths.
         compile_loss: bool = bool(cfg.training.torch_compile_loss)
         self._relaxed_checkpoint_loading: bool = False
@@ -98,12 +102,8 @@ class SPLADETrainingModule(L.LightningModule):
                 "tolerate wrapper-key differences.",
                 level="warning",
             )
-        self._compile_policy.setup(cfg)
-        if (
-            self._compile_policy.torch_compile_full_model
-            and self._compile_policy.compiled_model is not None
-        ):
-            self.model = self._compile_policy.compiled_model
+        self._train_compile_policy.setup(cfg)
+        self._validation_compile_policy = self._maybe_build_validation_compile_policy(cfg)
 
         self._loss_service = LossRegularizationService(cfg.training)
         self._metrics_service = TrainingMetricsService(
@@ -122,18 +122,31 @@ class SPLADETrainingModule(L.LightningModule):
 
         self.loss_computer: LossComputer = self._loss_service.build_loss_computer()
         self._eager_loss_computer = self.loss_computer
-        if self._compile_policy.torch_compile_enabled and compile_loss:
+        if self._train_compile_policy.torch_compile_enabled and compile_loss:
             self._compiled_loss_computer = torch.compile(
                 self._eager_loss_computer,
-                **self._compile_policy.loss_compile_mode_kwargs,
+                **self._train_compile_policy.loss_compile_mode_kwargs,
             )
-        selected_loss_computer: Any | None = self._compile_policy.set_compile_state(
-            use_compiled=self._compile_policy.compile_enabled_for_current_stage,
-            eager_loss_computer=self._eager_loss_computer,
+        validation_policy: TrainingCompilePolicyManager | None = (
+            self._validation_compile_policy
+        )
+        if (
+            validation_policy is not None
+            and validation_policy is not self._train_compile_policy
+            and validation_policy.torch_compile_enabled
+            and compile_loss
+        ):
+            self._compiled_validation_loss_computer = torch.compile(
+                self._eager_loss_computer,
+                **validation_policy.loss_compile_mode_kwargs,
+            )
+        else:
+            self._compiled_validation_loss_computer = self._compiled_loss_computer
+        self._activate_compile_policy(
+            policy=self._train_compile_policy,
+            use_compiled=self._train_compile_policy.compile_enabled_for_current_stage,
             compiled_loss_computer=self._compiled_loss_computer,
         )
-        if selected_loss_computer is not None:
-            self.loss_computer = selected_loss_computer
         self._setup_eval_metrics(cfg)
         self._validation_doc_encode_chunk_size: int = int(
             cfg.training.get(
@@ -143,6 +156,72 @@ class SPLADETrainingModule(L.LightningModule):
         )
         if self._validation_doc_encode_chunk_size <= 0:
             self._validation_doc_encode_chunk_size = _VALIDATION_DOC_ENCODE_CHUNK_SIZE
+
+    def _resolve_validation_compile_mode(self) -> str:
+        mode_value: Any = self.cfg.training.get("torch_compile_validation_mode", "default")
+        compile_mode: str
+        compile_mode, _ = validate_torch_compile_mode(mode_value)
+        return compile_mode
+
+    def _maybe_build_validation_compile_policy(
+        self, cfg: DictConfig
+    ) -> TrainingCompilePolicyManager | None:
+        if not self._train_compile_policy.torch_compile_enabled:
+            return None
+        if bool(cfg.training.disable_compile_for_validation):
+            return None
+        train_mode: str = str(cfg.training.torch_compile_mode).strip().lower()
+        validation_mode: str = self._resolve_validation_compile_mode()
+        if validation_mode == train_mode:
+            return self._train_compile_policy
+
+        # Build a second compile policy when validation mode differs from training.
+        cfg_container: dict[str, Any] = cast(
+            dict[str, Any], OmegaConf.to_container(cfg, resolve=True)
+        )
+        validation_cfg: DictConfig = cast(DictConfig, OmegaConf.create(cfg_container))
+        validation_cfg.training.torch_compile_mode = validation_mode
+        validation_cfg.training.disable_compile_for_validation = False
+        validation_policy = TrainingCompilePolicyManager(
+            model=self._train_compile_policy.eager_model,
+            logger=logger,
+        )
+        validation_policy.setup(validation_cfg)
+        log_if_rank_zero(
+            logger,
+            "Using separate torch.compile mode for validation: "
+            f"train={train_mode!r}, val={validation_mode!r}.",
+            level="warning",
+        )
+        return validation_policy
+
+    def _sync_model_with_active_compile_policy(self) -> None:
+        if (
+            self._compile_policy.torch_compile_full_model
+            and self._compile_policy.compile_enabled_for_current_stage
+            and self._compile_policy.compiled_model is not None
+        ):
+            self.model = cast(SpladeModel, self._compile_policy.compiled_model)
+            return
+        self.model = cast(SpladeModel, self._compile_policy.eager_model)
+
+    def _activate_compile_policy(
+        self,
+        *,
+        policy: TrainingCompilePolicyManager,
+        use_compiled: bool,
+        compiled_loss_computer: Any | None,
+    ) -> None:
+        policy.prepare_for_device(device=self.device, use_compiled=use_compiled)
+        selected_loss_computer: Any | None = policy.set_compile_state(
+            use_compiled=use_compiled,
+            eager_loss_computer=self._eager_loss_computer,
+            compiled_loss_computer=compiled_loss_computer,
+        )
+        self._compile_policy = policy
+        if selected_loss_computer is not None:
+            self.loss_computer = selected_loss_computer
+        self._sync_model_with_active_compile_policy()
 
     def _encode_docs_in_chunks(
         self,
@@ -432,28 +511,42 @@ class SPLADETrainingModule(L.LightningModule):
         self._metrics_service.log_training_metrics(self, metrics)
 
     def on_validation_start(self) -> None:
-        if self._compile_policy.torch_compile_enabled:
-            use_compiled: bool = not bool(
-                self._compile_policy.disable_compile_for_validation
-            )
-            selected_loss_computer: Any | None = self._compile_policy.set_compile_state(
-                use_compiled=use_compiled,
-                eager_loss_computer=self._eager_loss_computer,
-                compiled_loss_computer=self._compiled_loss_computer,
-            )
-            if selected_loss_computer is not None:
-                self.loss_computer = selected_loss_computer
+        if self._train_compile_policy.torch_compile_enabled:
+            if bool(self._train_compile_policy.disable_compile_for_validation):
+                self._activate_compile_policy(
+                    policy=self._train_compile_policy,
+                    use_compiled=False,
+                    compiled_loss_computer=self._compiled_loss_computer,
+                )
+            else:
+                validation_policy: TrainingCompilePolicyManager = (
+                    self._validation_compile_policy or self._train_compile_policy
+                )
+                validation_compiled_loss: Any | None = (
+                    self._compiled_validation_loss_computer
+                    if validation_policy is not self._train_compile_policy
+                    else self._compiled_loss_computer
+                )
+                self._activate_compile_policy(
+                    policy=validation_policy,
+                    use_compiled=True,
+                    compiled_loss_computer=validation_compiled_loss,
+                )
+        else:
+            self._compile_policy = self._train_compile_policy
+            self._sync_model_with_active_compile_policy()
         self._validation_metrics.on_validation_start(self.device)
 
     def on_validation_end(self) -> None:
-        if self._compile_policy.torch_compile_enabled:
-            selected_loss_computer: Any | None = self._compile_policy.set_compile_state(
+        if self._train_compile_policy.torch_compile_enabled:
+            self._activate_compile_policy(
+                policy=self._train_compile_policy,
                 use_compiled=True,
-                eager_loss_computer=self._eager_loss_computer,
                 compiled_loss_computer=self._compiled_loss_computer,
             )
-            if selected_loss_computer is not None:
-                self.loss_computer = selected_loss_computer
+        else:
+            self._compile_policy = self._train_compile_policy
+            self._sync_model_with_active_compile_policy()
 
     def _append_validation_metrics(
         self,
@@ -526,7 +619,7 @@ class SPLADETrainingModule(L.LightningModule):
             log_dir=str(self.cfg.log_dir),
             log_dict_fn=lambda logged_metrics: self.log_dict(
                 logged_metrics,
-                sync_dist=False,
+                sync_dist=True,
                 prog_bar=False,
                 rank_zero_only=True,
             ),
@@ -545,17 +638,21 @@ class SPLADETrainingModule(L.LightningModule):
     def training_step(
         self, batch: dict[str, torch.Tensor], batch_idx: int
     ) -> torch.Tensor:
+        if self._compile_policy is not self._train_compile_policy:
+            self._activate_compile_policy(
+                policy=self._train_compile_policy,
+                use_compiled=True,
+                compiled_loss_computer=self._compiled_loss_computer,
+            )
         if (
             self._compile_policy.torch_compile_enabled
             and not self._compile_policy.compile_enabled_for_current_stage
         ):
-            selected_loss_computer: Any | None = self._compile_policy.set_compile_state(
+            self._activate_compile_policy(
+                policy=self._compile_policy,
                 use_compiled=True,
-                eager_loss_computer=self._eager_loss_computer,
                 compiled_loss_computer=self._compiled_loss_computer,
             )
-            if selected_loss_computer is not None:
-                self.loss_computer = selected_loss_computer
         metrics: dict[str, torch.Tensor] = self._training_step_shared(
             batch, stage="train"
         )
@@ -672,19 +769,34 @@ class SPLADETrainingModule(L.LightningModule):
 
     def configure_optimizers(self) -> torch.optim.Optimizer | dict[str, Any]:
         optimizer_name: str = str(self.cfg.training.optimizer).lower()
-        optimizer_cls: type[torch.optim.Optimizer]
-        if optimizer_name == "adamw":
-            optimizer_cls = torch.optim.AdamW
-        elif optimizer_name == "adam":
-            optimizer_cls = torch.optim.Adam
-        else:
-            raise ValueError(f"Unsupported optimizer: {optimizer_name}")
+        raw_betas: Any = self.cfg.training.get("adam_betas", (0.9, 0.999))
+        if not isinstance(raw_betas, (list, tuple)) or len(raw_betas) != 2:
+            raise ValueError(
+                "training.adam_betas must be a list/tuple with 2 elements, "
+                f"got: {raw_betas!r}"
+            )
+        beta1: float = float(raw_betas[0])
+        beta2: float = float(raw_betas[1])
+        adam_betas: tuple[float, float] = (beta1, beta2)
+        adam_eps: float = float(self.cfg.training.get("adam_eps", 1e-8))
+        optimizer_kwargs: dict[str, Any] = {
+            "params": self.parameters(),
+            "lr": self.cfg.training.lr,
+            "weight_decay": self.cfg.training.weight_decay,
+            "betas": adam_betas,
+            "eps": adam_eps,
+        }
 
-        optimizer: torch.optim.Optimizer = optimizer_cls(
-            self.parameters(),
-            lr=self.cfg.training.lr,
-            weight_decay=self.cfg.training.weight_decay,
-        )
+        optimizer: torch.optim.Optimizer
+        if optimizer_name == "adamw":
+            optimizer = torch.optim.AdamW(**optimizer_kwargs)
+        elif optimizer_name == "adam":
+            optimizer = torch.optim.Adam(**optimizer_kwargs)
+        else:
+            raise ValueError(
+                f"Unsupported optimizer: {optimizer_name}. "
+                "Supported optimizers are: adam, adamw."
+            )
 
         if self.cfg.training.scheduler == "linear":
             from transformers import get_linear_schedule_with_warmup

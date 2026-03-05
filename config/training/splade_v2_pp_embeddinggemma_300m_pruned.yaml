@@ -2,7 +2,7 @@
 defaults:
   - splade_v2_pp
 
-name: splade_v2_pp_embeddinggemma_300m
+name: splade_v2_pp_embeddinggemma_300m_pruned
 
 # EmbeddingGemma uses a much larger vocab head than BERT-family backbones.
 # Enable SPLADE v2++ speed optimizations now that compact sparse head is available.
@@ -13,9 +13,8 @@ torch_compile_mode: max-autotune
 # reducer hook asserts; keep DDP in dynamic mode by default.
 static_graph: true
 find_unused_parameters: false
-batch_size: 8
+batch_size: 16
 eval_batch_size: 8
-grad_accumulation: 4
+grad_accumulation: 2
 num_workers: 4
 prefetch_factor: 2
-# dataloader_multiprocessing_context: fork

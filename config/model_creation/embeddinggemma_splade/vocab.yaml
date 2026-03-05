@@ -23,14 +23,215 @@ corpus_text_column: passage
 target_size: 30000
 stopword_df_ratio: 0.15
 min_df: 5
+filter_stopwords: true
+stopword_list_path: null
+stopword_filter_phrases: true
+normalize_leading_determiners: true
+leading_determiners: [the, a, an]
+normalize_entity_determiners: false
+normalize_noun_chunk_determiners: true
+filter_noise_terms: true
+noise_max_digit_ratio: 0.7
+noise_max_symbol_ratio: 0.35
+noise_drop_single_char: true
+noise_drop_pure_numeric: true
+noise_drop_mojibake: true
+filter_url_like_terms: true
+filter_template_terms: true
+filter_function_leading_phrases: true
+filter_contraction_artifacts: true
+filter_structured_artifacts: true
+filter_html_entity_artifacts: true
+html_entity_blacklist: [amp, nbsp, lt, gt]
+filter_pronoun_led_phrases: true
+pronoun_leading_words: [your, my, our, their, his, her, its]
+filter_letter_number_phrases: true
+letter_number_phrase_whitelist:
+  - w 2
+  - w 4
+  - b 12
+  - k 12
+  - i 95
+  - i 90
+  - i 80
+  - i 75
+  - i 70
+  - i 40
+  - i 35
+  - i 20
+  - i 15
+  - i 10
+  - i 9
+  - i 5
+  - i 94
+  - k 1
+  - b 1
+  - b 2
+  - b 6
+  - r 22
+  - r 3
+  - f 1
+  - v 6
+  - v 8
+  - c 1
+  - m 2
+filter_closed_class_terms: true
+closed_class_words:
+  - may
+  - will
+  - must
+  - might
+  - shall
+  - could
+  - would
+  - should
+  - can
+  - cannot
+  - many
+  - much
+  - more
+  - most
+  - less
+  - least
+  - every
+  - another
+  - either
+  - neither
+  - none
+  - several
+  - various
+  - certain
+  - particular
+  - mine
+  - onto
+  - else
+  - done
+  - per
+  - im
+filter_high_df_unigrams: true
+high_df_unigram_ratio: 0.08
+filter_generic_unigram_blacklist: true
+generic_unigram_blacklist:
+  - use
+  - one
+  - also
+  - make
+  - get
+  - take
+  - find
+  - know
+  - like
+  - good
+  - well
+  - call
+  - work
+  - need
+  - first
+  - include
+  - just
+  - go
+filter_pos_gate: true
+pos_gate_allowed_tags: [NOUN, VERB, ADJ, NUM]
+pos_gate_batch_size: 2048
+filter_noisy_numeric_terms: true
+numeric_term_max_tokens: 3
+function_leading_words:
+  - this
+  - that
+  - these
+  - those
+  - any
+  - some
+  - many
+  - much
+  - more
+  - most
+  - less
+  - least
+  - few
+  - fewer
+  - all
+  - each
+  - every
+  - either
+  - neither
+  - another
+  - other
+  - such
+  - same
+  - no
+  - none
+  - both
+  - several
+  - various
+  - certain
+  - particular
+function_leading_require_noun_chunk: true
+function_leading_keep_entity_backed: false
+canonicalize_terms_for_selection: true
+canonical_strip_leading_determiners: true
+normalize_noun_forms: true
+noun_normalization_skip_entity_backed: true
+noun_normalization_include_phrases: false
+noun_normalization_exceptions:
+  - news
+  - series
+  - species
+  - means
+  - headquarters
+  - politics
+  - economics
+  - mathematics
+  - physics
+  - ethics
+  - statistics
+  - diabetes
+  - measles
+downweight_generic_unigrams: true
+generic_unigram_df_ratio_start: 0.005
+generic_unigram_min_multiplier: 0.2
+generic_unigram_penalty_power: 1.5
+filter_low_cohesion_phrases: true
+phrase_cohesion_method: npmi
+phrase_cohesion_min_score: 0.0
+phrase_cohesion_min_df: 30
+phrase_cohesion_require_noun_chunk: false
+phrase_cohesion_entity_exempt: false
+entity_quality_gate: true
+entity_quality_min_source_df: 5
+entity_quality_min_source_ratio: 0.02
+entity_quality_min_df_entity_only: 30
+term_stats_cache_path: outputs/model_creation/embeddinggemma_splade/vocab/term_statistics.pkl
+save_term_stats_cache: true
+selection_only: false
 include_queries: false
-max_meta_rows: 500000
-max_docs: 500000
+# Full-corpus defaults: do not cap rows/docs; stream entire corpus split.
+max_meta_rows: null
+max_docs: null
+use_all_corpus_documents: true
+map_reduce_sharding: true
+map_reduce_num_shards: 48
+map_reduce_num_workers: 48
+map_reduce_tmp_dir: outputs/model_creation/embeddinggemma_splade/vocab/.map_reduce_tmp
+map_reduce_cleanup: true
 
-spacy_model: en_core_web_trf
-spacy_batch_size: 128
-spacy_n_process: 1
-normalizer: simple
-allow_simple_fallback: true
+spacy_model: en_core_web_sm
+spacy_batch_size: 512
+spacy_n_process: 16
+normalizer: spacy
+allow_simple_fallback: false
+spacy_extract_entities: true
+spacy_extract_noun_chunks: true
+entity_labels: [PERSON, ORG, GPE, LOC, FAC, PRODUCT, EVENT, WORK_OF_ART, NORP]
+entity_min_tokens: 1
+entity_max_tokens: 6
+noun_chunk_min_tokens: 2
+noun_chunk_max_tokens: 6
+noun_chunk_normalization: surface
+noun_chunk_max_stopword_ratio: 0.4
+max_phrase_chars: 80
+token_source_boost: 1.0
+noun_chunk_source_boost: 1.25
+entity_source_boost: 1.5
 
 output_dir: outputs/model_creation/embeddinggemma_splade/vocab

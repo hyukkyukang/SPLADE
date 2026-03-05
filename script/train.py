@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 from datetime import datetime
 from typing import Any
 
@@ -12,6 +13,7 @@ from lightning.pytorch.callbacks import (
     ModelCheckpoint,
 )
 from lightning.pytorch.loggers import CSVLogger, Logger, MLFlowLogger
+from mlflow.tracking import MlflowClient
 from omegaconf import DictConfig, OmegaConf
 
 from config.path import ABS_CONFIG_DIR
@@ -20,8 +22,19 @@ from src.model.pl_module import SPLADETrainingModule
 from src.utils import log_if_rank_zero
 from src.utils.logging import (
     get_logger,
+    is_rank_zero as is_logging_rank_zero,
     suppress_accumulate_grad_stream_mismatch_warning,
     suppress_urllib3_insecure_request_warning,
+)
+from src.utils.mlflow_utils import (
+    build_mlflow_dataset_input_from_metadata,
+    configure_mlflow_tls,
+    finish_mlflow_system_metrics_monitor,
+    has_logged_mlflow_dataset_inputs,
+    has_logged_mlflow_model_outputs,
+    log_mlflow_model_output,
+    resolve_mlflow_tags,
+    start_mlflow_system_metrics_monitor,
 )
 from src.utils.normalize import normalize_optional_bool
 from src.utils.progress_bar import StepAwareRichProgressBar
@@ -154,31 +167,59 @@ def _resolve_mlflow_run_name(training_cfg: DictConfig, tag_value: str | None) ->
     return str(training_cfg.name)
 
 
+def _resolve_mlflow_logged_model_name(model_cfg: DictConfig) -> str:
+    """Resolve the MLflow logged-model display name from model config."""
+    hf_model_name: str | None = normalize_optional_str(model_cfg.get("huggingface_name"))
+    model_name: str | None = normalize_optional_str(model_cfg.get("name"))
+    hf_model_leaf: str | None = None
+    if hf_model_name is not None:
+        hf_model_name = hf_model_name.rstrip("/\\")
+        hf_model_leaf = os.path.basename(hf_model_name) or hf_model_name
+
+    search_fields: list[str] = [
+        value
+        for value in (hf_model_name, hf_model_leaf, model_name)
+        if value is not None
+    ]
+    canonical_backbone_patterns: tuple[tuple[str, str], ...] = (
+        (r"modernbert[-_]?base", "ModernBERT-base"),
+        (r"modernbert[-_]?large", "ModernBERT-large"),
+        (r"embeddinggemma[-_]?300m", "EmbeddingGemma-300M"),
+        (r"embeddinggemma[-_]?2b", "EmbeddingGemma-2B"),
+        (r"distilbert[-_]?base[-_]?uncased", "DistilBERT-base-uncased"),
+        (r"co[-_]?condenser[-_]?marco", "CoCondenser-Marco"),
+        (r"anna[-_./\\]?large|anna_large_hf|trained_anna_large", "ANNA-large"),
+        (r"anna[-_./\\]?base|anna_base_hf|trained_anna_base", "ANNA-base"),
+        (r"(^|[\\/._-])anna([\\/._-]|$)", "ANNA-base"),
+        (r"bert[-_]?base[-_]?uncased", "BERT-base-uncased"),
+        (r"bert[-_]?large[-_]?uncased", "BERT-large-uncased"),
+    )
+    field: str
+    pattern: str
+    display_name: str
+    for field in search_fields:
+        for pattern, display_name in canonical_backbone_patterns:
+            if re.search(pattern, field, flags=re.IGNORECASE):
+                return display_name
+
+    if hf_model_leaf is not None:
+        return hf_model_leaf
+    if model_name is not None:
+        return model_name
+    raise ValueError(
+        "cfg.model.huggingface_name or cfg.model.name must be a non-empty string "
+        "for MLflow model logging."
+    )
+
+
 def _build_mlflow_tags(
     cfg: DictConfig, training_cfg: DictConfig, tag_value: str | None
 ) -> dict[str, str]:
     """Build MLflow tags from config, adding standard run metadata tags."""
     mlflow_cfg: DictConfig = training_cfg.mlflow
-    raw_tags: Any = mlflow_cfg.get("tags")
-    if raw_tags is None:
-        tag_mapping: dict[str, Any] = {}
-    else:
-        resolved_tags: Any = (
-            OmegaConf.to_container(raw_tags, resolve=True)
-            if OmegaConf.is_config(raw_tags)
-            else raw_tags
-        )
-        if not isinstance(resolved_tags, dict):
-            raise TypeError("training.mlflow.tags must be a mapping.")
-        tag_mapping = dict(resolved_tags)
-
-    tags: dict[str, str] = {}
-    key: Any
-    value: Any
-    for key, value in tag_mapping.items():
-        if value is None:
-            continue
-        tags[str(key)] = str(value)
+    tags: dict[str, str] = resolve_mlflow_tags(
+        mlflow_cfg.get("tags"), field_name="training.mlflow.tags"
+    )
     tags.setdefault("training_name", str(training_cfg.name))
     tags.setdefault("log_dir", str(cfg.log_dir))
     if tag_value is not None:
@@ -186,36 +227,108 @@ def _build_mlflow_tags(
     return tags
 
 
-def _configure_mlflow_tls(mlflow_cfg: DictConfig) -> None:
-    """Apply MLflow client environment settings from config into env vars."""
-    insecure_tls: bool | None = normalize_optional_bool(mlflow_cfg.get("insecure_tls"))
-    if insecure_tls is not None:
-        os.environ["MLFLOW_TRACKING_INSECURE_TLS"] = (
-            "true" if insecure_tls else "false"
-        )
+def _build_mlflow_dataset_input(
+    dataset_cfg: DictConfig, *, dataset_name: str, context: str
+) -> Any:
+    """Create an MLflow dataset input entity from a dataset config section."""
 
-    server_cert_path: str | None = normalize_optional_str(
-        mlflow_cfg.get("server_cert_path")
+    def _as_text(key: str, default: str = "") -> str:
+        value: str | None = normalize_optional_str(dataset_cfg.get(key))
+        if value is None:
+            return default
+        return value
+
+    resolved_dataset_name: str = _as_text("name", dataset_name)
+    metadata: dict[str, str] = {
+        "dataset_name": resolved_dataset_name,
+        "dataset_type": _as_text("type"),
+        "split": _as_text("split"),
+        "hf_name": _as_text("hf_name"),
+        "hf_subset": _as_text("hf_subset"),
+        "hf_split": _as_text("hf_split"),
+        "beir_dataset": _as_text("beir_dataset"),
+    }
+
+    hf_name: str | None = normalize_optional_str(dataset_cfg.get("hf_name"))
+    source_url: str | None = (
+        f"https://huggingface.co/datasets/{hf_name}" if hf_name is not None else None
     )
-    if server_cert_path is not None:
-        os.environ["MLFLOW_TRACKING_SERVER_CERT_PATH"] = server_cert_path
-
-    client_cert_path: str | None = normalize_optional_str(
-        mlflow_cfg.get("client_cert_path")
+    return build_mlflow_dataset_input_from_metadata(
+        dataset_name=resolved_dataset_name,
+        context=context,
+        metadata=metadata,
+        source=source_url,
     )
-    if client_cert_path is not None:
-        os.environ["MLFLOW_TRACKING_CLIENT_CERT_PATH"] = client_cert_path
 
-    system_metrics_enabled: bool | None = normalize_optional_bool(
-        mlflow_cfg.get("system_metrics_enabled")
+
+def _log_mlflow_run_datasets_and_model(
+    cfg: DictConfig, training_cfg: DictConfig, mlflow_cfg: DictConfig, mlflow_logger: MLFlowLogger
+) -> None:
+    """Populate MLflow run Inputs/Outputs fields for datasets and model."""
+    if not is_logging_rank_zero():
+        return
+
+    run_id: str | None = mlflow_logger.run_id
+    if run_id is None:
+        return
+
+    tracking_uri: str | None = normalize_optional_str(mlflow_cfg.get("tracking_uri"))
+    mlflow_client: MlflowClient = MlflowClient(tracking_uri=tracking_uri)
+    run = mlflow_client.get_run(run_id)
+
+    if not has_logged_mlflow_dataset_inputs(run):
+        dataset_inputs: list[Any] = []
+        train_dataset_cfg: DictConfig | None = cfg.get("train_dataset")
+        if isinstance(train_dataset_cfg, DictConfig):
+            dataset_inputs.append(
+                _build_mlflow_dataset_input(
+                    train_dataset_cfg, dataset_name="train_dataset", context="training"
+                )
+            )
+
+        val_dataset_cfg: DictConfig | None = cfg.get("val_dataset")
+        if isinstance(val_dataset_cfg, DictConfig):
+            dataset_inputs.append(
+                _build_mlflow_dataset_input(
+                    val_dataset_cfg, dataset_name="val_dataset", context="validation"
+                )
+            )
+
+        if dataset_inputs:
+            mlflow_client.log_inputs(run_id=run_id, datasets=dataset_inputs)
+
+    if has_logged_mlflow_model_outputs(run):
+        return
+
+    model_cfg: DictConfig | None = cfg.get("model")
+    if not isinstance(model_cfg, DictConfig):
+        raise TypeError("cfg.model must be set for MLflow model logging.")
+
+    model_type: str = str(model_cfg.get("type", "splade"))
+    model_tags: dict[str, str] = {
+        "training_name": str(training_cfg.name),
+        "run_id": run_id,
+    }
+    hf_model_name: str | None = normalize_optional_str(model_cfg.get("huggingface_name"))
+    if hf_model_name is not None:
+        model_tags["huggingface_name"] = hf_model_name
+
+    logged_model_name: str = _resolve_mlflow_logged_model_name(model_cfg)
+    log_mlflow_model_output(
+        mlflow_client=mlflow_client,
+        run=run,
+        run_id=run_id,
+        logged_model_name=logged_model_name,
+        model_type=model_type,
+        model_tags=model_tags,
+        tracking_uri=tracking_uri,
+        step=0,
     )
-    if system_metrics_enabled is not None:
-        os.environ["MLFLOW_ENABLE_SYSTEM_METRICS_LOGGING"] = (
-            "true" if system_metrics_enabled else "false"
-        )
 
 
-def _build_lightning_loggers(cfg: DictConfig, training_cfg: DictConfig) -> list[Logger]:
+def _build_lightning_loggers(
+    cfg: DictConfig, training_cfg: DictConfig
+) -> tuple[list[Logger], str | None]:
     """Build CSV + MLflow logger stack for the training run."""
     tag_value: str | None = normalize_tag(cfg.tag)
     csv_logger: CSVLogger = CSVLogger(save_dir=cfg.log_dir, name="lightning_logs")
@@ -223,13 +336,13 @@ def _build_lightning_loggers(cfg: DictConfig, training_cfg: DictConfig) -> list[
     # Keep debug runs local-only to preserve current behavior.
     is_debug_tag: bool = tag_value is not None and tag_value.lower() == "debug"
     if is_debug_tag:
-        return loggers
+        return loggers, None
 
     mlflow_cfg: DictConfig = training_cfg.mlflow
     mlflow_enabled: bool | None = normalize_optional_bool(mlflow_cfg.get("enabled"))
     if mlflow_enabled is False:
-        return loggers
-    _configure_mlflow_tls(mlflow_cfg)
+        return loggers, None
+    configure_mlflow_tls(mlflow_cfg)
 
     mlflow_run_id: str | None = normalize_optional_str(mlflow_cfg.get("run_id"))
     mlflow_logger: MLFlowLogger = MLFlowLogger(
@@ -257,8 +370,23 @@ def _build_lightning_loggers(cfg: DictConfig, training_cfg: DictConfig) -> list[
             "MLflow run_id provided; skipping hyperparameter re-log to avoid "
             "immutable parameter conflicts on resumed runs.",
         )
+    managed_system_metrics_run_id: str | None = start_mlflow_system_metrics_monitor(
+        mlflow_logger=mlflow_logger,
+        mlflow_cfg=mlflow_cfg,
+        logger=logger,
+        is_logging_rank_zero=is_logging_rank_zero,
+    )
+    try:
+        _log_mlflow_run_datasets_and_model(cfg, training_cfg, mlflow_cfg, mlflow_logger)
+    except Exception as exc:
+        log_if_rank_zero(
+            logger,
+            "Failed to log MLflow dataset/model metadata: "
+            f"{type(exc).__name__}: {exc}",
+            level="warning",
+        )
     loggers.append(mlflow_logger)
-    return loggers
+    return loggers, managed_system_metrics_run_id
 
 
 @hydra.main(version_base=None, config_path=ABS_CONFIG_DIR, config_name="train")
@@ -300,7 +428,9 @@ def main(cfg: DictConfig) -> None:
         save_last=True,
     )
 
-    lightning_loggers: list[Logger] = _build_lightning_loggers(cfg, training_cfg)
+    lightning_loggers, managed_system_metrics_run_id = _build_lightning_loggers(
+        cfg, training_cfg
+    )
 
     max_grad_norm_value: float | None = training_cfg.max_grad_norm
     # Lightning disables clipping when the value is <= 0.
@@ -330,10 +460,22 @@ def main(cfg: DictConfig) -> None:
         **trainer_kwargs,
     )
 
-    if resume_checkpoint_path is not None:
-        trainer.fit(model, datamodule=data_module, ckpt_path=resume_checkpoint_path)
-    else:
-        trainer.fit(model, datamodule=data_module)
+    trainer_status: str = "FINISHED"
+    try:
+        if resume_checkpoint_path is not None:
+            trainer.fit(model, datamodule=data_module, ckpt_path=resume_checkpoint_path)
+        else:
+            trainer.fit(model, datamodule=data_module)
+    except Exception:
+        trainer_status = "FAILED"
+        raise
+    finally:
+        finish_mlflow_system_metrics_monitor(
+            run_id=managed_system_metrics_run_id,
+            status=trainer_status,
+            logger=logger,
+            is_logging_rank_zero=is_logging_rank_zero,
+        )
 
 
 if __name__ == "__main__":

@@ -78,6 +78,29 @@ class TrainingCompilePolicyManager:
             return wrapper
         return torch.compile(wrapper, **compile_kwargs)
 
+    @staticmethod
+    def _module_has_device_mismatch(
+        module: torch.nn.Module, *, device: torch.device
+    ) -> bool:
+        parameter: torch.nn.Parameter
+        for parameter in module.parameters(recurse=True):
+            if parameter.device != device:
+                return True
+        buffer: torch.Tensor
+        for buffer in module.buffers(recurse=True):
+            if buffer.device != device:
+                return True
+        return False
+
+    def _move_module_to_device_if_needed(
+        self, maybe_module: Any | None, *, device: torch.device
+    ) -> None:
+        if not isinstance(maybe_module, torch.nn.Module):
+            return
+        if not self._module_has_device_mismatch(maybe_module, device=device):
+            return
+        maybe_module.to(device=device)
+
     def setup(self, cfg: DictConfig) -> None:
         compile_enabled: bool = bool(cfg.training.torch_compile)
         compile_available: bool = hasattr(torch, "compile")
@@ -359,6 +382,25 @@ class TrainingCompilePolicyManager:
             ),
         )
         self.set_compile_state(use_compiled=True)
+
+    def prepare_for_device(self, *, device: torch.device, use_compiled: bool) -> None:
+        if not self.torch_compile_enabled or not use_compiled:
+            return
+        target_device: torch.device = torch.device(device)
+        if self.torch_compile_full_model:
+            self._move_module_to_device_if_needed(
+                self.compiled_model, device=target_device
+            )
+            return
+        self._move_module_to_device_if_needed(
+            self._compiled_shared_encoder_module, device=target_device
+        )
+        self._move_module_to_device_if_needed(
+            self._compiled_query_encoder_fn, device=target_device
+        )
+        self._move_module_to_device_if_needed(
+            self._compiled_doc_encoder_fn, device=target_device
+        )
 
     def set_compile_state(
         self,

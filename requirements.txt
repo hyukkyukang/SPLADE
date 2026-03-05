@@ -4,6 +4,7 @@ sentence-transformers
 lightning[extra]
 torchmetrics
 mlflow
+psutil
 python-dotenv
 hydra-core
 hydra-colorlog
@@ -32,6 +33,7 @@ matplotlib
 seaborn
 pandas
 spacy
+nltk
 
 # # This is required to download LoTTE dataset
 inscriptis==2.6.0 # This is required to support ir-datasets in Python 3.14.

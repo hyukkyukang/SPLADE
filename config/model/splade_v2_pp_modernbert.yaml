@@ -1,0 +1,6 @@
+# @package model
+defaults:
+  - splade_v2_pp
+
+name: splade_v2_pp_modernbert
+huggingface_name: answerdotai/ModernBERT-base
