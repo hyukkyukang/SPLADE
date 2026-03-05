@@ -1,0 +1,10 @@
+# @package training
+defaults:
+  - splade_v2_pp
+
+name: splade_v2_pp_hard
+
+loss:
+  type: in_batch_plus_pairwise
+  in_batch_weight: 1.0
+  pairwise_weight: 1.0

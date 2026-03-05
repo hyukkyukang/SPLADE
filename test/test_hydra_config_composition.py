@@ -43,6 +43,18 @@ class HydraConfigCompositionTest(unittest.TestCase):
         self.assertIn("train_dataset", cfg)
         self.assertIn("val_dataset", cfg)
 
+    def test_train_splade_v2_pp_hard_config_composes(self) -> None:
+        cfg = self._compose(
+            config_name="train_splade_v2_pp_hard",
+            overrides=[],
+        )
+        self.assertEqual(str(cfg.model.name), "splade_v2_pp")
+        self.assertEqual(str(cfg.training.name), "splade_v2_pp_hard")
+        self.assertEqual(str(cfg.train_dataset.name), "msmarco_hard_negatives")
+        self.assertEqual(str(cfg.training.loss.type), "in_batch_plus_pairwise")
+        self.assertAlmostEqual(float(cfg.training.loss.in_batch_weight), 1.0)
+        self.assertAlmostEqual(float(cfg.training.loss.pairwise_weight), 1.0)
+
     def test_validation_matrix_composes(self) -> None:
         cfg = self._compose(
             config_name="validation",

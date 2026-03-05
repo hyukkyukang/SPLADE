@@ -58,6 +58,8 @@ class LossComputer(nn.Module):
         reg_doc_weight: float,
         reg_type: str,
         reg_paper_faithful: bool,
+        in_batch_weight: float = 1.0,
+        pairwise_weight: float = 1.0,
     ) -> None:
         super().__init__()
         self.loss_type: str = loss_type.replace("-", "_").lower()
@@ -70,6 +72,8 @@ class LossComputer(nn.Module):
         self.reg_doc_weight: float = float(reg_doc_weight)
         self.reg_type: str = str(reg_type).lower()
         self.reg_paper_faithful: bool = bool(reg_paper_faithful)
+        self.in_batch_weight: float = float(in_batch_weight)
+        self.pairwise_weight: float = float(pairwise_weight)
         self._neg_inf: torch.Tensor
         self.register_buffer(
             "_neg_inf",
@@ -107,6 +111,8 @@ class LossComputer(nn.Module):
         doc_reps: torch.Tensor,
         pos_mask: torch.Tensor,
         doc_mask: torch.Tensor,
+        *,
+        include_same_query_negatives: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         bsz: int
         doc_count: int
@@ -132,7 +138,10 @@ class LossComputer(nn.Module):
         ).repeat_interleave(doc_count)
         query_ids: torch.Tensor = torch.arange(bsz, device=doc_mask.device).unsqueeze(1)
         same_query_mask: torch.Tensor = doc_owner.unsqueeze(0) == query_ids
-        same_query_docs: torch.Tensor = same_query_mask & flat_doc_mask.unsqueeze(0)
+        if include_same_query_negatives:
+            same_query_docs: torch.Tensor = same_query_mask & flat_doc_mask.unsqueeze(0)
+        else:
+            same_query_docs = same_query_mask & flat_pos_mask.unsqueeze(0)
         other_query_pos: torch.Tensor = (~same_query_mask) & flat_pos_mask.unsqueeze(0)
         in_batch_doc_mask: torch.Tensor = same_query_docs | other_query_pos
 
@@ -183,7 +192,12 @@ class LossComputer(nn.Module):
         in_batch_pos_mask: torch.Tensor
         in_batch_doc_mask: torch.Tensor
         in_batch_scores, in_batch_pos_mask, in_batch_doc_mask = (
-            self._compute_in_batch_scores(q_reps, doc_reps, pos_mask, doc_mask)
+            self._compute_in_batch_scores(
+                q_reps,
+                doc_reps,
+                pos_mask,
+                doc_mask,
+            )
         )
         in_batch_loss: torch.Tensor = multi_positive_contrastive_loss(
             in_batch_scores,
@@ -194,6 +208,46 @@ class LossComputer(nn.Module):
         )
         pairwise_loss: torch.Tensor = torch.zeros_like(in_batch_loss)
         return in_batch_loss, pairwise_loss, in_batch_loss
+
+    def _main_loss_in_batch_plus_pairwise(
+        self,
+        pairwise_scores: torch.Tensor,
+        q_reps: torch.Tensor,
+        doc_reps: torch.Tensor,
+        pos_mask: torch.Tensor,
+        doc_mask: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        pairwise_loss: torch.Tensor = multi_positive_contrastive_loss(
+            pairwise_scores,
+            pos_mask,
+            doc_mask,
+            temperature=self.temperature,
+            neg_inf=self._neg_inf,
+        )
+        in_batch_scores: torch.Tensor
+        in_batch_pos_mask: torch.Tensor
+        in_batch_doc_mask: torch.Tensor
+        in_batch_scores, in_batch_pos_mask, in_batch_doc_mask = (
+            self._compute_in_batch_scores(
+                q_reps,
+                doc_reps,
+                pos_mask,
+                doc_mask,
+                include_same_query_negatives=False,
+            )
+        )
+        in_batch_loss: torch.Tensor = multi_positive_contrastive_loss(
+            in_batch_scores,
+            in_batch_pos_mask,
+            in_batch_doc_mask,
+            temperature=self.temperature,
+            neg_inf=self._neg_inf,
+        )
+        combined_loss: torch.Tensor = (
+            self.in_batch_weight * in_batch_loss
+            + self.pairwise_weight * pairwise_loss
+        )
+        return combined_loss, pairwise_loss, in_batch_loss
 
     def _distill_loss_noop(
         self,
@@ -306,6 +360,8 @@ class LossComputer(nn.Module):
             return self._main_loss_pairwise
         if loss_type == "in_batch":
             return self._main_loss_in_batch
+        if loss_type == "in_batch_plus_pairwise":
+            return self._main_loss_in_batch_plus_pairwise
         raise ValueError(f"Unsupported loss type: {loss_type}")
 
     def _resolve_distill_loss_fn(self, loss_type: str) -> _DistillLossFn:

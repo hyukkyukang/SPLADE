@@ -422,9 +422,9 @@ class SPLADETrainingModule(L.LightningModule):
             "q_rep_magnitude": q_rep_magnitude,
             "doc_rep_magnitude": doc_rep_magnitude,
         }
-        if self.loss_type == "pairwise":
+        if self.loss_type in {"pairwise", "in_batch_plus_pairwise"}:
             metrics["pairwise_loss"] = pairwise_loss
-        if self.loss_type == "in_batch":
+        if self.loss_type in {"in_batch", "in_batch_plus_pairwise"}:
             metrics["in_batch_loss"] = in_batch_loss
         if self.distill_cfg.enabled:
             metrics["distill_loss"] = distill_loss

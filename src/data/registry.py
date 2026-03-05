@@ -8,6 +8,7 @@ from src.data.dataset import (
     MSMARCODevSmallNegativesDataset,
     MSMARCODataset,
     MSMARCODistillScoresDataset,
+    MSMARCOHardNegativesDataset,
     MSMARCOTripletScoresDataset,
 )
 
@@ -17,6 +18,7 @@ DatasetBuilder = Callable[[DictConfig], BaseDataset]
 _DATASET_BUILDERS: dict[str, DatasetBuilder] = {
     "msmarco": MSMARCODataset,
     "msmarco_local_triplets": MSMARCODataset,
+    "msmarco_hard_negatives": MSMARCOHardNegativesDataset,
     "msmarco_dev_small_negatives": MSMARCODevSmallNegativesDataset,
     "msmarco_distill_scores": MSMARCODistillScoresDataset,
     "msmarco_triplet_scores": MSMARCOTripletScoresDataset,

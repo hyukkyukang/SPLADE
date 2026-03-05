@@ -1,0 +1,54 @@
+# @package dataset
+defaults:
+  - _base@_here_
+
+name: msmarco_hard_negatives
+type: msmarco_hard_negatives
+split: train
+
+hf_name: sentence-transformers/msmarco-hard-negatives
+hf_subset: null
+hf_cache_dir: null
+hf_max_samples: null
+hf_skip_samples: 0
+hf_data_files:
+  train: msmarco-hard-negatives.jsonl.gz
+
+query_corpus_hf_name: sentence-transformers/msmarco
+query_corpus_hf_cache_dir: null
+query_corpus_hf_data_files: null
+
+num_positives: 1
+num_negatives: 32
+
+# Column names for query/corpus datasets.
+query_subset_name: queries
+query_split_name: train
+query_id_column: query_id
+query_text_column: query
+corpus_subset_name: corpus
+corpus_split_name: train
+corpus_id_column: passage_id
+corpus_text_column: passage
+
+hard_negative_selection:
+  # Consume dense retriever negatives first; BM25 is intentionally last.
+  model_priority:
+    - msmarco-distilbert-base-tas-b
+    - msmarco-distilbert-base-v3
+    - msmarco-MiniLM-L-6-v3
+    - distilbert-margin_mse-cls-dot-v2
+    - distilbert-margin_mse-cls-dot-v1
+    - distilbert-margin_mse-mean-dot-v1
+    - mpnet-margin_mse-mean-v1
+    - co-condenser-margin_mse-cls-v1
+    - distilbert-margin_mse-mnrl-mean-v1
+    - distilbert-margin_mse-sym_mnrl-mean-v1
+    - distilbert-margin_mse-sym_mnrl-mean-v2
+    - co-condenser-margin_mse-sym_mnrl-mean-v1
+    - bm25
+  deprioritized_models: [bm25]
+  append_unlisted_models: true
+  drop_positive_overlaps: true
+  dedupe: true
+  require_negatives: true

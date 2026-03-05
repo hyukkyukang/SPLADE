@@ -90,6 +90,8 @@ temperature: 1.0
 loss:
   type: in_batch
   multi_positive: true
+  in_batch_weight: 1.0
+  pairwise_weight: 1.0
 
 distill:
   enabled: false

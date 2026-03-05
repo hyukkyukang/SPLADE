@@ -32,6 +32,8 @@ class LossRegularizationService:
         self.reg_cfg: DictConfig = training_cfg.regularization
         self.loss_cfg: DictConfig = training_cfg.loss
         self.loss_type: str = str(self.loss_cfg.type).lower()
+        self.in_batch_weight: float = float(self.loss_cfg.get("in_batch_weight", 1.0))
+        self.pairwise_weight: float = float(self.loss_cfg.get("pairwise_weight", 1.0))
 
         reg_weight_value: float | None = self.reg_cfg.weight
         if reg_weight_value is None:
@@ -66,6 +68,8 @@ class LossRegularizationService:
             reg_doc_weight=self.reg_doc_weight,
             reg_type=str(self.reg_cfg.type),
             reg_paper_faithful=bool(self.reg_cfg.paper_faithful),
+            in_batch_weight=self.in_batch_weight,
+            pairwise_weight=self.pairwise_weight,
         )
 
     def lambda_schedule_multiplier(self, global_step: int) -> float:
