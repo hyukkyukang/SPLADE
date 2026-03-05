@@ -4,6 +4,7 @@ import torch
 from omegaconf import DictConfig
 
 from src.metric.retrieval import RetrievalMetrics, resolve_k_list
+from src.metric.validation_retrieval import ValidationRetrievalMetrics
 
 
 class ValidationMetricsAccumulator:
@@ -13,18 +14,56 @@ class ValidationMetricsAccumulator:
         self.metrics_cfg = metrics_cfg
         self.enabled: bool = bool(metrics_cfg.enabled)
         self._query_offset: int = 0
-        self._metric_collection: RetrievalMetrics | None = None
+        backend_value: Any = metrics_cfg.get("backend", "custom")
+        self.backend: str = str(backend_value).strip().lower()
+        if self.backend not in ("custom", "torchmetrics"):
+            raise ValueError(
+                "training.validation_metrics.backend must be one of "
+                "['custom', 'torchmetrics'], got: "
+                f"{backend_value!r}"
+            )
+        self.tie_break_seed: int = int(metrics_cfg.get("tie_break_seed", 0))
+        self._metric_collection: RetrievalMetrics | ValidationRetrievalMetrics | None = None
         if self.enabled:
             k_list: list[int] = resolve_k_list(metrics_cfg.k_list)
-            self._metric_collection = RetrievalMetrics(
-                dataset_name=dataset_name,
-                k_list=k_list,
-                sync_on_compute=False,
-            )
+            if self.backend == "torchmetrics":
+                self._metric_collection = RetrievalMetrics(
+                    dataset_name=dataset_name,
+                    k_list=k_list,
+                    sync_on_compute=False,
+                )
+            else:
+                self._metric_collection = ValidationRetrievalMetrics(
+                    k_list=k_list,
+                    tie_break_seed=self.tie_break_seed,
+                )
 
     @property
     def has_collection(self) -> bool:
         return self._metric_collection is not None
+
+    def _build_tie_break_values(
+        self,
+        *,
+        global_query_idx: int,
+        local_doc_indexes: torch.Tensor,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """Build deterministic pseudo-random keys to break score ties."""
+        query_component: torch.Tensor = torch.full(
+            local_doc_indexes.shape,
+            int(global_query_idx + self.tie_break_seed),
+            dtype=torch.long,
+            device=device,
+        )
+        # 64-bit integer mixing for deterministic, backend-consistent ordering.
+        mixed: torch.Tensor = (
+            local_doc_indexes * 6364136223846793005
+            + query_component * 1442695040888963407
+            + 0x9E3779B97F4A7C15
+        )
+        # Keep positive values for lexsort secondary key.
+        return mixed & 0x7FFFFFFFFFFFFFFF
 
     def on_validation_start(self, device: torch.device) -> None:
         if self._metric_collection is None:
@@ -79,7 +118,27 @@ class ValidationMetricsAccumulator:
                 dtype=torch.long,
                 device=scores.device,
             )
-            self._metric_collection.append(scores, targets, indexes)
+            if self.backend == "torchmetrics":
+                metric_collection = self._metric_collection
+                if not isinstance(metric_collection, RetrievalMetrics):
+                    raise TypeError("Expected RetrievalMetrics for torchmetrics backend.")
+                metric_collection.append(scores, targets, indexes)
+                continue
+
+            metric_collection_custom = self._metric_collection
+            if not isinstance(metric_collection_custom, ValidationRetrievalMetrics):
+                raise TypeError(
+                    "Expected ValidationRetrievalMetrics for custom backend."
+                )
+            local_doc_indexes: torch.Tensor = torch.arange(
+                scores.shape[0], dtype=torch.long, device=scores.device
+            )
+            tie_break: torch.Tensor = self._build_tie_break_values(
+                global_query_idx=global_query_idx,
+                local_doc_indexes=local_doc_indexes,
+                device=scores.device,
+            )
+            metric_collection_custom.append(scores, targets, indexes, tie_break)
 
     def finalize_epoch(
         self,
