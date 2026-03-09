@@ -135,6 +135,33 @@ pos_gate_allowed_tags: [NOUN, VERB, ADJ, NUM]
 pos_gate_batch_size: 2048
 filter_noisy_numeric_terms: true
 numeric_term_max_tokens: 3
+filter_strict_post_selection_cleanup: true
+strict_drop_short_alpha_unigrams: true
+strict_short_alpha_unigram_max_len: 2
+strict_short_alpha_unigram_whitelist:
+  - mg
+  - kg
+  - km
+  - cm
+  - mm
+  - ml
+  - oz
+  - lb
+  - ft
+  - uk
+  - eu
+  - tv
+  - ip
+  - pc
+  - ph
+strict_drop_about_numeric_phrases: true
+strict_drop_leading_numeric_function_phrases: true
+strict_drop_trailing_function_word_phrases: true
+strict_trailing_function_words: [of, and, or, to, for, in, "on", with, from, by]
+strict_drop_abbreviation_heavy_phrases: true
+strict_abbreviation_phrase_whitelist: []
+strict_drop_artifact_substrings: true
+strict_artifact_substrings: [uplog]
 function_leading_words:
   - this
   - that

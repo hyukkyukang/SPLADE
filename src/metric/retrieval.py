@@ -81,9 +81,9 @@ class RetrievalMetrics(MetricCollection):
         self, preds: torch.Tensor, target: torch.Tensor, indexes: torch.Tensor
     ) -> None:
         """Accumulate tensors for a single all_gather at epoch end."""
-        self._accumulated_preds.append(preds)
-        self._accumulated_targets.append(target)
-        self._accumulated_indexes.append(indexes)
+        self._accumulated_preds.append(preds.detach().float().cpu())
+        self._accumulated_targets.append(target.detach().float().cpu())
+        self._accumulated_indexes.append(indexes.detach().long().cpu())
 
     def gather(
         self,
@@ -113,7 +113,11 @@ class RetrievalMetrics(MetricCollection):
         if world_size > 1 and all_gather_fn is None:
             raise ValueError("all_gather_fn is required when world_size > 1.")
 
+        metric_device: torch.device = self._device_ref.device
         if world_size > 1 and all_gather_fn is not None:
+            local_preds = local_preds.to(metric_device)
+            local_targets = local_targets.to(metric_device)
+            local_indexes = local_indexes.to(metric_device)
             size_tensor: torch.Tensor = torch.tensor(
                 [local_preds.numel()],
                 device=local_preds.device,
@@ -180,9 +184,9 @@ class RetrievalMetrics(MetricCollection):
         else:
             if local_preds.numel() == 0:
                 return False
-            all_preds: torch.Tensor = local_preds
-            all_targets: torch.Tensor = local_targets
-            all_indexes: torch.Tensor = local_indexes
+            all_preds = local_preds.to(metric_device)
+            all_targets = local_targets.to(metric_device)
+            all_indexes = local_indexes.to(metric_device)
 
         self.update(all_preds, all_targets, all_indexes)
         return True

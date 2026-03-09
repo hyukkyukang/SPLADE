@@ -198,6 +198,8 @@ class TrainLoggerConfigTest(unittest.TestCase):
             ), patch("src.utils.mlflow_utils.mlflow.active_run", return_value=None), patch(
                 "src.utils.mlflow_utils.mlflow.start_run"
             ) as start_run, patch(
+                "script.train.warn_if_mlflow_gpu_metrics_unavailable"
+            ) as warn_gpu_metrics, patch(
                 "script.train.MlflowClient", return_value=mlflow_client_instance
             ):
                 loggers, managed_run_id = _build_lightning_loggers(cfg, cfg.training)
@@ -215,7 +217,7 @@ class TrainLoggerConfigTest(unittest.TestCase):
         self.assertIsInstance(loggers[0], CSVLogger)
         self.assertEqual(managed_run_id, "unit-test-run-id")
         fake_logger = _FakeMLFlowLogger.instances[-1]
-        self.assertEqual(fake_logger.kwargs["experiment_name"], "splade_exp")
+        self.assertEqual(fake_logger.kwargs["experiment_name"], "Train-SPLADE")
         self.assertEqual(fake_logger.kwargs["run_name"], "run_tag")
         self.assertEqual(
             fake_logger.kwargs["tracking_uri"], "http://127.0.0.1:5000"
@@ -229,6 +231,7 @@ class TrainLoggerConfigTest(unittest.TestCase):
         self.assertEqual(system_metrics_interval_env_value, "15")
         self.assertEqual(system_metrics_samples_env_value, "1")
         self.assertEqual(len(fake_logger.experiment.artifacts), 0)
+        warn_gpu_metrics.assert_called_once()
         start_run.assert_called_once_with(
             run_id="unit-test-run-id", log_system_metrics=True
         )

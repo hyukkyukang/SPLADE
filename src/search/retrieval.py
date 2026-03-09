@@ -1,14 +1,16 @@
 """Retrieval orchestration for index-based search."""
 
+from bisect import bisect_right
 import logging
 import os
 import threading
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from omegaconf import DictConfig
 
 from src.metric.retrieval import resolve_k_list
@@ -124,6 +126,12 @@ class IndexedRetrievalHelper:
 
         self.k_list: list[int] = resolve_k_list(self.cfg.testing.k_list)
         self.k_max: int = max(self.k_list)
+        self._exclude_self_match: bool = bool(
+            self.cfg.testing.get("exclude_self_match", False)
+        )
+        self._scoring_top_k: int = self.k_max + (
+            1 if self._exclude_self_match else 0
+        )
 
         self._gpu_sparsify: bool = bool(self.cfg.testing.gpu_sparsify)
         scoring_workers_value = self.cfg.testing.scoring_workers
@@ -152,6 +160,13 @@ class IndexedRetrievalHelper:
         self._thread_local: threading.local = threading.local()
         self._executor: ThreadPoolExecutor | None = None
         self._resolved_workers: int = 1
+        max_windows_value: Any | None = self.cfg.testing.get("max_windows_per_forward")
+        self._max_windows_per_forward: int | None = (
+            None if max_windows_value is None else max(1, int(max_windows_value))
+        )
+        self._use_fixed_window_chunks: bool = bool(self.cfg.testing.torch_compile) and (
+            self._max_windows_per_forward is not None
+        )
 
     @property
     def doc_ids(self) -> list[str]:
@@ -192,28 +207,222 @@ class IndexedRetrievalHelper:
         query_input_ids: torch.Tensor,
         query_attention_mask: torch.Tensor,
         mark_step: Callable[[], None] | None,
+        query_indptr: Sequence[int] | torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if mark_step is not None:
-            mark_step()
-        return model.encode_queries(query_input_ids, query_attention_mask)
+        if query_indptr is None:
+            if mark_step is not None:
+                mark_step()
+            return model.encode_queries(query_input_ids, query_attention_mask)
+        return self._encode_and_aggregate_query_windows(
+            model=model,
+            input_ids=query_input_ids,
+            attention_mask=query_attention_mask,
+            query_indptr=query_indptr,
+            mark_step=mark_step,
+        )
 
     def score_queries(
-        self, query_reps: torch.Tensor
+        self,
+        query_reps: torch.Tensor,
+        *,
+        query_ids: Sequence[str] | None = None,
     ) -> list[tuple[list[str], list[float]]]:
         if self._index is None or self._doc_ids is None:
             raise ValueError("Index must be loaded before scoring queries.")
+        if self._exclude_self_match and query_ids is None:
+            raise ValueError(
+                "query_ids must be provided when testing.exclude_self_match=true."
+            )
+        query_ids_list: list[str] | None = (
+            None if query_ids is None else [str(query_id) for query_id in query_ids]
+        )
         q_indices_list, q_values_list = self._sparsify_queries(query_reps)
         scored = self._score_batch(q_indices_list, q_values_list)
         results: list[tuple[list[str], list[float]]] = []
-        for top_docs, top_scores in scored:
-            selected_doc_ids: list[str] = [
+        for query_idx, (top_docs, top_scores) in enumerate(scored):
+            raw_doc_ids: list[str] = [
                 self._doc_ids[int(doc_idx)] for doc_idx in top_docs.tolist()
             ]
-            selected_scores: list[float] = [
+            raw_scores: list[float] = [
                 float(score) for score in top_scores.tolist()
             ]
+            if self._exclude_self_match and query_ids_list is not None:
+                query_id: str = query_ids_list[query_idx]
+                selected_doc_ids: list[str] = []
+                selected_scores: list[float] = []
+                doc_id: str
+                score: float
+                for doc_id, score in zip(raw_doc_ids, raw_scores):
+                    if doc_id == query_id:
+                        continue
+                    selected_doc_ids.append(doc_id)
+                    selected_scores.append(score)
+                    if len(selected_doc_ids) >= self.k_max:
+                        break
+            else:
+                selected_doc_ids = raw_doc_ids[: self.k_max]
+                selected_scores = raw_scores[: self.k_max]
             results.append((selected_doc_ids, selected_scores))
         return results
+
+    @staticmethod
+    def _resolve_window_indptr_values(
+        query_indptr: Sequence[int] | torch.Tensor,
+    ) -> list[int]:
+        if isinstance(query_indptr, torch.Tensor):
+            return [int(value) for value in query_indptr.tolist()]
+        return [int(value) for value in query_indptr]
+
+    @staticmethod
+    def _resolve_chunk_query_segments(
+        start_idx: int,
+        end_idx: int,
+        query_indptr_values: Sequence[int],
+    ) -> tuple[list[int], list[int]]:
+        query_indices: list[int] = []
+        query_lengths: list[int] = []
+        num_queries: int = max(len(query_indptr_values) - 1, 0)
+        query_idx: int = max(bisect_right(query_indptr_values, start_idx) - 1, 0)
+        cursor: int = start_idx
+        while cursor < end_idx and query_idx < num_queries:
+            query_end: int = int(query_indptr_values[query_idx + 1])
+            if query_end <= cursor:
+                query_idx += 1
+                continue
+            take: int = min(query_end, end_idx) - cursor
+            if take > 0:
+                query_indices.append(query_idx)
+                query_lengths.append(take)
+                cursor += take
+            query_idx += 1
+        if cursor != end_idx:
+            raise RuntimeError(
+                "Failed to align query window chunk with query boundaries."
+            )
+        return query_indices, query_lengths
+
+    @staticmethod
+    def _resolve_pad_token_id(model: Any) -> int:
+        mlm: Any | None = getattr(getattr(model, "encoder", None), "mlm", None)
+        config: Any | None = None if mlm is None else getattr(mlm, "config", None)
+        pad_token_id: Any | None = (
+            None if config is None else getattr(config, "pad_token_id", None)
+        )
+        return 0 if pad_token_id is None else int(pad_token_id)
+
+    def _encode_and_aggregate_query_windows(
+        self,
+        *,
+        model: Any,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        query_indptr: Sequence[int] | torch.Tensor,
+        mark_step: Callable[[], None] | None,
+    ) -> torch.Tensor:
+        total_windows: int = int(input_ids.shape[0])
+        query_indptr_values: list[int] = self._resolve_window_indptr_values(query_indptr)
+        num_queries: int = max(len(query_indptr_values) - 1, 0)
+        vocab_size: int = int(model.encoder.vocab_size)
+        model_dtype: torch.dtype = next(model.parameters()).dtype
+        if num_queries == 0:
+            return torch.empty(
+                (0, vocab_size), dtype=model_dtype, device=input_ids.device
+            )
+        if total_windows == 0:
+            return torch.zeros(
+                (num_queries, vocab_size), dtype=model_dtype, device=input_ids.device
+            )
+
+        pooling_mode: str = str(model.query_pooling).lower()
+        chunk_size: int = (
+            total_windows
+            if self._max_windows_per_forward is None or self._max_windows_per_forward <= 0
+            else int(self._max_windows_per_forward)
+        )
+        pad_token_id: int = self._resolve_pad_token_id(model)
+        aggregated: torch.Tensor | None = None
+        query_lengths: list[int] = [
+            int(query_indptr_values[idx + 1]) - int(query_indptr_values[idx])
+            for idx in range(num_queries)
+        ]
+
+        start_idx: int
+        for start_idx in range(0, total_windows, chunk_size):
+            end_idx: int = min(start_idx + chunk_size, total_windows)
+            real_count: int = end_idx - start_idx
+            chunk_input_ids: torch.Tensor = input_ids[start_idx:end_idx]
+            chunk_attention_mask: torch.Tensor = attention_mask[start_idx:end_idx]
+            if self._use_fixed_window_chunks and real_count < chunk_size:
+                pad_rows: int = chunk_size - real_count
+                chunk_input_ids = F.pad(
+                    chunk_input_ids,
+                    (0, 0, 0, pad_rows),
+                    value=pad_token_id,
+                )
+                chunk_attention_mask = F.pad(
+                    chunk_attention_mask,
+                    (0, 0, 0, pad_rows),
+                    value=0,
+                )
+            if mark_step is not None:
+                mark_step()
+            chunk_representations: torch.Tensor = model.encode_queries(
+                chunk_input_ids,
+                chunk_attention_mask,
+            )[:real_count]
+            if aggregated is None:
+                if pooling_mode == "sum":
+                    aggregated = chunk_representations.new_zeros((num_queries, vocab_size))
+                elif pooling_mode == "max":
+                    aggregated = chunk_representations.new_full(
+                        (num_queries, vocab_size), float("-inf")
+                    )
+                else:
+                    raise ValueError(
+                        "Unsupported query pooling for window aggregation: "
+                        f"{pooling_mode}"
+                    )
+            chunk_query_indices, chunk_query_lengths = self._resolve_chunk_query_segments(
+                start_idx, end_idx, query_indptr_values
+            )
+            lengths_tensor = torch.tensor(
+                chunk_query_lengths,
+                device=chunk_representations.device,
+                dtype=torch.long,
+            )
+            partial_representations = torch.segment_reduce(
+                chunk_representations,
+                reduce=pooling_mode,
+                lengths=lengths_tensor,
+            )
+            query_indices_tensor = torch.tensor(
+                chunk_query_indices,
+                device=chunk_representations.device,
+                dtype=torch.long,
+            )
+            if pooling_mode == "sum":
+                aggregated.index_add_(0, query_indices_tensor, partial_representations)
+            else:
+                current = aggregated.index_select(0, query_indices_tensor)
+                aggregated.index_copy_(
+                    0,
+                    query_indices_tensor,
+                    torch.maximum(current, partial_representations),
+                )
+
+        if aggregated is None:
+            return torch.zeros(
+                (num_queries, vocab_size), dtype=model_dtype, device=input_ids.device
+            )
+        if pooling_mode == "max":
+            empty_query_indices: list[int] = [
+                query_idx
+                for query_idx, count in enumerate(query_lengths)
+                if count <= 0
+            ]
+            if empty_query_indices:
+                aggregated[empty_query_indices] = 0
+        return aggregated
 
     def _load_index(self) -> InvertedIndex:
         index_dir_value: str | None = self.cfg.encoding.index_dir
@@ -286,7 +495,7 @@ class IndexedRetrievalHelper:
                     initargs=(
                         str(self._index_path),
                         self._scoring_method,
-                        int(self.k_max),
+                        int(self._scoring_top_k),
                     ),
                 )
             else:
@@ -375,7 +584,7 @@ class IndexedRetrievalHelper:
                 q_values,
                 scores=scores,
                 seen=seen,
-                top_k=self.k_max,
+                top_k=self._scoring_top_k,
             )
         if self._scoring_method == "bmw":
             return score_query_postings_bmw(
@@ -389,7 +598,7 @@ class IndexedRetrievalHelper:
                 q_values,
                 scores=scores,
                 seen=seen,
-                top_k=self.k_max,
+                top_k=self._scoring_top_k,
                 block_size=self._block_size,
             )
         return score_query_postings(
@@ -400,7 +609,7 @@ class IndexedRetrievalHelper:
             q_values,
             scores=scores,
             seen=seen,
-            top_k=self.k_max,
+            top_k=self._scoring_top_k,
         )
 
 

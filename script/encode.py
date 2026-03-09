@@ -44,6 +44,7 @@ def main(cfg: DictConfig) -> None:
         precision=precision,
         logger=False,
         default_root_dir=cfg.log_dir,
+        use_distributed_sampler=False,
         **trainer_kwargs,
     )
     trainer.predict(model=encode_module, datamodule=data_module)

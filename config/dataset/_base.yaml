@@ -10,6 +10,8 @@ hf_split: ${.split}
 max_query_length: 128
 max_doc_length: 256
 max_padding: true
+query_long_doc_strategy: truncate
+query_sliding_window_overlap_tokens: 0
 num_negatives: 1
 num_positives: 1
 
@@ -30,6 +32,8 @@ hf_data_files: null
 query_corpus_hf_name: null
 query_corpus_hf_cache_dir: null
 query_corpus_hf_data_files: null
+query_hf_data_files: null
+corpus_hf_data_files: null
 query_lookup_hf_name: null
 query_lookup_hf_subset: null
 query_lookup_hf_split: train
@@ -61,6 +65,7 @@ corpus_split_name: ${.corpus_split}
 corpus_id_column: _id
 corpus_text_column: text
 corpus_title_column: null
+corpus_additional_text_columns: []
 
 # Optional: join scored hard negatives by query id.
 score_hf_name: null

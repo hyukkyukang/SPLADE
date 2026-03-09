@@ -5,6 +5,7 @@ from omegaconf import DictConfig
 from src.data.dataset import (
     BaseDataset,
     BEIRDataset,
+    CorpusOnlyDataset,
     MSMARCODevSmallNegativesDataset,
     MSMARCODataset,
     MSMARCODistillScoresDataset,
@@ -16,6 +17,7 @@ DatasetBuilder = Callable[[DictConfig], BaseDataset]
 
 
 _DATASET_BUILDERS: dict[str, DatasetBuilder] = {
+    "corpus_only": CorpusOnlyDataset,
     "msmarco": MSMARCODataset,
     "msmarco_local_triplets": MSMARCODataset,
     "msmarco_hard_negatives": MSMARCOHardNegativesDataset,

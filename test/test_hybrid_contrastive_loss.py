@@ -52,7 +52,9 @@ class HybridContrastiveLossTest(unittest.TestCase):
             pairwise_loss,
             in_batch_loss,
             _distill_loss,
-            _distill_losses,
+            _distill_mse_loss,
+            _distill_kl_loss,
+            _distill_margin_mse_loss,
             _q_reg,
             _d_reg,
         ) = model(

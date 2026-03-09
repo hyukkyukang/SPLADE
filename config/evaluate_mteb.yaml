@@ -21,7 +21,7 @@ nanobeir:
 
 mlflow:
   enabled: true
-  experiment_name: MTEB
+  experiment_name: Eval-MTEB
   tracking_uri: ${oc.env:MLFLOW_TRACKING_URI,null}
   run_name: ${oc.env:MLFLOW_RUN_NAME,null}
   tags: {}

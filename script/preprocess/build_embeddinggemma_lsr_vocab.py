@@ -1,5 +1,4 @@
 import argparse
-import concurrent.futures as cf
 import itertools
 import json
 import math
@@ -11,8 +10,21 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from datasets import Dataset
-from omegaconf import OmegaConf
 
+from src.prototype.embeddinggemma_lsr.artifacts import (
+    DF_MAP_FILENAME,
+    TERM_STATS_CACHE_FILENAME,
+    VOCAB_LIST_FILENAME,
+    VOCAB_MANIFEST_FILENAME,
+    VOCAB_STATS_FILENAME,
+    resolve_term_stats_cache_path,
+    write_json,
+    write_text_lines,
+)
+from src.prototype.embeddinggemma_lsr.cli import (
+    apply_config_overrides,
+    parser_default_values,
+)
 from src.prototype.embeddinggemma_lsr.data import (
     build_text_pairs,
     collect_required_ids,
@@ -22,6 +34,31 @@ from src.prototype.embeddinggemma_lsr.data import (
     lookup_texts_by_ids,
     maybe_concat_datasets,
     resolve_first_present_column,
+)
+from src.prototype.embeddinggemma_lsr.vocab_filtering import (
+    canonicalize_term_for_selection as _canonicalize_term_for_selection,
+    contraction_artifact_reason as _contraction_artifact_reason,
+    is_function_leading_phrase as _is_function_leading_phrase,
+    is_stopword_term as _is_stopword_term,
+    noise_term_reason as _noise_term_reason,
+    normalize_phrase_for_filter as _normalize_phrase_for_filter,
+    strict_post_selection_cleanup_reason as _strict_post_selection_cleanup_reason,
+    structured_artifact_reason as _structured_artifact_reason,
+)
+from src.prototype.embeddinggemma_lsr.vocab_linguistics import (
+    apply_pos_gate_to_terms as _apply_pos_gate_to_terms,
+    get_wordnet_lemmatizer as _get_wordnet_lemmatizer,
+    normalize_noun_forms_with_hybrid_agreement as _normalize_noun_forms_with_hybrid_agreement,
+    numeric_term_quality_reason as _numeric_term_quality_reason,
+)
+from src.prototype.embeddinggemma_lsr.vocab_map_reduce import (
+    cleanup_tmp_dir_if_empty,
+    run_shard_map_jobs,
+)
+from src.prototype.embeddinggemma_lsr.vocab_selection import (
+    generic_unigram_df_penalty as _generic_unigram_df_penalty,
+    phrase_cohesion_score as _phrase_cohesion_score,
+    resolve_term_source_boost as _resolve_term_source_boost,
 )
 
 
@@ -485,6 +522,126 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--filter-strict-post-selection-cleanup",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Apply a strict cleanup pass to the initial top-k terms and backfill "
+            "from lower-ranked candidates so target_size is preserved."
+        ),
+    )
+    parser.add_argument(
+        "--strict-drop-short-alpha-unigrams",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Drop short alphabetic unigrams in strict post-selection cleanup."
+        ),
+    )
+    parser.add_argument(
+        "--strict-short-alpha-unigram-max-len",
+        type=int,
+        default=2,
+        help=(
+            "Maximum alphabetic unigram length considered short by strict "
+            "post-selection cleanup."
+        ),
+    )
+    parser.add_argument(
+        "--strict-short-alpha-unigram-whitelist",
+        nargs="*",
+        default=[
+            "mg",
+            "kg",
+            "km",
+            "cm",
+            "mm",
+            "ml",
+            "oz",
+            "lb",
+            "ft",
+            "uk",
+            "eu",
+            "tv",
+            "ip",
+            "pc",
+            "ph",
+        ],
+        help=(
+            "Short alphabetic unigrams preserved during strict post-selection "
+            "cleanup."
+        ),
+    )
+    parser.add_argument(
+        "--strict-drop-about-numeric-phrases",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Drop boilerplate phrases like 'about 10 minutes' during strict "
+            "post-selection cleanup."
+        ),
+    )
+    parser.add_argument(
+        "--strict-drop-leading-numeric-function-phrases",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Drop phrases beginning with a numeric token followed by a function "
+            "word (for example, '1 the act')."
+        ),
+    )
+    parser.add_argument(
+        "--strict-drop-trailing-function-word-phrases",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Drop phrases ending in weak trailing function words (for example, "
+            "'city of') during strict post-selection cleanup."
+        ),
+    )
+    parser.add_argument(
+        "--strict-trailing-function-words",
+        nargs="*",
+        default=["of", "and", "or", "to", "for", "in", "on", "with", "from", "by"],
+        help=(
+            "Trailing function words used by strict post-selection cleanup."
+        ),
+    )
+    parser.add_argument(
+        "--strict-drop-abbreviation-heavy-phrases",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Drop multi-token phrases containing two or more single-letter alpha "
+            "tokens (for example, 'u s', 'r and d')."
+        ),
+    )
+    parser.add_argument(
+        "--strict-abbreviation-phrase-whitelist",
+        nargs="*",
+        default=[],
+        help=(
+            "Phrase whitelist exempt from strict abbreviation-heavy cleanup."
+        ),
+    )
+    parser.add_argument(
+        "--strict-drop-artifact-substrings",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Drop terms containing known artifact substrings during strict "
+            "post-selection cleanup."
+        ),
+    )
+    parser.add_argument(
+        "--strict-artifact-substrings",
+        nargs="*",
+        default=["uplog"],
+        help=(
+            "Substring blacklist used by strict post-selection cleanup."
+        ),
+    )
+    parser.add_argument(
         "--normalize-noun-forms",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -801,28 +958,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _default_values() -> dict[str, Any]:
-    parser: argparse.ArgumentParser = _build_parser()
-    defaults: dict[str, Any] = {}
-    action: argparse.Action
-    for action in parser._actions:
-        if action.dest in {None, "help"}:
-            continue
-        defaults[str(action.dest)] = action.default
-    return defaults
+    return parser_default_values(_build_parser())
 
 
 def _apply_config_overrides(args: argparse.Namespace) -> argparse.Namespace:
-    if args.config is None:
-        return args
-    cfg = OmegaConf.load(args.config)
-    payload: dict[str, Any] = OmegaConf.to_container(cfg, resolve=True)
-    defaults: dict[str, Any] = _default_values()
-    for key, value in payload.items():
-        if not hasattr(args, key):
-            continue
-        if key in defaults and getattr(args, key) == defaults[key]:
-            setattr(args, key, value)
-    return args
+    return apply_config_overrides(args, defaults=_default_values())
 
 
 def _validate_required_args(args: argparse.Namespace) -> None:
@@ -973,6 +1113,53 @@ def _validate_required_args(args: argparse.Namespace) -> None:
         raise ValueError("pos_gate_batch_size must be > 0.")
     if int(args.numeric_term_max_tokens) <= 0:
         raise ValueError("numeric_term_max_tokens must be > 0.")
+    if int(args.strict_short_alpha_unigram_max_len) <= 0:
+        raise ValueError("strict_short_alpha_unigram_max_len must be > 0.")
+    if bool(args.filter_strict_post_selection_cleanup):
+        if bool(args.strict_drop_trailing_function_word_phrases):
+            raw_trailing_words = args.strict_trailing_function_words
+            trailing_words: list[str]
+            if isinstance(raw_trailing_words, str):
+                trailing_words = [
+                    part.strip().lower()
+                    for part in re.split(r"[\s,]+", raw_trailing_words)
+                    if part.strip()
+                ]
+            elif isinstance(raw_trailing_words, Iterable):
+                trailing_words = [
+                    str(part).strip().lower()
+                    for part in raw_trailing_words
+                    if str(part).strip()
+                ]
+            else:
+                trailing_words = []
+            if not trailing_words:
+                raise ValueError(
+                    "strict_drop_trailing_function_word_phrases=true requires a "
+                    "non-empty strict_trailing_function_words list."
+                )
+        if bool(args.strict_drop_artifact_substrings):
+            raw_artifact_substrings = args.strict_artifact_substrings
+            artifact_substrings: list[str]
+            if isinstance(raw_artifact_substrings, str):
+                artifact_substrings = [
+                    part.strip().lower()
+                    for part in re.split(r"[\s,]+", raw_artifact_substrings)
+                    if part.strip()
+                ]
+            elif isinstance(raw_artifact_substrings, Iterable):
+                artifact_substrings = [
+                    str(part).strip().lower()
+                    for part in raw_artifact_substrings
+                    if str(part).strip()
+                ]
+            else:
+                artifact_substrings = []
+            if not artifact_substrings:
+                raise ValueError(
+                    "strict_drop_artifact_substrings=true requires a non-empty "
+                    "strict_artifact_substrings list."
+                )
     if bool(args.filter_pos_gate):
         raw_pos_tags = args.pos_gate_allowed_tags
         pos_tags: list[str]
@@ -1089,103 +1276,7 @@ _SOURCE_ENTITY: str = "entity"
 _SOURCE_NOUN_CHUNK: str = "noun_chunk"
 _NOUN_CHUNK_ROOT_POS: set[str] = {"NOUN", "PROPN"}
 _SIMPLE_TOKEN_PATTERN: re.Pattern[str] = re.compile(r"[A-Za-z0-9_]+")
-_PURE_NUMERIC_TERM_PATTERN: re.Pattern[str] = re.compile(
-    r"[0-9]+(?:[.,:/-][0-9]+)*"
-)
-_C1_CONTROL_PATTERN: re.Pattern[str] = re.compile(r"[\x80-\x9f]")
-_MOJIBAKE_UTF8_LATIN1_PATTERN: re.Pattern[str] = re.compile(
-    r"[\u00c2\u00c3\u00e2][\x80-\xbf]"
-)
 _CANONICAL_TOKEN_PATTERN: re.Pattern[str] = re.compile(r"[A-Za-z0-9]+")
-_URL_SCHEME_PATTERN: re.Pattern[str] = re.compile(r"\bhttps?\b", re.IGNORECASE)
-_URL_DOT_SUFFIX_PATTERN: re.Pattern[str] = re.compile(
-    r"\.(?:com|org|net|gov|edu|io|co|ai|app|info|biz|uk|de|fr|jp|cn|ru|br|it|es)\b",
-    re.IGNORECASE,
-)
-_URL_TOKEN_HINTS: frozenset[str] = frozenset(
-    {
-        "http",
-        "https",
-        "www",
-        "com",
-        "org",
-        "net",
-        "gov",
-        "edu",
-        "io",
-        "co",
-        "pdf",
-        "html",
-        "htm",
-        "php",
-        "aspx",
-        "asp",
-    }
-)
-_TEMPLATE_PHRASE_PATTERN: re.Pattern[str] = re.compile(
-    r"\b(?:web\s+site|zip\s+code|job\s+posting|fact\s+sheet|template\s+message|"
-    r"dictionary\s+definition\s+resource|video\s+clip|medication\s+guide)\b",
-    re.IGNORECASE,
-)
-_NUMERIC_DIGIT_TOKEN_PATTERN: re.Pattern[str] = re.compile(r"^[0-9]+$")
-_NUMERIC_ORDINAL_TOKEN_PATTERN: re.Pattern[str] = re.compile(
-    r"^[0-9]+(?:st|nd|rd|th)$",
-    re.IGNORECASE,
-)
-_NUMERIC_ROMAN_TOKEN_PATTERN: re.Pattern[str] = re.compile(
-    r"^[ivxlcdm]+$",
-    re.IGNORECASE,
-)
-_ALPHA_TOKEN_PATTERN: re.Pattern[str] = re.compile(r"^[a-z]+$")
-_LETTER_NUMBER_PHRASE_PATTERN: re.Pattern[str] = re.compile(r"^[a-z]\s+[0-9]{1,4}[a-z]?$")
-_NUMERIC_WORD_TOKENS: frozenset[str] = frozenset(
-    {
-        "zero",
-        "one",
-        "two",
-        "three",
-        "four",
-        "five",
-        "six",
-        "seven",
-        "eight",
-        "nine",
-        "ten",
-        "eleven",
-        "twelve",
-        "thirteen",
-        "fourteen",
-        "fifteen",
-        "sixteen",
-        "seventeen",
-        "eighteen",
-        "nineteen",
-        "twenty",
-        "thirty",
-        "forty",
-        "fifty",
-        "sixty",
-        "seventy",
-        "eighty",
-        "ninety",
-        "hundred",
-        "thousand",
-        "million",
-        "billion",
-        "trillion",
-    }
-)
-_IRREGULAR_NOUN_SINGULAR_MAP: dict[str, str] = {
-    "children": "child",
-    "men": "man",
-    "women": "woman",
-    "mice": "mouse",
-    "geese": "goose",
-    "teeth": "tooth",
-    "feet": "foot",
-    "oxen": "ox",
-    "people": "person",
-}
 _FALLBACK_EN_STOPWORDS: frozenset[str] = frozenset(
     {
         "a",
@@ -1366,9 +1457,6 @@ _FALLBACK_EN_STOPWORDS: frozenset[str] = frozenset(
     }
 )
 
-_WORDNET_LEMMATIZER_CACHE: Any | None = None
-_WORDNET_LEMMATIZER_AVAILABLE_CACHE: bool | None = None
-
 
 def _parse_entity_labels(raw_labels: Any) -> set[str] | None:
     if raw_labels is None:
@@ -1435,13 +1523,6 @@ def _parse_closed_class_words(raw_words: Any) -> set[str]:
     return {value.lower() for value in values if value.strip()}
 
 
-def _normalize_phrase_for_filter(value: str) -> str:
-    parts: list[str] = [
-        part.lower() for part in _CANONICAL_TOKEN_PATTERN.findall(str(value)) if part
-    ]
-    return " ".join(parts)
-
-
 def _parse_html_entity_blacklist(raw_words: Any) -> set[str]:
     return _parse_closed_class_words(raw_words)
 
@@ -1496,6 +1577,22 @@ def _parse_pos_gate_tags(raw_tags: Any) -> set[str]:
     return {value.upper() for value in values if value.strip()}
 
 
+def _parse_strict_short_alpha_unigram_whitelist(raw_words: Any) -> set[str]:
+    return _parse_closed_class_words(raw_words)
+
+
+def _parse_strict_trailing_function_words(raw_words: Any) -> set[str]:
+    return _parse_closed_class_words(raw_words)
+
+
+def _parse_strict_artifact_substrings(raw_words: Any) -> set[str]:
+    return _parse_closed_class_words(raw_words)
+
+
+def _parse_strict_abbreviation_phrase_whitelist(raw_values: Any) -> set[str]:
+    return _parse_letter_number_phrase_whitelist(raw_values)
+
+
 def _load_stopwords(
     *,
     stopword_list_path: str | None,
@@ -1524,279 +1621,6 @@ def _load_stopwords(
     return stopwords, "spacy.lang.en.stop_words"
 
 
-def _is_url_like_term(term: str) -> bool:
-    normalized: str = str(term).strip()
-    if not normalized:
-        return False
-    lowered: str = normalized.lower()
-    if _URL_SCHEME_PATTERN.search(lowered) is not None:
-        return True
-    if _URL_DOT_SUFFIX_PATTERN.search(lowered) is not None:
-        return True
-    if "www." in lowered:
-        return True
-    tokens: list[str] = _CANONICAL_TOKEN_PATTERN.findall(lowered)
-    if not tokens:
-        return False
-    token_set: set[str] = set(tokens)
-    if "www" in token_set or "http" in token_set or "https" in token_set:
-        return True
-    if any(token in _URL_TOKEN_HINTS for token in tokens):
-        if "." in lowered or "/" in lowered:
-            return True
-        if len(tokens) <= 2:
-            return True
-    return False
-
-
-def _is_template_like_term(term: str) -> bool:
-    return _TEMPLATE_PHRASE_PATTERN.search(str(term).strip()) is not None
-
-
-def _is_stopword_term(
-    *,
-    term: str,
-    stopwords: set[str],
-    filter_phrases: bool,
-) -> bool:
-    normalized: str = str(term).strip().lower()
-    if not normalized:
-        return False
-    parts: list[str] = [part for part in normalized.split() if part]
-    if not parts:
-        return False
-    if len(parts) == 1:
-        return parts[0] in stopwords
-    if not bool(filter_phrases):
-        return False
-    return all(part in stopwords for part in parts)
-
-
-def _noise_term_reason(
-    *,
-    term: str,
-    max_digit_ratio: float,
-    max_symbol_ratio: float,
-    drop_single_char: bool,
-    drop_pure_numeric: bool,
-    drop_mojibake: bool,
-    drop_url_like: bool,
-    drop_template_like: bool,
-) -> str | None:
-    normalized: str = str(term).strip()
-    if not normalized:
-        return "empty"
-
-    compact: str = "".join(normalized.split())
-    if not compact:
-        return "empty"
-
-    if bool(drop_mojibake):
-        if "\ufffd" in normalized:
-            return "mojibake_replacement_char"
-        if _C1_CONTROL_PATTERN.search(normalized) is not None:
-            return "mojibake_c1_control"
-        if _MOJIBAKE_UTF8_LATIN1_PATTERN.search(normalized) is not None:
-            return "mojibake_utf8_latin1"
-    if bool(drop_url_like) and _is_url_like_term(normalized):
-        return "url_like"
-    if bool(drop_template_like) and _is_template_like_term(normalized):
-        return "template_like"
-
-    if bool(drop_single_char) and len(compact) == 1:
-        if compact.isalpha():
-            return "single_char_alpha"
-        if not compact.isalnum():
-            return "single_char_non_alnum"
-
-    if bool(drop_pure_numeric) and _PURE_NUMERIC_TERM_PATTERN.fullmatch(compact):
-        return "pure_numeric"
-
-    digit_count: int = sum(1 for char in compact if char.isdigit())
-    symbol_count: int = sum(1 for char in compact if not char.isalnum())
-    compact_len: int = len(compact)
-    if compact_len <= 0:
-        return "empty"
-
-    if digit_count > 0:
-        digit_ratio: float = float(digit_count) / float(compact_len)
-        if digit_ratio > float(max_digit_ratio):
-            return "digit_heavy"
-
-    if symbol_count > 0:
-        alnum_count: int = compact_len - symbol_count
-        if alnum_count <= 0:
-            return "symbol_only"
-        symbol_ratio: float = float(symbol_count) / float(compact_len)
-        if symbol_ratio > float(max_symbol_ratio):
-            return "symbol_heavy"
-
-    return None
-
-
-def _canonicalize_term_for_selection(
-    *,
-    term: str,
-    strip_leading_determiners: bool,
-    leading_determiners: set[str],
-) -> str | None:
-    text: str = str(term).strip()
-    if not text:
-        return None
-    text = (
-        text.replace("&", " and ")
-        .replace("’", "'")
-        .replace("`", "'")
-        .replace("/", " ")
-        .replace("\\", " ")
-        .replace("_", " ")
-        .replace("-", " ")
-    )
-    pieces: list[str] = [
-        part.lower() for part in _CANONICAL_TOKEN_PATTERN.findall(text) if part
-    ]
-    if not pieces:
-        return None
-    if bool(strip_leading_determiners):
-        while pieces and pieces[0] in leading_determiners:
-            pieces = pieces[1:]
-    if not pieces:
-        return None
-    return " ".join(pieces)
-
-
-def _is_function_leading_phrase(
-    *,
-    term: str,
-    sources: set[str],
-    function_leading_words: set[str],
-    require_noun_chunk_source: bool,
-    keep_entity_backed: bool,
-) -> bool:
-    normalized: str = str(term).strip().lower()
-    if not normalized:
-        return False
-    parts: list[str] = [part for part in normalized.split() if part]
-    if len(parts) < 2:
-        return False
-    if bool(require_noun_chunk_source) and _SOURCE_NOUN_CHUNK not in sources:
-        return False
-    if bool(keep_entity_backed) and _SOURCE_ENTITY in sources:
-        return False
-    return parts[0] in function_leading_words
-
-
-def _structured_artifact_reason(
-    *,
-    term: str,
-    filter_html_entity_artifacts: bool,
-    html_entity_blacklist: set[str],
-    filter_pronoun_led_phrases: bool,
-    pronoun_leading_words: set[str],
-    filter_letter_number_phrases: bool,
-    letter_number_phrase_whitelist: set[str],
-) -> str | None:
-    normalized: str = _normalize_phrase_for_filter(term)
-    if not normalized:
-        return None
-    parts: list[str] = [part for part in normalized.split() if part]
-    if not parts:
-        return None
-
-    if (
-        bool(filter_html_entity_artifacts)
-        and len(parts) == 1
-        and normalized in html_entity_blacklist
-    ):
-        return "html_entity_token"
-    if (
-        bool(filter_html_entity_artifacts)
-        and re.search(r"\bit\s+39\s+s\b", normalized) is not None
-    ):
-        return "numeric_apostrophe_artifact"
-    if (
-        bool(filter_html_entity_artifacts)
-        and len(parts) >= 3
-        and "0 00" in normalized
-        and any(part.isalpha() for part in parts)
-    ):
-        return "metadata_score_suffix"
-
-    if (
-        bool(filter_pronoun_led_phrases)
-        and len(parts) >= 2
-        and parts[0] in pronoun_leading_words
-    ):
-        return "pronoun_led_phrase"
-
-    if (
-        bool(filter_letter_number_phrases)
-        and len(parts) == 2
-        and _LETTER_NUMBER_PHRASE_PATTERN.fullmatch(normalized) is not None
-        and normalized not in letter_number_phrase_whitelist
-    ):
-        return "letter_number_phrase"
-    return None
-
-
-def _contraction_artifact_reason(*, term: str) -> str | None:
-    normalized: str = str(term).strip().lower()
-    if not normalized:
-        return None
-    parts: list[str] = [part for part in normalized.split() if part]
-    if len(parts) != 2:
-        return None
-    first: str = parts[0]
-    second: str = parts[1]
-    if not first.isalpha() or not second.isalpha():
-        return None
-
-    pronoun_heads: set[str] = {
-        "i",
-        "you",
-        "we",
-        "they",
-        "he",
-        "she",
-        "it",
-        "there",
-        "here",
-        "what",
-        "who",
-        "that",
-        "let",
-    }
-    if second in {"s", "re", "ve", "ll", "d", "m"}:
-        if first in pronoun_heads:
-            return "split_contraction"
-        if second == "s" and len(first) >= 2:
-            return "split_possessive"
-        return None
-
-    if second == "t":
-        negation_heads: set[str] = {
-            "can",
-            "don",
-            "doesn",
-            "didn",
-            "isn",
-            "aren",
-            "wasn",
-            "weren",
-            "won",
-            "wouldn",
-            "couldn",
-            "shouldn",
-            "mustn",
-            "hasn",
-            "hadn",
-            "haven",
-        }
-        if first in negation_heads:
-            return "split_negation"
-    return None
-
-
 def _is_closed_class_blacklisted_term(
     *,
     term: str,
@@ -1806,519 +1630,6 @@ def _is_closed_class_blacklisted_term(
     if not normalized:
         return False
     return normalized in closed_class_words
-
-
-def _infer_phrase_head_universal_pos(tags: list[tuple[str, str]]) -> str:
-    if not tags:
-        return "X"
-    for target in ("NOUN", "VERB", "ADJ", "ADV", "NUM"):
-        for _token, pos in reversed(tags):
-            if pos == target:
-                return pos
-    for _token, pos in reversed(tags):
-        if pos != ".":
-            return pos
-    return tags[-1][1]
-
-
-def _tag_terms_universal_pos(
-    *,
-    terms: list[str],
-    batch_size: int,
-) -> dict[str, str]:
-    if not terms:
-        return {}
-    try:
-        import nltk
-    except Exception as exc:
-        raise RuntimeError(
-            "POS gate requires NLTK. Install it with `python -m pip install nltk`."
-        ) from exc
-
-    unigrams: list[str] = []
-    phrases: list[str] = []
-    term: str
-    for term in terms:
-        pieces: list[str] = [part for part in str(term).split() if part]
-        if len(pieces) <= 1:
-            unigrams.append(str(term))
-        else:
-            phrases.append(str(term))
-
-    pos_by_term: dict[str, str] = {}
-    if unigrams:
-        start: int
-        for start in range(0, len(unigrams), int(batch_size)):
-            unigram_batch: list[str] = unigrams[start : start + int(batch_size)]
-            unigram_sequences: list[list[str]] = [[token] for token in unigram_batch]
-            try:
-                tagged_unigrams = nltk.pos_tag_sents(
-                    unigram_sequences,
-                    tagset="universal",
-                )
-            except LookupError as exc:
-                raise RuntimeError(
-                    "NLTK POS resources are missing. Run:\n"
-                    "python - <<'PY'\n"
-                    "import nltk\n"
-                    "nltk.download('averaged_perceptron_tagger', quiet=True)\n"
-                    "nltk.download('averaged_perceptron_tagger_eng', quiet=True)\n"
-                    "nltk.download('universal_tagset', quiet=True)\n"
-                    "PY"
-                ) from exc
-            sequence: list[tuple[str, str]]
-            token: str
-            for token, sequence in zip(unigram_batch, tagged_unigrams):
-                if not sequence:
-                    pos_by_term[token] = "X"
-                else:
-                    pos_by_term[token] = str(sequence[0][1]).upper()
-
-    if phrases:
-        start = 0
-        for start in range(0, len(phrases), int(batch_size)):
-            phrase_batch: list[str] = phrases[start : start + int(batch_size)]
-            phrase_sequences: list[list[str]] = [
-                [part for part in phrase.split() if part] for phrase in phrase_batch
-            ]
-            try:
-                tagged_phrases = nltk.pos_tag_sents(
-                    phrase_sequences,
-                    tagset="universal",
-                )
-            except LookupError as exc:
-                raise RuntimeError(
-                    "NLTK POS resources are missing. Run:\n"
-                    "python - <<'PY'\n"
-                    "import nltk\n"
-                    "nltk.download('averaged_perceptron_tagger', quiet=True)\n"
-                    "nltk.download('averaged_perceptron_tagger_eng', quiet=True)\n"
-                    "nltk.download('universal_tagset', quiet=True)\n"
-                    "PY"
-                ) from exc
-            phrase: str
-            phrase_tags: list[tuple[str, str]]
-            for phrase, phrase_tags in zip(phrase_batch, tagged_phrases):
-                pos_by_term[phrase] = _infer_phrase_head_universal_pos(
-                    [(str(tok), str(pos).upper()) for tok, pos in phrase_tags]
-                )
-
-    return pos_by_term
-
-
-def _apply_pos_gate_to_terms(
-    *,
-    terms: list[str],
-    allowed_tags: set[str],
-    batch_size: int,
-) -> tuple[list[str], Counter[str], Counter[str], dict[str, str]]:
-    if not terms:
-        return [], Counter(), Counter(), {}
-    pos_by_term: dict[str, str] = _tag_terms_universal_pos(
-        terms=terms,
-        batch_size=int(batch_size),
-    )
-    kept_terms: list[str] = []
-    kept_pos_counts: Counter[str] = Counter()
-    filtered_pos_counts: Counter[str] = Counter()
-    term: str
-    for term in terms:
-        pos_tag: str = str(pos_by_term.get(term, "X")).upper()
-        if pos_tag in allowed_tags:
-            kept_terms.append(term)
-            kept_pos_counts[pos_tag] += 1
-        else:
-            filtered_pos_counts[pos_tag] += 1
-    return kept_terms, kept_pos_counts, filtered_pos_counts, pos_by_term
-
-
-def _is_clean_numeric_token(token: str) -> bool:
-    normalized: str = str(token).strip().lower()
-    if not normalized:
-        return False
-    if normalized in _NUMERIC_WORD_TOKENS:
-        return True
-    if _NUMERIC_DIGIT_TOKEN_PATTERN.fullmatch(normalized) is not None:
-        return True
-    if _NUMERIC_ORDINAL_TOKEN_PATTERN.fullmatch(normalized) is not None:
-        return True
-    if (
-        _NUMERIC_ROMAN_TOKEN_PATTERN.fullmatch(normalized) is not None
-        and len(normalized) <= 6
-    ):
-        return True
-    return False
-
-
-def _numeric_term_quality_reason(
-    *,
-    term: str,
-    max_tokens: int,
-) -> str | None:
-    parts: list[str] = [part for part in str(term).split() if part]
-    if not parts:
-        return "empty"
-    if len(parts) > int(max_tokens):
-        return "too_many_tokens"
-    if all(_is_clean_numeric_token(part) for part in parts):
-        return None
-    if any(char.isdigit() for char in str(term)):
-        return "mixed_alphanumeric"
-    return "noncanonical_numeric_phrase"
-
-
-def _is_plausible_plural_surface_form(token: str) -> bool:
-    value: str = str(token).strip().lower()
-    if not value:
-        return False
-    if value in _IRREGULAR_NOUN_SINGULAR_MAP:
-        return True
-    if _ALPHA_TOKEN_PATTERN.fullmatch(value) is None:
-        return False
-    if len(value) <= 3:
-        return False
-    if value.endswith(("ss", "us", "is")):
-        return False
-    return value.endswith("s")
-
-
-def _get_wordnet_lemmatizer() -> Any | None:
-    global _WORDNET_LEMMATIZER_CACHE, _WORDNET_LEMMATIZER_AVAILABLE_CACHE
-    if _WORDNET_LEMMATIZER_AVAILABLE_CACHE is False:
-        return None
-    if _WORDNET_LEMMATIZER_CACHE is not None:
-        return _WORDNET_LEMMATIZER_CACHE
-    try:
-        import nltk
-        from nltk.stem import WordNetLemmatizer
-
-        try:
-            nltk.data.find("corpora/wordnet")
-        except LookupError:
-            nltk.data.find("corpora/wordnet.zip")
-        _WORDNET_LEMMATIZER_CACHE = WordNetLemmatizer()
-        _WORDNET_LEMMATIZER_AVAILABLE_CACHE = True
-        return _WORDNET_LEMMATIZER_CACHE
-    except Exception:
-        _WORDNET_LEMMATIZER_AVAILABLE_CACHE = False
-        _WORDNET_LEMMATIZER_CACHE = None
-        return None
-
-
-def _rule_based_noun_singular(token: str) -> str:
-    value: str = str(token).strip().lower()
-    if not value:
-        return value
-    irregular: str | None = _IRREGULAR_NOUN_SINGULAR_MAP.get(value)
-    if irregular is not None:
-        return irregular
-    if len(value) <= 3:
-        return value
-    if value.endswith("ies") and len(value) > 4:
-        return value[:-3] + "y"
-    if re.search(r"(xes|zes|ches|shes|sses)$", value) is not None and len(value) > 4:
-        return value[:-2]
-    if value.endswith("s") and not value.endswith(("ss", "us", "is")) and len(value) > 3:
-        return value[:-1]
-    return value
-
-
-def _wordnet_noun_singular(token: str) -> str | None:
-    lemmatizer: Any | None = _get_wordnet_lemmatizer()
-    if lemmatizer is None:
-        return None
-    try:
-        value: str = str(lemmatizer.lemmatize(str(token), "n")).strip().lower()
-    except Exception:
-        return None
-    return value if value else None
-
-
-def _hybrid_singularize_noun_token(
-    *,
-    token: str,
-    exception_words: set[str],
-) -> tuple[str, str]:
-    normalized: str = str(token).strip().lower()
-    if not normalized:
-        return normalized, "empty"
-    if normalized in exception_words:
-        return normalized, "exception"
-    if _ALPHA_TOKEN_PATTERN.fullmatch(normalized) is None:
-        return normalized, "non_alpha"
-    rule_value: str = _rule_based_noun_singular(normalized)
-    wordnet_value: str | None = _wordnet_noun_singular(normalized)
-    if wordnet_value is None:
-        return normalized, "wordnet_unavailable"
-    if not rule_value or not wordnet_value:
-        return normalized, "invalid_candidate"
-    if rule_value != wordnet_value:
-        return normalized, "method_disagreement"
-    if rule_value == normalized:
-        return normalized, "already_canonical"
-    if len(rule_value) < 2:
-        return normalized, "too_short"
-    return rule_value, "normalized"
-
-
-def _normalize_noun_forms_with_hybrid_agreement(
-    *,
-    terms: list[str],
-    term_sources: dict[str, set[str]],
-    pos_batch_size: int,
-    skip_entity_backed: bool,
-    include_phrases: bool,
-    exception_words: set[str],
-) -> tuple[dict[str, str], dict[str, Any]]:
-    if not terms:
-        return {}, {
-            "enabled": True,
-            "total_terms": 0,
-            "normalized_terms": 0,
-            "normalized_unigrams": 0,
-            "normalized_phrases": 0,
-            "skip_entity_backed": bool(skip_entity_backed),
-            "include_phrases": bool(include_phrases),
-            "exception_count": int(len(exception_words)),
-            "wordnet_available": bool(_get_wordnet_lemmatizer() is not None),
-            "reason_counts": {},
-        }
-    try:
-        import nltk
-    except Exception as exc:
-        raise RuntimeError(
-            "Noun-form normalization requires NLTK. Install it with "
-            "`python -m pip install nltk`."
-        ) from exc
-
-    reason_counts: Counter[str] = Counter()
-    normalized_map: dict[str, str] = {}
-    unigram_candidates: list[str] = []
-    phrase_candidates: list[str] = []
-    term: str
-    for term in terms:
-        sources_for_term: set[str] = set(term_sources.get(term, {_SOURCE_TOKEN}))
-        has_non_entity_support: bool = bool(
-            {_SOURCE_TOKEN, _SOURCE_NOUN_CHUNK}.intersection(sources_for_term)
-        )
-        if (
-            bool(skip_entity_backed)
-            and _SOURCE_ENTITY in sources_for_term
-            and not has_non_entity_support
-        ):
-            reason_counts["skip_entity_backed"] += 1
-            continue
-        pieces: list[str] = [piece for piece in str(term).split() if piece]
-        if not pieces:
-            reason_counts["empty"] += 1
-            continue
-        if len(pieces) == 1:
-            if _is_plausible_plural_surface_form(pieces[0]):
-                unigram_candidates.append(term)
-            else:
-                reason_counts["surface_not_plural"] += 1
-        else:
-            if not bool(include_phrases):
-                reason_counts["phrase_disabled"] += 1
-                continue
-            if _is_plausible_plural_surface_form(pieces[-1]) or any(
-                piece.lower() in _IRREGULAR_NOUN_SINGULAR_MAP for piece in pieces
-            ):
-                phrase_candidates.append(term)
-            else:
-                reason_counts["phrase_surface_not_plural"] += 1
-
-    if unigram_candidates:
-        start: int
-        for start in range(0, len(unigram_candidates), int(pos_batch_size)):
-            unigram_batch: list[str] = unigram_candidates[
-                start : start + int(pos_batch_size)
-            ]
-            sequences: list[list[str]] = [[value] for value in unigram_batch]
-            try:
-                tagged_batch = nltk.pos_tag_sents(sequences, tagset="universal")
-            except LookupError as exc:
-                raise RuntimeError(
-                    "NLTK POS resources are missing. Run:\n"
-                    "python - <<'PY'\n"
-                    "import nltk\n"
-                    "nltk.download('averaged_perceptron_tagger', quiet=True)\n"
-                    "nltk.download('averaged_perceptron_tagger_eng', quiet=True)\n"
-                    "nltk.download('universal_tagset', quiet=True)\n"
-                    "nltk.download('wordnet', quiet=True)\n"
-                    "nltk.download('omw-1.4', quiet=True)\n"
-                    "PY"
-                ) from exc
-            tagged: list[tuple[str, str]]
-            unigram_term: str
-            for unigram_term, tagged in zip(unigram_batch, tagged_batch):
-                if not tagged:
-                    reason_counts["pos_missing"] += 1
-                    continue
-                if str(tagged[0][1]).upper() != "NOUN":
-                    reason_counts["non_noun_unigram"] += 1
-                    continue
-                if not _is_plausible_plural_surface_form(str(tagged[0][0])):
-                    reason_counts["unigram_not_plural_surface"] += 1
-                    continue
-                normalized_token, reason = _hybrid_singularize_noun_token(
-                    token=str(tagged[0][0]),
-                    exception_words=exception_words,
-                )
-                reason_counts[reason] += 1
-                if reason == "normalized":
-                    normalized_map[unigram_term] = normalized_token
-
-    if phrase_candidates:
-        start = 0
-        for start in range(0, len(phrase_candidates), int(pos_batch_size)):
-            phrase_batch: list[str] = phrase_candidates[
-                start : start + int(pos_batch_size)
-            ]
-            sequences = [[piece for piece in value.split() if piece] for value in phrase_batch]
-            try:
-                tagged_batch = nltk.pos_tag_sents(sequences, tagset="universal")
-            except LookupError as exc:
-                raise RuntimeError(
-                    "NLTK POS resources are missing. Run:\n"
-                    "python - <<'PY'\n"
-                    "import nltk\n"
-                    "nltk.download('averaged_perceptron_tagger', quiet=True)\n"
-                    "nltk.download('averaged_perceptron_tagger_eng', quiet=True)\n"
-                    "nltk.download('universal_tagset', quiet=True)\n"
-                    "nltk.download('wordnet', quiet=True)\n"
-                    "nltk.download('omw-1.4', quiet=True)\n"
-                    "PY"
-                ) from exc
-            phrase_term: str
-            tagged: list[tuple[str, str]]
-            for phrase_term, tagged in zip(phrase_batch, tagged_batch):
-                if not tagged:
-                    reason_counts["pos_missing"] += 1
-                    continue
-                phrase_tags: list[tuple[str, str]] = [
-                    (str(tok), str(pos).upper()) for tok, pos in tagged
-                ]
-                head_index: int | None = None
-                index: int
-                token_value: str
-                pos_value: str
-                for index in range(len(phrase_tags) - 1, -1, -1):
-                    token_value, pos_value = phrase_tags[index]
-                    if pos_value == "NOUN":
-                        head_index = index
-                        break
-                if head_index is None:
-                    reason_counts["non_noun_phrase"] += 1
-                    continue
-                head_token: str = str(phrase_tags[head_index][0]).lower()
-                if not _is_plausible_plural_surface_form(head_token):
-                    reason_counts["phrase_head_not_plural_surface"] += 1
-                    continue
-                normalized_head, reason = _hybrid_singularize_noun_token(
-                    token=head_token,
-                    exception_words=exception_words,
-                )
-                reason_counts[f"phrase_{reason}"] += 1
-                if reason != "normalized":
-                    continue
-                phrase_parts: list[str] = [piece for piece in phrase_term.split() if piece]
-                if head_index >= len(phrase_parts):
-                    reason_counts["phrase_head_index_mismatch"] += 1
-                    continue
-                phrase_parts[head_index] = normalized_head
-                normalized_map[phrase_term] = " ".join(phrase_parts)
-
-    normalized_unigrams: int = sum(
-        1 for key in normalized_map.keys() if len(str(key).split()) == 1
-    )
-    normalized_phrases: int = int(len(normalized_map) - normalized_unigrams)
-    stats: dict[str, Any] = {
-        "enabled": True,
-        "total_terms": int(len(terms)),
-        "normalized_terms": int(len(normalized_map)),
-        "normalized_unigrams": int(normalized_unigrams),
-        "normalized_phrases": int(normalized_phrases),
-        "skip_entity_backed": bool(skip_entity_backed),
-        "include_phrases": bool(include_phrases),
-        "exception_count": int(len(exception_words)),
-        "wordnet_available": bool(_get_wordnet_lemmatizer() is not None),
-        "reason_counts": {
-            key: int(value) for key, value in sorted(reason_counts.items())
-        },
-    }
-    return normalized_map, stats
-
-
-def _generic_unigram_df_penalty(
-    *,
-    term: str,
-    term_df: int,
-    doc_count: int,
-    start_ratio: float,
-    end_ratio: float,
-    min_multiplier: float,
-    penalty_power: float,
-) -> float:
-    if int(doc_count) <= 0:
-        return 1.0
-    parts: list[str] = [part for part in str(term).split() if part]
-    if len(parts) != 1:
-        return 1.0
-    ratio: float = float(term_df) / float(doc_count)
-    if ratio <= float(start_ratio):
-        return 1.0
-    if float(end_ratio) <= float(start_ratio):
-        return float(min_multiplier)
-    scaled: float = (ratio - float(start_ratio)) / (float(end_ratio) - float(start_ratio))
-    if scaled < 0.0:
-        scaled = 0.0
-    elif scaled > 1.0:
-        scaled = 1.0
-    retained: float = (1.0 - scaled) ** float(penalty_power)
-    multiplier: float = float(min_multiplier) + (1.0 - float(min_multiplier)) * retained
-    if multiplier < float(min_multiplier):
-        multiplier = float(min_multiplier)
-    if multiplier > 1.0:
-        multiplier = 1.0
-    return multiplier
-
-
-def _phrase_cohesion_score(
-    *,
-    term: str,
-    df_counter: Counter[str],
-    doc_count: int,
-    method: str,
-) -> float | None:
-    if int(doc_count) <= 0:
-        return None
-    parts: list[str] = [part for part in str(term).split() if part]
-    if len(parts) < 2:
-        return None
-
-    phrase_df: int = int(df_counter.get(term, 0))
-    if phrase_df <= 0:
-        return None
-
-    p_phrase: float = max(float(phrase_df) / float(doc_count), 1.0 / float(doc_count))
-    log_p_phrase: float = math.log(p_phrase)
-    sum_log_parts: float = 0.0
-    part: str
-    for part in parts:
-        part_df: int = int(df_counter.get(part, 0))
-        if part_df <= 0:
-            part_df = 1
-        p_part: float = max(float(part_df) / float(doc_count), 1.0 / float(doc_count))
-        sum_log_parts += math.log(p_part)
-
-    pmi: float = log_p_phrase - sum_log_parts
-    if str(method).lower() == "pmi":
-        return pmi
-    denom: float = -log_p_phrase
-    if denom <= 0.0:
-        return None
-    return pmi / denom
 
 
 def _normalize_leading_determiners(
@@ -2888,26 +2199,6 @@ def _iter_document_tokens(
         },
     }
     return docs_tokens, docs_term_sources, stats
-
-
-def _resolve_term_source_boost(
-    *,
-    term: str,
-    source_df_counter: dict[str, Counter[str]],
-    source_boosts: dict[str, float],
-) -> float:
-    weighted_boost: float = 0.0
-    contribution_total: int = 0
-    source: str
-    for source, boost in source_boosts.items():
-        source_df: int = int(source_df_counter.get(source, Counter()).get(term, 0))
-        if source_df <= 0:
-            continue
-        weighted_boost += float(source_df) * float(boost)
-        contribution_total += int(source_df)
-    if contribution_total <= 0:
-        return float(source_boosts.get(_SOURCE_TOKEN, 1.0))
-    return weighted_boost / float(contribution_total)
 
 
 def _update_term_statistics(
@@ -3509,26 +2800,11 @@ def _collect_term_statistics_map_reduce(
         f"[map-reduce] Starting shard map phase: shards={shard_count}, "
         f"workers={worker_count}, tmp_dir={temp_dir}"
     )
-    shard_results: list[dict[str, Any]] = []
-    with cf.ProcessPoolExecutor(max_workers=worker_count) as executor:
-        future_by_shard: dict[cf.Future[dict[str, Any]], int] = {}
-        for payload in payloads:
-            future: cf.Future[dict[str, Any]] = executor.submit(
-                _run_map_reduce_shard, payload
-            )
-            future_by_shard[future] = int(payload["shard_index"])
-        completed: int = 0
-        total: int = len(payloads)
-        future: cf.Future[dict[str, Any]]
-        for future in cf.as_completed(future_by_shard):
-            shard_index = future_by_shard[future]
-            result: dict[str, Any] = future.result()
-            shard_results.append(result)
-            completed += 1
-            print(
-                f"[map-reduce] Completed shard {shard_index} "
-                f"({completed}/{total}) docs_with_tokens={result['docs_with_tokens']}"
-            )
+    shard_results: list[dict[str, Any]] = run_shard_map_jobs(
+        payloads=payloads,
+        worker_count=worker_count,
+        run_shard_fn=_run_map_reduce_shard,
+    )
 
     print("[map-reduce] Starting reduce phase.")
     df_counter: Counter[str] = Counter()
@@ -3591,10 +2867,7 @@ def _collect_term_statistics_map_reduce(
             artifact_path.unlink(missing_ok=True)
 
     if bool(args.map_reduce_cleanup):
-        try:
-            temp_dir.rmdir()
-        except OSError:
-            pass
+        cleanup_tmp_dir_if_empty(temp_dir)
 
     stats: dict[str, Any] = {
         "docs_with_tokens": int(docs_with_tokens),
@@ -3722,6 +2995,18 @@ def _select_vocab_from_statistics(
     entity_quality_min_source_df: int,
     entity_quality_min_source_ratio: float,
     entity_quality_min_df_entity_only: int,
+    filter_strict_post_selection_cleanup: bool,
+    strict_drop_short_alpha_unigrams: bool,
+    strict_short_alpha_unigram_max_len: int,
+    strict_short_alpha_unigram_whitelist: set[str],
+    strict_drop_about_numeric_phrases: bool,
+    strict_drop_leading_numeric_function_phrases: bool,
+    strict_drop_trailing_function_word_phrases: bool,
+    strict_trailing_function_words: set[str],
+    strict_drop_abbreviation_heavy_phrases: bool,
+    strict_abbreviation_phrase_whitelist: set[str],
+    strict_drop_artifact_substrings: bool,
+    strict_artifact_substrings: set[str],
     source_boosts: dict[str, float],
 ) -> tuple[list[str], dict[str, int], list[dict[str, Any]], dict[str, Any]]:
     if doc_count <= 0:
@@ -4209,7 +3494,77 @@ def _select_vocab_from_statistics(
         key=lambda token: (-utility_by_term[token], token),
     )
 
-    selected_terms: list[str] = ranked_terms[: int(target_size)]
+    initial_selected_terms: list[str] = ranked_terms[: int(target_size)]
+    selected_terms: list[str] = list(initial_selected_terms)
+    strict_post_selection_filtered_terms: int = 0
+    strict_post_selection_reason_counts: Counter[str] = Counter()
+    strict_post_selection_backfilled_terms: int = 0
+    strict_post_selection_tail_terms_scanned: int = 0
+    if bool(filter_strict_post_selection_cleanup):
+        strict_cleaned_terms: list[str] = []
+        term: str
+        for term in initial_selected_terms:
+            strict_reason: str | None = _strict_post_selection_cleanup_reason(
+                term=term,
+                drop_short_alpha_unigrams=bool(strict_drop_short_alpha_unigrams),
+                short_alpha_unigram_max_len=int(strict_short_alpha_unigram_max_len),
+                short_alpha_unigram_whitelist=strict_short_alpha_unigram_whitelist,
+                drop_about_numeric_phrases=bool(strict_drop_about_numeric_phrases),
+                drop_leading_numeric_function_phrases=bool(
+                    strict_drop_leading_numeric_function_phrases
+                ),
+                drop_trailing_function_word_phrases=bool(
+                    strict_drop_trailing_function_word_phrases
+                ),
+                trailing_function_words=strict_trailing_function_words,
+                drop_abbreviation_heavy_phrases=bool(
+                    strict_drop_abbreviation_heavy_phrases
+                ),
+                abbreviation_phrase_whitelist=strict_abbreviation_phrase_whitelist,
+                drop_artifact_substrings=bool(strict_drop_artifact_substrings),
+                artifact_substrings=strict_artifact_substrings,
+            )
+            if strict_reason is not None:
+                strict_post_selection_filtered_terms += 1
+                strict_post_selection_reason_counts[strict_reason] += 1
+                continue
+            strict_cleaned_terms.append(term)
+
+        selected_terms = strict_cleaned_terms
+        if len(selected_terms) < int(target_size):
+            seen_terms: set[str] = set(selected_terms)
+            for term in ranked_terms[int(target_size) :]:
+                strict_post_selection_tail_terms_scanned += 1
+                if term in seen_terms:
+                    continue
+                strict_reason = _strict_post_selection_cleanup_reason(
+                    term=term,
+                    drop_short_alpha_unigrams=bool(strict_drop_short_alpha_unigrams),
+                    short_alpha_unigram_max_len=int(strict_short_alpha_unigram_max_len),
+                    short_alpha_unigram_whitelist=strict_short_alpha_unigram_whitelist,
+                    drop_about_numeric_phrases=bool(strict_drop_about_numeric_phrases),
+                    drop_leading_numeric_function_phrases=bool(
+                        strict_drop_leading_numeric_function_phrases
+                    ),
+                    drop_trailing_function_word_phrases=bool(
+                        strict_drop_trailing_function_word_phrases
+                    ),
+                    trailing_function_words=strict_trailing_function_words,
+                    drop_abbreviation_heavy_phrases=bool(
+                        strict_drop_abbreviation_heavy_phrases
+                    ),
+                    abbreviation_phrase_whitelist=strict_abbreviation_phrase_whitelist,
+                    drop_artifact_substrings=bool(strict_drop_artifact_substrings),
+                    artifact_substrings=strict_artifact_substrings,
+                )
+                if strict_reason is not None:
+                    continue
+                selected_terms.append(term)
+                seen_terms.add(term)
+                strict_post_selection_backfilled_terms += 1
+                if len(selected_terms) >= int(target_size):
+                    break
+
     selected_df_map: dict[str, int] = {
         term: int(selection_df_counter[term]) for term in selected_terms
     }
@@ -4312,6 +3667,13 @@ def _select_vocab_from_statistics(
         ),
         "candidate_terms": len(candidate_terms),
         "target_size": int(target_size),
+        "initial_selected_terms": int(len(initial_selected_terms)),
+        "strict_post_selection_filtered_terms": int(
+            strict_post_selection_filtered_terms
+        ),
+        "strict_post_selection_backfilled_terms": int(
+            strict_post_selection_backfilled_terms
+        ),
         "selected_terms": len(selected_terms),
         "max_df_threshold": max_df_threshold,
         "min_df": int(min_df),
@@ -4462,6 +3824,57 @@ def _select_vocab_from_statistics(
                 for key, value in sorted(numeric_quality_reason_counts.items())
             },
         },
+        "strict_post_selection_cleanup": {
+            "enabled": bool(filter_strict_post_selection_cleanup),
+            "drop_short_alpha_unigrams": bool(strict_drop_short_alpha_unigrams),
+            "short_alpha_unigram_max_len": int(strict_short_alpha_unigram_max_len),
+            "short_alpha_unigram_whitelist": (
+                sorted(strict_short_alpha_unigram_whitelist)
+                if bool(filter_strict_post_selection_cleanup)
+                and bool(strict_drop_short_alpha_unigrams)
+                else []
+            ),
+            "drop_about_numeric_phrases": bool(strict_drop_about_numeric_phrases),
+            "drop_leading_numeric_function_phrases": bool(
+                strict_drop_leading_numeric_function_phrases
+            ),
+            "drop_trailing_function_word_phrases": bool(
+                strict_drop_trailing_function_word_phrases
+            ),
+            "trailing_function_words": (
+                sorted(strict_trailing_function_words)
+                if bool(filter_strict_post_selection_cleanup)
+                and bool(strict_drop_trailing_function_word_phrases)
+                else []
+            ),
+            "drop_abbreviation_heavy_phrases": bool(
+                strict_drop_abbreviation_heavy_phrases
+            ),
+            "abbreviation_phrase_whitelist": (
+                sorted(strict_abbreviation_phrase_whitelist)
+                if bool(filter_strict_post_selection_cleanup)
+                and bool(strict_drop_abbreviation_heavy_phrases)
+                else []
+            ),
+            "drop_artifact_substrings": bool(strict_drop_artifact_substrings),
+            "artifact_substrings": (
+                sorted(strict_artifact_substrings)
+                if bool(filter_strict_post_selection_cleanup)
+                and bool(strict_drop_artifact_substrings)
+                else []
+            ),
+            "initial_selected_terms": int(len(initial_selected_terms)),
+            "filtered_terms": int(strict_post_selection_filtered_terms),
+            "filtered_reason_counts": {
+                key: int(value)
+                for key, value in sorted(strict_post_selection_reason_counts.items())
+            },
+            "backfilled_terms": int(strict_post_selection_backfilled_terms),
+            "tail_terms_scanned_for_backfill": int(
+                strict_post_selection_tail_terms_scanned
+            ),
+            "final_selected_terms": int(len(selected_terms)),
+        },
         "entity_quality_gate": {
             "enabled": bool(entity_quality_gate),
             "min_source_df": int(entity_quality_min_source_df),
@@ -4559,6 +3972,18 @@ def _build_vocab(
     pos_gate_batch_size: int = 2048,
     filter_noisy_numeric_terms: bool = True,
     numeric_term_max_tokens: int = 3,
+    filter_strict_post_selection_cleanup: bool = True,
+    strict_drop_short_alpha_unigrams: bool = True,
+    strict_short_alpha_unigram_max_len: int = 2,
+    strict_short_alpha_unigram_whitelist: set[str] | None = None,
+    strict_drop_about_numeric_phrases: bool = True,
+    strict_drop_leading_numeric_function_phrases: bool = True,
+    strict_drop_trailing_function_word_phrases: bool = True,
+    strict_trailing_function_words: set[str] | None = None,
+    strict_drop_abbreviation_heavy_phrases: bool = True,
+    strict_abbreviation_phrase_whitelist: set[str] | None = None,
+    strict_drop_artifact_substrings: bool = True,
+    strict_artifact_substrings: set[str] | None = None,
     canonicalize_terms_for_selection: bool = True,
     canonical_strip_leading_determiners: bool = True,
     canonical_leading_determiners: set[str] | None = None,
@@ -4724,6 +4149,41 @@ def _build_vocab(
         }
     if pos_gate_allowed_tags is None:
         pos_gate_allowed_tags = {"NOUN", "VERB", "ADJ"}
+    if strict_short_alpha_unigram_whitelist is None:
+        strict_short_alpha_unigram_whitelist = {
+            "mg",
+            "kg",
+            "km",
+            "cm",
+            "mm",
+            "ml",
+            "oz",
+            "lb",
+            "ft",
+            "uk",
+            "eu",
+            "tv",
+            "ip",
+            "pc",
+            "ph",
+        }
+    if strict_trailing_function_words is None:
+        strict_trailing_function_words = {
+            "of",
+            "and",
+            "or",
+            "to",
+            "for",
+            "in",
+            "on",
+            "with",
+            "from",
+            "by",
+        }
+    if strict_abbreviation_phrase_whitelist is None:
+        strict_abbreviation_phrase_whitelist = set()
+    if strict_artifact_substrings is None:
+        strict_artifact_substrings = {"uplog"}
     if noun_normalization_exceptions is None:
         noun_normalization_exceptions = {
             "news",
@@ -4813,6 +4273,24 @@ def _build_vocab(
         pos_gate_batch_size=pos_gate_batch_size,
         filter_noisy_numeric_terms=filter_noisy_numeric_terms,
         numeric_term_max_tokens=numeric_term_max_tokens,
+        filter_strict_post_selection_cleanup=filter_strict_post_selection_cleanup,
+        strict_drop_short_alpha_unigrams=strict_drop_short_alpha_unigrams,
+        strict_short_alpha_unigram_max_len=strict_short_alpha_unigram_max_len,
+        strict_short_alpha_unigram_whitelist=strict_short_alpha_unigram_whitelist,
+        strict_drop_about_numeric_phrases=strict_drop_about_numeric_phrases,
+        strict_drop_leading_numeric_function_phrases=(
+            strict_drop_leading_numeric_function_phrases
+        ),
+        strict_drop_trailing_function_word_phrases=(
+            strict_drop_trailing_function_word_phrases
+        ),
+        strict_trailing_function_words=strict_trailing_function_words,
+        strict_drop_abbreviation_heavy_phrases=(
+            strict_drop_abbreviation_heavy_phrases
+        ),
+        strict_abbreviation_phrase_whitelist=strict_abbreviation_phrase_whitelist,
+        strict_drop_artifact_substrings=strict_drop_artifact_substrings,
+        strict_artifact_substrings=strict_artifact_substrings,
         canonicalize_terms_for_selection=canonicalize_terms_for_selection,
         canonical_strip_leading_determiners=canonical_strip_leading_determiners,
         canonical_leading_determiners=canonical_leading_determiners,
@@ -4839,9 +4317,10 @@ def _build_vocab(
 
 
 def _resolve_term_stats_cache_path(args: argparse.Namespace) -> Path:
-    if args.term_stats_cache_path is not None and str(args.term_stats_cache_path).strip():
-        return Path(str(args.term_stats_cache_path))
-    return Path(str(args.output_dir)) / "term_statistics.pkl"
+    return resolve_term_stats_cache_path(
+        output_dir=Path(str(args.output_dir)),
+        configured_path=args.term_stats_cache_path,
+    )
 
 
 def _save_term_statistics_cache(
@@ -4952,6 +4431,22 @@ def main() -> None:
         args.noun_normalization_exceptions
     )
     pos_gate_allowed_tags: set[str] = _parse_pos_gate_tags(args.pos_gate_allowed_tags)
+    strict_short_alpha_unigram_whitelist: set[str] = (
+        _parse_strict_short_alpha_unigram_whitelist(
+            args.strict_short_alpha_unigram_whitelist
+        )
+    )
+    strict_trailing_function_words: set[str] = _parse_strict_trailing_function_words(
+        args.strict_trailing_function_words
+    )
+    strict_artifact_substrings: set[str] = _parse_strict_artifact_substrings(
+        args.strict_artifact_substrings
+    )
+    strict_abbreviation_phrase_whitelist: set[str] = (
+        _parse_strict_abbreviation_phrase_whitelist(
+            args.strict_abbreviation_phrase_whitelist
+        )
+    )
     source_boosts: dict[str, float] = {
         _SOURCE_TOKEN: float(args.token_source_boost),
         _SOURCE_NOUN_CHUNK: float(args.noun_chunk_source_boost),
@@ -5119,6 +4614,30 @@ def main() -> None:
         pos_gate_batch_size=int(args.pos_gate_batch_size),
         filter_noisy_numeric_terms=bool(args.filter_noisy_numeric_terms),
         numeric_term_max_tokens=int(args.numeric_term_max_tokens),
+        filter_strict_post_selection_cleanup=bool(
+            args.filter_strict_post_selection_cleanup
+        ),
+        strict_drop_short_alpha_unigrams=bool(args.strict_drop_short_alpha_unigrams),
+        strict_short_alpha_unigram_max_len=int(
+            args.strict_short_alpha_unigram_max_len
+        ),
+        strict_short_alpha_unigram_whitelist=strict_short_alpha_unigram_whitelist,
+        strict_drop_about_numeric_phrases=bool(
+            args.strict_drop_about_numeric_phrases
+        ),
+        strict_drop_leading_numeric_function_phrases=bool(
+            args.strict_drop_leading_numeric_function_phrases
+        ),
+        strict_drop_trailing_function_word_phrases=bool(
+            args.strict_drop_trailing_function_word_phrases
+        ),
+        strict_trailing_function_words=strict_trailing_function_words,
+        strict_drop_abbreviation_heavy_phrases=bool(
+            args.strict_drop_abbreviation_heavy_phrases
+        ),
+        strict_abbreviation_phrase_whitelist=strict_abbreviation_phrase_whitelist,
+        strict_drop_artifact_substrings=bool(args.strict_drop_artifact_substrings),
+        strict_artifact_substrings=strict_artifact_substrings,
         canonicalize_terms_for_selection=bool(args.canonicalize_terms_for_selection),
         canonical_strip_leading_determiners=bool(
             args.canonical_strip_leading_determiners
@@ -5151,39 +4670,29 @@ def main() -> None:
         source_boosts=source_boosts,
     )
 
-    (output_dir / "v_target.txt").write_text("\n".join(v_target) + "\n", encoding="utf-8")
-    (output_dir / "df_map.json").write_text(
-        json.dumps(df_map, ensure_ascii=False, indent=2, sort_keys=True),
-        encoding="utf-8",
+    write_text_lines(output_dir / VOCAB_LIST_FILENAME, v_target)
+    write_json(output_dir / DF_MAP_FILENAME, df_map, sort_keys=True)
+    write_json(
+        output_dir / VOCAB_STATS_FILENAME,
+        {
+            "summary": summary,
+            "selected_terms": selected_stats,
+        },
     )
-    (output_dir / "vocab_stats.json").write_text(
-        json.dumps(
-            {
-                "summary": summary,
-                "selected_terms": selected_stats,
+    write_json(
+        output_dir / VOCAB_MANIFEST_FILENAME,
+        {
+            "arguments": vars(args),
+            "source_stats": source_stats,
+            "spacy_stats": spacy_stats,
+            "summary": summary,
+            "term_stats_cache": {
+                "path": str(term_stats_cache_path),
+                "selection_only": bool(args.selection_only),
+                "saved": bool(not args.selection_only and args.save_term_stats_cache),
+                "default_filename": TERM_STATS_CACHE_FILENAME,
             },
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
-    (output_dir / "manifest.json").write_text(
-        json.dumps(
-            {
-                "arguments": vars(args),
-                "source_stats": source_stats,
-                "spacy_stats": spacy_stats,
-                "summary": summary,
-                "term_stats_cache": {
-                    "path": str(term_stats_cache_path),
-                    "selection_only": bool(args.selection_only),
-                    "saved": bool(not args.selection_only and args.save_term_stats_cache),
-                },
-            },
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
+        },
     )
 
     print(f"Saved vocabulary artifacts to {output_dir}")

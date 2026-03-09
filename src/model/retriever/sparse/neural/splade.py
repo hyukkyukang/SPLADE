@@ -1,6 +1,6 @@
 import inspect
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, cast
 
 import torch
 from torch import nn
@@ -147,7 +147,9 @@ class SpladeEncoder(nn.Module):
             torch.empty((0,), dtype=torch.long),
             persistent=False,
         )
+        self._encode_logits: Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
         self._setup_compact_head(model_name=model_name, dtype=dtype)
+        self._encode_logits = self._resolve_encode_logits()
         self.freeze_backbone: bool = bool(freeze_backbone)
         if self.freeze_backbone:
             self._freeze_backbone_params()
@@ -303,6 +305,62 @@ class SpladeEncoder(nn.Module):
                     parameter.requires_grad_(True)
         self.mlm.eval()
 
+    def _encode_logits_mlm(
+        self, input_ids: torch.Tensor, attention_mask: torch.Tensor
+    ) -> torch.Tensor:
+        return self.mlm(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+        ).logits
+
+    def _encode_logits_mlm_no_cache(
+        self, input_ids: torch.Tensor, attention_mask: torch.Tensor
+    ) -> torch.Tensor:
+        return self.mlm(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            use_cache=False,
+        ).logits
+
+    def _encode_logits_compact(
+        self, input_ids: torch.Tensor, attention_mask: torch.Tensor
+    ) -> torch.Tensor:
+        hidden_model: nn.Module = cast(nn.Module, self._hidden_model)
+        compact_head: nn.Linear = cast(nn.Linear, self.compact_head)
+        hidden_states: torch.Tensor = hidden_model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            return_dict=True,
+        ).last_hidden_state
+        return compact_head(hidden_states.to(dtype=compact_head.weight.dtype))
+
+    def _encode_logits_compact_no_cache(
+        self, input_ids: torch.Tensor, attention_mask: torch.Tensor
+    ) -> torch.Tensor:
+        hidden_model: nn.Module = cast(nn.Module, self._hidden_model)
+        compact_head: nn.Linear = cast(nn.Linear, self.compact_head)
+        hidden_states: torch.Tensor = hidden_model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            return_dict=True,
+            use_cache=False,
+        ).last_hidden_state
+        return compact_head(hidden_states.to(dtype=compact_head.weight.dtype))
+
+    def _resolve_encode_logits(
+        self,
+    ) -> Callable[[torch.Tensor, torch.Tensor], torch.Tensor]:
+        if self.compact_head is None:
+            if self._mlm_forward_supports_use_cache:
+                return self._encode_logits_mlm_no_cache
+            return self._encode_logits_mlm
+        hidden_model: nn.Module | None = self._hidden_model
+        if hidden_model is None:
+            raise ValueError("Compact head is enabled but hidden model is missing.")
+        if self._hidden_forward_supports_use_cache:
+            return self._encode_logits_compact_no_cache
+        return self._encode_logits_compact
+
     def build_exclude_mask(self, exclude_ids: torch.Tensor) -> torch.Tensor:
         """Build an output-dimension mask from tokenizer token ids."""
         if int(exclude_ids.numel()) == 0:
@@ -364,39 +422,7 @@ class SpladeEncoder(nn.Module):
         attention_mask: torch.Tensor,
         pooling_mode: torch.Tensor,
     ) -> torch.Tensor:
-        logits: torch.Tensor
-        if self.compact_head is None:
-            mlm_kwargs: dict[str, Any] = {
-                "input_ids": input_ids,
-                "attention_mask": attention_mask,
-            }
-            if self._mlm_forward_supports_use_cache:
-                mlm_kwargs["use_cache"] = False
-            outputs: Any = self.mlm(**mlm_kwargs)
-            if not hasattr(outputs, "logits"):
-                raise ValueError(
-                    "Selected Hugging Face model class does not expose token logits; "
-                    "SPLADE requires per-token vocabulary logits for sparse pooling."
-                )
-            logits = outputs.logits
-        else:
-            if self._hidden_model is None:
-                raise ValueError("Compact head is enabled but hidden model is missing.")
-            hidden_kwargs: dict[str, Any] = {
-                "input_ids": input_ids,
-                "attention_mask": attention_mask,
-                "return_dict": True,
-            }
-            if self._hidden_forward_supports_use_cache:
-                hidden_kwargs["use_cache"] = False
-            hidden_outputs: Any = self._hidden_model(**hidden_kwargs)
-            if not hasattr(hidden_outputs, "last_hidden_state"):
-                raise ValueError(
-                    "Hidden-state backbone does not expose last_hidden_state."
-                )
-            hidden_states: torch.Tensor = hidden_outputs.last_hidden_state
-            compact_head: nn.Linear = self.compact_head
-            logits = compact_head(hidden_states.to(dtype=compact_head.weight.dtype))
+        logits: torch.Tensor = self._encode_logits(input_ids, attention_mask)
         token_scores: torch.Tensor = self.activation(logits)
         embeddings: torch.Tensor = self._pool_sparse(
             token_scores, attention_mask, pooling_mode
@@ -474,11 +500,9 @@ class SpladeModel(nn.Module):
         self.normalize: bool = normalize
         self.doc_only: bool = bool(doc_only)
         exclude_token_ids: torch.Tensor = self._build_query_exclude_token_ids()
-        exclude_mask: torch.Tensor = self.encoder.build_exclude_mask(exclude_token_ids)
         self.register_buffer(
             "_query_exclude_token_ids", exclude_token_ids, persistent=False
         )
-        self.register_buffer("_query_exclude_mask", exclude_mask, persistent=False)
         self._query_encode_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = (
             self._encode_query_terms if self.doc_only else self._encode_query_mlm
         )
@@ -553,28 +577,21 @@ class SpladeModel(nn.Module):
         token_mask: torch.Tensor = attention_mask.to(dtype=torch.bool)
         exclude_ids: torch.Tensor = self._query_exclude_token_ids
         if int(exclude_ids.numel()) > 0:
-            token_mask = token_mask & ~torch.isin(
-                token_ids, exclude_ids.to(device=device, dtype=torch.long)
-            )
+            token_mask = token_mask & ~torch.isin(token_ids, exclude_ids)
         bow: torch.Tensor = torch.zeros(
             (batch_size, vocab_size), dtype=dtype, device=device
         )
         token_id_to_output_index: torch.Tensor = self.encoder.token_id_to_output_index
         if int(token_id_to_output_index.numel()) > 0:
-            token_id_to_output_index = token_id_to_output_index.to(device=device)
-            mapped_ids: torch.Tensor = torch.full_like(token_ids, fill_value=-1)
-            in_range_mask: torch.Tensor = token_ids < int(
-                token_id_to_output_index.shape[0]
-            )
-            if bool(in_range_mask.any()):
-                mapped_ids[in_range_mask] = token_id_to_output_index[
-                    token_ids[in_range_mask]
-                ]
+            max_token_id: int = int(token_id_to_output_index.shape[0]) - 1
+            safe_token_ids: torch.Tensor = token_ids.clamp(min=0, max=max_token_id)
+            in_range_mask: torch.Tensor = (token_ids >= 0) & (token_ids <= max_token_id)
+            mapped_ids: torch.Tensor = token_id_to_output_index[safe_token_ids]
+            mapped_ids = mapped_ids.masked_fill(~in_range_mask, -1)
             valid_mask: torch.Tensor = token_mask & (mapped_ids >= 0)
-            if bool(valid_mask.any()):
-                safe_ids: torch.Tensor = mapped_ids.masked_fill(~valid_mask, 0)
-                token_values: torch.Tensor = valid_mask.to(dtype=dtype)
-                bow.scatter_add_(1, safe_ids, token_values)
+            safe_ids: torch.Tensor = mapped_ids.masked_fill(~valid_mask, 0)
+            token_values: torch.Tensor = valid_mask.to(dtype=dtype)
+            bow.scatter_add_(1, safe_ids, token_values)
             return bow
         # Default path: output ids are tokenizer ids.
         token_values = token_mask.to(dtype=dtype)

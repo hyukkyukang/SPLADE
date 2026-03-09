@@ -13,7 +13,7 @@ class HardNegativeSelectionSettings:
     dedupe: bool = True
 
 
-def _to_doc_id_list(value: Any) -> list[str]:
+def to_doc_id_list(value: Any) -> list[str]:
     if value is None:
         return []
     if isinstance(value, (list, tuple)):
@@ -27,6 +27,11 @@ def _to_doc_id_list(value: Any) -> list[str]:
         if doc_id:
             doc_ids.append(doc_id)
     return doc_ids
+
+
+def _to_doc_id_list(value: Any) -> list[str]:
+    # Backwards-compatible alias used internally and by older imports.
+    return to_doc_id_list(value)
 
 
 def _normalize_neg_map(value: Any) -> dict[str, Any]:

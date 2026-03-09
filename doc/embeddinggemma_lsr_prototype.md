@@ -1,5 +1,8 @@
 # EmbeddingGemma-LSR Prototype
 
+For the detailed build and rerun guide, see
+`doc/embeddinggemma_lsr_build_pipeline.md`.
+
 This prototype builds a learned sparse retriever with a custom target vocabulary (`V_target`) and semantic projection-head initialization for `google/embeddinggemma-300m`.
 
 ## Artifacts

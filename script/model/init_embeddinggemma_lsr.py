@@ -1,12 +1,22 @@
 import argparse
-import json
 from pathlib import Path
 from typing import Any
 
 import torch
-from omegaconf import OmegaConf
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
+from src.prototype.embeddinggemma_lsr.artifacts import (
+    DF_MAP_FILENAME,
+    load_vocab_artifacts,
+    write_json,
+    write_text_lines,
+)
+from src.prototype.embeddinggemma_lsr.cli import (
+    apply_config_overrides,
+    parser_default_values,
+    resolve_torch_device,
+    resolve_torch_dtype,
+)
 from src.prototype.embeddinggemma_lsr.model import (
     EmbeddingGemmaLSRModel,
     apply_projection_initialization,
@@ -34,63 +44,19 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _default_values() -> dict[str, Any]:
-    parser: argparse.ArgumentParser = _build_parser()
-    defaults: dict[str, Any] = {}
-    action: argparse.Action
-    for action in parser._actions:
-        if action.dest in {None, "help"}:
-            continue
-        defaults[str(action.dest)] = action.default
-    return defaults
+    return parser_default_values(_build_parser())
 
 
 def _apply_config_overrides(args: argparse.Namespace) -> argparse.Namespace:
-    if args.config is None:
-        return args
-    cfg = OmegaConf.load(args.config)
-    payload: dict[str, Any] = OmegaConf.to_container(cfg, resolve=True)
-    defaults: dict[str, Any] = _default_values()
-    for key, value in payload.items():
-        if not hasattr(args, key):
-            continue
-        if key in defaults and getattr(args, key) == defaults[key]:
-            setattr(args, key, value)
-    return args
+    return apply_config_overrides(args, defaults=_default_values())
 
 
 def _resolve_dtype(dtype_name: str) -> torch.dtype:
-    key: str = str(dtype_name).lower()
-    if key == "float16":
-        return torch.float16
-    if key == "bfloat16":
-        return torch.bfloat16
-    return torch.float32
+    return resolve_torch_dtype(dtype_name)
 
 
 def _resolve_device(device_value: str) -> torch.device:
-    text: str = str(device_value).strip().lower()
-    if text == "auto":
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    return torch.device(text)
-
-
-def _load_vocab_artifacts(vocab_artifact_dir: Path) -> tuple[list[str], dict[str, int]]:
-    vocab_path: Path = vocab_artifact_dir / "v_target.txt"
-    df_map_path: Path = vocab_artifact_dir / "df_map.json"
-
-    if not vocab_path.is_file():
-        raise FileNotFoundError(f"Missing file: {vocab_path}")
-    if not df_map_path.is_file():
-        raise FileNotFoundError(f"Missing file: {df_map_path}")
-
-    target_vocab: list[str] = [
-        line.strip()
-        for line in vocab_path.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
-    df_map_raw: dict[str, Any] = json.loads(df_map_path.read_text(encoding="utf-8"))
-    df_map: dict[str, int] = {str(k): int(v) for k, v in df_map_raw.items()}
-    return target_vocab, df_map
+    return resolve_torch_device(device_value)
 
 
 def _validate_initialization(
@@ -201,28 +167,15 @@ def main() -> None:
         extra_metadata=init_summary,
     )
 
-    (output_dir / "target_vocab.txt").write_text(
-        "\n".join(target_vocab) + "\n",
-        encoding="utf-8",
-    )
-    (output_dir / "df_map.json").write_text(
-        json.dumps(df_map, ensure_ascii=False, indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
-    (output_dir / "tokenization_report.json").write_text(
-        json.dumps(tokenization_report, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    (output_dir / "init_metadata.json").write_text(
-        json.dumps(
-            {
-                "summary": init_summary,
-                "terms": metadata,
-            },
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
+    write_text_lines(output_dir / "target_vocab.txt", target_vocab)
+    write_json(output_dir / DF_MAP_FILENAME, df_map, sort_keys=True)
+    write_json(output_dir / "tokenization_report.json", tokenization_report)
+    write_json(
+        output_dir / "init_metadata.json",
+        {
+            "summary": init_summary,
+            "terms": metadata,
+        },
     )
 
     print(f"Saved initialized EmbeddingGemma-LSR artifacts to {output_dir}")

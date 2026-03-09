@@ -10,6 +10,7 @@ use_cpu: false
 torch_compile: true
 # Options: default, reduce-overhead, and max-autotune.
 torch_compile_mode: default
+max_windows_per_forward: null
 strategy: ddp
 static_graph: true
 num_devices: null
@@ -18,6 +19,7 @@ scoring_workers: 4
 scoring_method: full
 scoring_backend: threads
 wand_block_size: 256
+exclude_self_match: false
 sparse_top_k: 512
 sparse_min_weight: 0.0
 query_exclude_token_ids: ${model.exclude_token_ids}

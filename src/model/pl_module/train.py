@@ -79,8 +79,9 @@ class SPLADETrainingModule(L.LightningModule):
         # Transformers from_pretrained defaults to eval; ensure training mode here.
         self.model.train()
         self._doc_only_flag: bool = bool(self.model.doc_only)
-        self._eager_loss_computer: LossComputer | None = None
-        self._compiled_loss_computer: Any | None = None
+        self._eager_train_loss_computer: LossComputer | None = None
+        self._eager_validation_loss_computer: LossComputer | None = None
+        self._compiled_train_loss_computer: Any | None = None
         self._compiled_validation_loss_computer: Any | None = None
         self._train_compile_policy = TrainingCompilePolicyManager(
             model=self.model, logger=logger
@@ -110,6 +111,12 @@ class SPLADETrainingModule(L.LightningModule):
             step_only_metric_log_interval=int(
                 cfg.training.get("step_only_metric_log_interval", 1)
             ),
+            validation_diagnostics_enabled=bool(
+                cfg.training.validation_metrics.get("diagnostics_enabled", True)
+            ),
+            validation_diagnostics_log_interval=int(
+                cfg.training.validation_metrics.get("diagnostics_log_interval", 1)
+            ),
         )
         # Keep compatibility with existing call sites while service extraction is ongoing.
         self.temperature = self._loss_service.temperature
@@ -120,11 +127,14 @@ class SPLADETrainingModule(L.LightningModule):
         self.reg_query_weight = self._loss_service.reg_query_weight
         self.reg_doc_weight = self._loss_service.reg_doc_weight
 
-        self.loss_computer: LossComputer = self._loss_service.build_loss_computer()
-        self._eager_loss_computer = self.loss_computer
+        self._eager_train_loss_computer = self._loss_service.build_loss_computer()
+        self._eager_validation_loss_computer = self._loss_service.build_loss_computer(
+            loss_type="pairwise"
+        )
+        self.loss_computer: Any = self._eager_train_loss_computer
         if self._train_compile_policy.torch_compile_enabled and compile_loss:
-            self._compiled_loss_computer = torch.compile(
-                self._eager_loss_computer,
+            self._compiled_train_loss_computer = torch.compile(
+                self._eager_train_loss_computer,
                 **self._train_compile_policy.loss_compile_mode_kwargs,
             )
         validation_policy: TrainingCompilePolicyManager | None = (
@@ -132,20 +142,17 @@ class SPLADETrainingModule(L.LightningModule):
         )
         if (
             validation_policy is not None
-            and validation_policy is not self._train_compile_policy
             and validation_policy.torch_compile_enabled
             and compile_loss
         ):
             self._compiled_validation_loss_computer = torch.compile(
-                self._eager_loss_computer,
+                self._eager_validation_loss_computer,
                 **validation_policy.loss_compile_mode_kwargs,
             )
-        else:
-            self._compiled_validation_loss_computer = self._compiled_loss_computer
         self._activate_compile_policy(
             policy=self._train_compile_policy,
             use_compiled=self._train_compile_policy.compile_enabled_for_current_stage,
-            compiled_loss_computer=self._compiled_loss_computer,
+            stage="train",
         )
         self._setup_eval_metrics(cfg)
         self._validation_doc_encode_chunk_size: int = int(
@@ -196,31 +203,43 @@ class SPLADETrainingModule(L.LightningModule):
         return validation_policy
 
     def _sync_model_with_active_compile_policy(self) -> None:
-        if (
-            self._compile_policy.torch_compile_full_model
-            and self._compile_policy.compile_enabled_for_current_stage
-            and self._compile_policy.compiled_model is not None
-        ):
-            self.model = cast(SpladeModel, self._compile_policy.compiled_model)
-            return
+        # Keep the eager model as the canonical module object. Full-model compile
+        # is only entered via resolve_active_model_for_train_step().
         self.model = cast(SpladeModel, self._compile_policy.eager_model)
+
+    def _resolve_stage_loss_computer(self, *, stage: str, use_compiled: bool) -> Any:
+        eager_loss_computer: LossComputer | None
+        compiled_loss_computer: Any | None
+        if stage == "train":
+            eager_loss_computer = self._eager_train_loss_computer
+            compiled_loss_computer = self._compiled_train_loss_computer
+        elif stage == "val":
+            eager_loss_computer = self._eager_validation_loss_computer
+            compiled_loss_computer = self._compiled_validation_loss_computer
+        else:
+            raise ValueError(f"Unsupported stage: {stage}")
+        if use_compiled and compiled_loss_computer is not None:
+            return compiled_loss_computer
+        if eager_loss_computer is None:
+            raise RuntimeError(
+                f"Eager loss computer is not initialized for stage={stage!r}."
+            )
+        return eager_loss_computer
 
     def _activate_compile_policy(
         self,
         *,
         policy: TrainingCompilePolicyManager,
         use_compiled: bool,
-        compiled_loss_computer: Any | None,
+        stage: str,
     ) -> None:
         policy.prepare_for_device(device=self.device, use_compiled=use_compiled)
-        selected_loss_computer: Any | None = policy.set_compile_state(
-            use_compiled=use_compiled,
-            eager_loss_computer=self._eager_loss_computer,
-            compiled_loss_computer=compiled_loss_computer,
-        )
+        policy.set_compile_state(use_compiled=use_compiled)
         self._compile_policy = policy
-        if selected_loss_computer is not None:
-            self.loss_computer = selected_loss_computer
+        self.loss_computer = self._resolve_stage_loss_computer(
+            stage=stage,
+            use_compiled=bool(self._compile_policy.compile_enabled_for_current_stage),
+        )
         self._sync_model_with_active_compile_policy()
 
     def _encode_docs_in_chunks(
@@ -318,6 +337,7 @@ class SPLADETrainingModule(L.LightningModule):
         stage: str,
         *,
         return_reps: bool = False,
+        compute_validation_diagnostics: bool | None = None,
     ) -> (
         dict[str, torch.Tensor]
         | tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]
@@ -380,13 +400,19 @@ class SPLADETrainingModule(L.LightningModule):
         pos_mask: torch.Tensor = batch["pos_mask"]
         doc_mask: torch.Tensor = batch["doc_mask"]
         teacher_scores: torch.Tensor = batch["teacher_scores"]
-        # Compute magnitudes for logging purposes only.
-        q_rep_magnitude: torch.Tensor = self._compute_rep_magnitude(q_reps)
-        flat_doc_reps_for_mag: torch.Tensor = doc_reps.view(-1, doc_reps.shape[-1])
-        flat_doc_mask_for_mag: torch.Tensor = doc_mask.view(-1)
-        doc_rep_magnitude: torch.Tensor = self._compute_rep_magnitude(
-            flat_doc_reps_for_mag, flat_doc_mask_for_mag
-        )
+        should_compute_expensive_metrics: bool
+        if stage == "train":
+            should_compute_expensive_metrics = (
+                self._metrics_service.should_compute_step_only_metrics(self)
+            )
+        elif stage == "val":
+            should_compute_expensive_metrics = bool(
+                True
+                if compute_validation_diagnostics is None
+                else compute_validation_diagnostics
+            )
+        else:
+            should_compute_expensive_metrics = True
         loss_outputs = self._loss_service.compute_loss(
             loss_computer=self.loss_computer,
             q_reps=q_reps,
@@ -394,14 +420,12 @@ class SPLADETrainingModule(L.LightningModule):
             pos_mask=pos_mask,
             doc_mask=doc_mask,
             teacher_scores=teacher_scores,
-            stage=stage,
             global_step=int(self.global_step),
         )
         loss: torch.Tensor
         pairwise_loss: torch.Tensor
         in_batch_loss: torch.Tensor
         distill_loss: torch.Tensor
-        distill_losses: dict[str, torch.Tensor]
         q_reg: torch.Tensor
         d_reg: torch.Tensor
         lambda_scale_value: float = loss_outputs.lambda_scale_value
@@ -409,7 +433,6 @@ class SPLADETrainingModule(L.LightningModule):
         pairwise_loss = loss_outputs.pairwise_loss
         in_batch_loss = loss_outputs.in_batch_loss
         distill_loss = loss_outputs.distill_loss
-        distill_losses = loss_outputs.distill_losses
         q_reg = loss_outputs.q_reg
         d_reg = loss_outputs.d_reg
         reg_query_lambda: torch.Tensor = loss_outputs.reg_query_lambda
@@ -419,23 +442,31 @@ class SPLADETrainingModule(L.LightningModule):
             "loss": loss,
             "reg_query_lambda": reg_query_lambda,
             "reg_doc_lambda": reg_doc_lambda,
-            "q_rep_magnitude": q_rep_magnitude,
-            "doc_rep_magnitude": doc_rep_magnitude,
         }
+        if should_compute_expensive_metrics:
+            flat_doc_reps_for_metrics: torch.Tensor = doc_reps.view(-1, doc_reps.shape[-1])
+            flat_doc_mask_for_metrics: torch.Tensor = doc_mask.view(-1)
+            metrics["q_rep_magnitude"] = self._compute_rep_magnitude(q_reps)
+            metrics["doc_rep_magnitude"] = self._compute_rep_magnitude(
+                flat_doc_reps_for_metrics, flat_doc_mask_for_metrics
+            )
         if self.loss_type in {"pairwise", "in_batch_plus_pairwise"}:
             metrics["pairwise_loss"] = pairwise_loss
         if self.loss_type in {"in_batch", "in_batch_plus_pairwise"}:
             metrics["in_batch_loss"] = in_batch_loss
         if self.distill_cfg.enabled:
             metrics["distill_loss"] = distill_loss
-            for loss_key, loss_value in distill_losses.items():
+            for (
+                loss_key,
+                loss_value,
+            ) in self._loss_service.iter_enabled_distill_metric_tensors(loss_outputs):
                 metrics[f"distill_{loss_key}"] = loss_value
-        if self.reg_cfg.query_weight > 0:
+        if float(getattr(self, "reg_query_weight", self.reg_cfg.query_weight)) > 0:
             metrics["q_reg"] = q_reg
-        if self.reg_cfg.doc_weight > 0:
+        if float(getattr(self, "reg_doc_weight", self.reg_cfg.doc_weight)) > 0:
             metrics["d_reg"] = d_reg
 
-        if stage == "train":
+        if stage == "train" and should_compute_expensive_metrics:
             with torch.no_grad():
                 vocab_dim: float = float(q_reps.shape[-1])
                 vocab_dim_tensor: torch.Tensor = q_reps.new_tensor(
@@ -479,27 +510,28 @@ class SPLADETrainingModule(L.LightningModule):
                 self._add_sparsity_metrics(
                     metrics=metrics,
                     q_reps=q_reps,
-                    flat_doc_reps=flat_doc_reps_for_mag,
-                    flat_doc_mask=flat_doc_mask_for_mag,
+                    flat_doc_reps=flat_doc_reps_for_metrics,
+                    flat_doc_mask=flat_doc_mask_for_metrics,
                 )
                 if str(self.reg_cfg.type).lower() == "flops":
                     metrics["q_flops_proxy_sum_equiv"] = q_reg_sum_equiv
                     metrics["d_flops_proxy_sum_equiv"] = d_reg_sum_equiv
                     metrics["q_flops_proxy_mean_equiv"] = q_reg_mean_equiv
                     metrics["d_flops_proxy_mean_equiv"] = d_reg_mean_equiv
-        elif stage == "val":
+        elif stage == "val" and should_compute_expensive_metrics:
+            flat_doc_reps_for_metrics = doc_reps.view(-1, doc_reps.shape[-1])
+            flat_doc_mask_for_metrics = doc_mask.view(-1)
             with torch.no_grad():
                 self._add_sparsity_metrics(
                     metrics=metrics,
                     q_reps=q_reps,
-                    flat_doc_reps=flat_doc_reps_for_mag,
-                    flat_doc_mask=flat_doc_mask_for_mag,
+                    flat_doc_reps=flat_doc_reps_for_metrics,
+                    flat_doc_mask=flat_doc_mask_for_metrics,
                 )
 
         if return_reps:
             return metrics, {
-                "q_reps": q_reps,
-                "doc_reps": doc_reps,
+                "pairwise_scores": loss_outputs.pairwise_scores,
                 "pos_mask": pos_mask,
                 "doc_mask": doc_mask,
             }
@@ -516,25 +548,23 @@ class SPLADETrainingModule(L.LightningModule):
                 self._activate_compile_policy(
                     policy=self._train_compile_policy,
                     use_compiled=False,
-                    compiled_loss_computer=self._compiled_loss_computer,
+                    stage="val",
                 )
             else:
                 validation_policy: TrainingCompilePolicyManager = (
                     self._validation_compile_policy or self._train_compile_policy
                 )
-                validation_compiled_loss: Any | None = (
-                    self._compiled_validation_loss_computer
-                    if validation_policy is not self._train_compile_policy
-                    else self._compiled_loss_computer
-                )
                 self._activate_compile_policy(
                     policy=validation_policy,
                     use_compiled=True,
-                    compiled_loss_computer=validation_compiled_loss,
+                    stage="val",
                 )
         else:
-            self._compile_policy = self._train_compile_policy
-            self._sync_model_with_active_compile_policy()
+            self._activate_compile_policy(
+                policy=self._train_compile_policy,
+                use_compiled=False,
+                stage="val",
+            )
         self._validation_metrics.on_validation_start(self.device)
 
     def on_validation_end(self) -> None:
@@ -542,22 +572,23 @@ class SPLADETrainingModule(L.LightningModule):
             self._activate_compile_policy(
                 policy=self._train_compile_policy,
                 use_compiled=True,
-                compiled_loss_computer=self._compiled_loss_computer,
+                stage="train",
             )
         else:
-            self._compile_policy = self._train_compile_policy
-            self._sync_model_with_active_compile_policy()
+            self._activate_compile_policy(
+                policy=self._train_compile_policy,
+                use_compiled=False,
+                stage="train",
+            )
 
     def _append_validation_metrics(
         self,
-        q_reps: torch.Tensor,
-        doc_reps: torch.Tensor,
+        pairwise_scores: torch.Tensor,
         pos_mask: torch.Tensor,
         doc_mask: torch.Tensor,
     ) -> None:
         self._validation_metrics.append_batch(
-            q_reps=q_reps,
-            doc_reps=doc_reps,
+            pairwise_scores=pairwise_scores,
             pos_mask=pos_mask,
             doc_mask=doc_mask,
             world_size=int(self.trainer.world_size),
@@ -642,7 +673,7 @@ class SPLADETrainingModule(L.LightningModule):
             self._activate_compile_policy(
                 policy=self._train_compile_policy,
                 use_compiled=True,
-                compiled_loss_computer=self._compiled_loss_computer,
+                stage="train",
             )
         if (
             self._compile_policy.torch_compile_enabled
@@ -651,7 +682,7 @@ class SPLADETrainingModule(L.LightningModule):
             self._activate_compile_policy(
                 policy=self._compile_policy,
                 use_compiled=True,
-                compiled_loss_computer=self._compiled_loss_computer,
+                stage="train",
             )
         metrics: dict[str, torch.Tensor] = self._training_step_shared(
             batch, stage="train"
@@ -660,17 +691,26 @@ class SPLADETrainingModule(L.LightningModule):
         return metrics["loss"]
 
     def validation_step(self, batch: dict[str, torch.Tensor], batch_idx: int) -> None:
+        compute_validation_diagnostics: bool = (
+            self._metrics_service.should_compute_validation_diagnostics(
+                batch_idx=batch_idx
+            )
+        )
         if not self._validation_metrics.has_collection:
             metrics: dict[str, torch.Tensor] = self._training_step_shared(
-                batch, stage="val"
+                batch,
+                stage="val",
+                compute_validation_diagnostics=compute_validation_diagnostics,
             )
         else:
             metrics, rep_cache = self._training_step_shared(
-                batch, stage="val", return_reps=True
+                batch,
+                stage="val",
+                return_reps=True,
+                compute_validation_diagnostics=compute_validation_diagnostics,
             )
             self._append_validation_metrics(
-                rep_cache["q_reps"],
-                rep_cache["doc_reps"],
+                rep_cache["pairwise_scores"],
                 rep_cache["pos_mask"],
                 rep_cache["doc_mask"],
             )

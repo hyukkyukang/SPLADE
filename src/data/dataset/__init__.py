@@ -2,6 +2,7 @@
 
 from src.data.dataset.base import BaseDataset
 from src.data.dataset.beir import BEIRDataset
+from src.data.dataset.corpus_only import CorpusOnlyDataset
 from src.data.dataset.msmarco_dev_small_negatives import (
     MSMARCODevSmallNegativesDataset,
 )
@@ -13,6 +14,7 @@ from src.data.dataset.msmarco_triplet_scores import MSMARCOTripletScoresDataset
 __all__ = [
     "BaseDataset",
     "BEIRDataset",
+    "CorpusOnlyDataset",
     "MSMARCODevSmallNegativesDataset",
     "MSMARCODataset",
     "MSMARCOHardNegativesDataset",

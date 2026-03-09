@@ -82,15 +82,13 @@ class ValidationMetricsAccumulatorIntegrationTest(unittest.TestCase):
         accumulator = ValidationMetricsAccumulator(dataset_name="", metrics_cfg=cfg)
         accumulator.on_validation_start(torch.device("cpu"))
 
-        q_reps = torch.zeros((1, 4), dtype=torch.float32)
-        doc_reps = torch.zeros((1, 100, 4), dtype=torch.float32)
+        pairwise_scores = torch.zeros((1, 100), dtype=torch.float32)
         pos_mask = torch.zeros((1, 100), dtype=torch.bool)
         pos_mask[0, 0] = True
         doc_mask = torch.ones((1, 100), dtype=torch.bool)
 
         accumulator.append_batch(
-            q_reps=q_reps,
-            doc_reps=doc_reps,
+            pairwise_scores=pairwise_scores,
             pos_mask=pos_mask,
             doc_mask=doc_mask,
             world_size=1,
@@ -132,6 +130,88 @@ class ValidationMetricsAccumulatorIntegrationTest(unittest.TestCase):
         )
         self.assertAlmostEqual(
             float(metrics["val_Recall_100"]), expected_recall_100, places=6
+        )
+
+    def test_custom_backend_flattens_batch_once(self) -> None:
+        cfg = OmegaConf.create(
+            {
+                "enabled": True,
+                "backend": "custom",
+                "tie_break_seed": 0,
+                "k_list": [1, 5],
+            }
+        )
+        accumulator = ValidationMetricsAccumulator(dataset_name="", metrics_cfg=cfg)
+        accumulator.on_validation_start(torch.device("cpu"))
+
+        pairwise_scores = torch.tensor(
+            [
+                [3.0, 1.0, 0.0, 0.0],
+                [2.0, 2.0, 2.0, 2.0],
+                [0.0, 0.0, 0.0, 0.0],
+            ],
+            dtype=torch.float32,
+        )
+        pos_mask = torch.tensor(
+            [
+                [True, False, False, False],
+                [False, True, False, False],
+                [False, False, False, False],
+            ]
+        )
+        doc_mask = torch.tensor(
+            [
+                [True, True, False, False],
+                [True, True, True, False],
+                [False, False, False, False],
+            ]
+        )
+
+        accumulator.append_batch(
+            pairwise_scores=pairwise_scores,
+            pos_mask=pos_mask,
+            doc_mask=doc_mask,
+            world_size=1,
+            global_rank=0,
+        )
+
+        metric_collection = accumulator._metric_collection
+        self.assertIsInstance(metric_collection, ValidationRetrievalMetrics)
+        self.assertEqual(len(metric_collection._accumulated_preds), 1)
+        self.assertTrue(
+            torch.equal(
+                metric_collection._accumulated_preds[0],
+                torch.tensor([3.0, 1.0, 2.0, 2.0, 2.0], dtype=torch.float32),
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                metric_collection._accumulated_targets[0],
+                torch.tensor([1.0, 0.0, 0.0, 1.0, 0.0], dtype=torch.float32),
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                metric_collection._accumulated_indexes[0],
+                torch.tensor([0, 0, 1, 1, 1], dtype=torch.long),
+            )
+        )
+        expected_tie_break = torch.cat(
+            [
+                accumulator._build_tie_break_values(
+                    global_query_idx=0,
+                    local_doc_indexes=torch.tensor([0, 1], dtype=torch.long),
+                    device=torch.device("cpu"),
+                ),
+                accumulator._build_tie_break_values(
+                    global_query_idx=1,
+                    local_doc_indexes=torch.tensor([0, 1, 2], dtype=torch.long),
+                    device=torch.device("cpu"),
+                ),
+            ]
+        )
+        self.assertTrue(
+            torch.equal(metric_collection._accumulated_tie_break[0], expected_tie_break)
         )
 
 

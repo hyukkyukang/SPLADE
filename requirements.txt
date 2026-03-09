@@ -4,6 +4,7 @@ sentence-transformers
 lightning[extra]
 torchmetrics
 mlflow
+nvidia-ml-py  # Enables MLflow NVIDIA GPU system metrics via pynvml.
 psutil
 python-dotenv
 hydra-core

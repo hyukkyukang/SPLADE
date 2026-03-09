@@ -5,11 +5,12 @@ import math
 import os
 import random
 from functools import cached_property
+from collections.abc import Mapping as ABCMapping
 from typing import Any, ContextManager, Mapping
 
 from datasets import Dataset, load_dataset
 from huggingface_hub import snapshot_download
-from omegaconf import DictConfig
+from omegaconf import DictConfig, ListConfig
 from torch.utils.data import get_worker_info
 
 from src.data.dataclass import MetaItem
@@ -35,6 +36,7 @@ CORPUS_SPLIT_NAME_KEY: str = "corpus_split_name"
 CORPUS_ID_COLUMN_KEY: str = "corpus_id_column"
 CORPUS_TEXT_COLUMN_KEY: str = "corpus_text_column"
 CORPUS_TITLE_COLUMN_KEY: str = "corpus_title_column"
+CORPUS_ADDITIONAL_TEXT_COLUMNS_KEY: str = "corpus_additional_text_columns"
 
 
 @dataclass(frozen=True)
@@ -74,6 +76,12 @@ class BaseDataset(abc.ABC):
         )
         self.query_corpus_hf_data_files: Mapping[str, Any] | None = (
             self.cfg.query_corpus_hf_data_files
+        )
+        self.query_hf_data_files: Mapping[str, Any] | None = self.cfg.get(
+            "query_hf_data_files"
+        )
+        self.corpus_hf_data_files: Mapping[str, Any] | None = self.cfg.get(
+            "corpus_hf_data_files"
         )
         self.query_lookup_hf_name: str | None = normalize_optional_str(
             self.cfg.get("query_lookup_hf_name")
@@ -144,6 +152,21 @@ class BaseDataset(abc.ABC):
         corpus_title_column: str | None = optional_cfg_str(
             self.cfg, "corpus_title_column"
         )
+        configured_additional_columns: Any = self.cfg.get(
+            "corpus_additional_text_columns", []
+        )
+        corpus_additional_text_columns: list[str] = []
+        if configured_additional_columns is None:
+            configured_additional_columns = []
+        if not isinstance(configured_additional_columns, (list, tuple, ListConfig)):
+            raise ValueError(
+                "dataset.corpus_additional_text_columns must be a list of column names."
+            )
+        raw_column_name: Any
+        for raw_column_name in configured_additional_columns:
+            column_name: str = str(raw_column_name).strip()
+            if column_name:
+                corpus_additional_text_columns.append(column_name)
 
         self.query_column_names: dict[str, str] = {
             QUERY_SUBSET_NAME_KEY: query_subset_name,
@@ -151,7 +174,7 @@ class BaseDataset(abc.ABC):
             QUERY_ID_COLUMN_KEY: query_id_column,
             QUERY_TEXT_COLUMN_KEY: query_text_column,
         }
-        self.corpus_column_names: dict[str, str] = {
+        self.corpus_column_names: dict[str, Any] = {
             CORPUS_SUBSET_NAME_KEY: corpus_subset_name,
             CORPUS_SPLIT_NAME_KEY: corpus_split_name,
             CORPUS_ID_COLUMN_KEY: corpus_id_column,
@@ -159,6 +182,9 @@ class BaseDataset(abc.ABC):
         }
         if corpus_title_column is not None:
             self.corpus_column_names[CORPUS_TITLE_COLUMN_KEY] = corpus_title_column
+        self.corpus_column_names[CORPUS_ADDITIONAL_TEXT_COLUMNS_KEY] = (
+            corpus_additional_text_columns
+        )
 
     # --- Property methods ---
     @property
@@ -173,16 +199,22 @@ class BaseDataset(abc.ABC):
     @property
     def all_qids(self) -> set[str]:
         """Get all query IDs in the dataset."""
-        query_ids: list[Any] = list(self.query_dataset[self.query_id_column_name])
-        # Normalize IDs to strings for consistent downstream lookups.
-        return {str(qid) for qid in query_ids}
+        query_ids: Any = resolve_dataset_column(
+            self.query_dataset, self.query_id_column_name
+        )
+        if isinstance(query_ids, (list, tuple)):
+            return {str(qid) for qid in query_ids}
+        return {str(qid) for qid in query_ids.to_pylist()}
 
     @property
     def all_dids(self) -> set[str]:
         """Get all document IDs in the corpus."""
-        doc_ids: list[Any] = list(self.corpus_dataset[self.corpus_id_column_name])
-        # Normalize IDs to strings for consistent downstream lookups.
-        return {str(doc_id) for doc_id in doc_ids}
+        doc_ids: Any = resolve_dataset_column(
+            self.corpus_dataset, self.corpus_id_column_name
+        )
+        if isinstance(doc_ids, (list, tuple)):
+            return {str(doc_id) for doc_id in doc_ids}
+        return {str(doc_id) for doc_id in doc_ids.to_pylist()}
 
     @property
     def huggingface_name(self) -> str:
@@ -217,7 +249,11 @@ class BaseDataset(abc.ABC):
                 subset_name,
                 split_name,
                 text_cache_dir,
-                self.query_corpus_hf_data_files,
+                (
+                    self.query_hf_data_files
+                    if self.query_hf_data_files is not None
+                    else self.query_corpus_hf_data_files
+                ),
             )
         return dataset
 
@@ -240,7 +276,11 @@ class BaseDataset(abc.ABC):
                 subset_name,
                 split_name,
                 text_cache_dir,
-                self.query_corpus_hf_data_files,
+                (
+                    self.corpus_hf_data_files
+                    if self.corpus_hf_data_files is not None
+                    else self.query_corpus_hf_data_files
+                ),
             )
         return dataset
 
@@ -291,6 +331,24 @@ class BaseDataset(abc.ABC):
     def corpus_text_column_name(self) -> str:
         """Get the column name for corpus text."""
         return self.corpus_column_names[CORPUS_TEXT_COLUMN_KEY]
+
+    @property
+    def corpus_additional_text_column_names(self) -> list[str]:
+        """Get any additional document text columns to append."""
+        value: Any = self.corpus_column_names.get(
+            CORPUS_ADDITIONAL_TEXT_COLUMNS_KEY, []
+        )
+        return [str(column_name) for column_name in value]
+
+    @property
+    def required_corpus_columns(self) -> list[str]:
+        """Get the minimal set of corpus columns needed by this dataset config."""
+        columns: list[str] = [self.corpus_id_column_name, self.corpus_text_column_name]
+        title_column_name: str | None = self.corpus_title_column_name
+        if title_column_name is not None:
+            columns.append(title_column_name)
+        columns.extend(self.corpus_additional_text_column_names)
+        return list(dict.fromkeys(columns))
 
     @cached_property
     def query_dataset_id_to_idx(self) -> dict[str, int]:
@@ -807,18 +865,40 @@ class BaseDataset(abc.ABC):
 
     def corpus_text(self, idx: int) -> str:
         """Get the text of a document in the corpus, including titles when present."""
+        raw_row: Any = self.corpus_dataset[idx]
+        if isinstance(raw_row, ABCMapping):
+            row: ABCMapping[str, Any] = raw_row
+        else:
+            row = dict(raw_row)
+        return self._corpus_text_from_row(row)
+
+    def _corpus_text_from_row(self, row: Mapping[str, Any]) -> str:
+        """Compose corpus text from a projected row mapping."""
         title_column_name: str | None = self.corpus_title_column_name
         title_value: Any | None = (
-            self.corpus_dataset[idx][title_column_name]
+            row.get(title_column_name)
             if title_column_name is not None
             else None
         )
-        text_value: Any = self.corpus_dataset[idx][self.corpus_text_column_name]
-        title: str = "" if title_value is None else str(title_value)
-        text: str = "" if text_value is None else str(text_value)
-        if title:
-            return f"{title} {text}".strip()
-        return text.strip()
+        text_value: Any = row.get(self.corpus_text_column_name)
+        parts: list[str] = []
+        if title_value is not None:
+            title: str = str(title_value).strip()
+            if title:
+                parts.append(title)
+        if text_value is not None:
+            text: str = str(text_value).strip()
+            if text:
+                parts.append(text)
+        column_name: str
+        for column_name in self.corpus_additional_text_column_names:
+            raw_value: Any | None = row.get(column_name)
+            if raw_value is None:
+                continue
+            text = str(raw_value).strip()
+            if text:
+                parts.append(text)
+        return " ".join(parts).strip()
 
     def download_data(self) -> None:
         """Download the dataset from HuggingFace Hub."""

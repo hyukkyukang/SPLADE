@@ -237,7 +237,7 @@ def _log_to_mlflow(
         mlflow.set_tracking_uri(tracking_uri)
 
     experiment_name: str = (
-        normalize_optional_str(mlflow_cfg.get("experiment_name")) or "MTEB"
+        normalize_optional_str(mlflow_cfg.get("experiment_name")) or "Eval-MTEB"
     )
     run_name: str | None = normalize_optional_str(mlflow_cfg.get("run_name"))
     mlflow.set_experiment(experiment_name)

@@ -63,6 +63,33 @@ def tokenize_text(
     return input_ids, attention_mask
 
 
+def tokenize_text_windows(
+    tokenizer: PreTrainedTokenizerBase,
+    text: str,
+    *,
+    max_length: int,
+    max_padding: bool | None = None,
+    overlap_tokens: int = 0,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    resolved_padding: str | bool = _resolve_padding(max_padding=max_padding)
+    overlap: int = max(0, int(overlap_tokens))
+    tokens: dict[str, torch.Tensor] = tokenizer(
+        text,
+        padding=resolved_padding,
+        truncation=True,
+        max_length=int(max_length),
+        stride=overlap,
+        return_overflowing_tokens=True,
+        return_tensors="pt",
+    )
+    input_ids: torch.Tensor = tokens["input_ids"]
+    attention_mask: torch.Tensor = tokens["attention_mask"]
+    if input_ids.ndim == 1:
+        input_ids = input_ids.unsqueeze(0)
+        attention_mask = attention_mask.unsqueeze(0)
+    return input_ids, attention_mask
+
+
 def tokenize_docs(
     tokenizer: PreTrainedTokenizerBase,
     docs: Iterable[str],

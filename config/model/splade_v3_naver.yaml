@@ -1,0 +1,10 @@
+# @package model
+defaults:
+  - _base
+
+name: splade_v3_naver
+huggingface_name: naver/splade-v3
+tie_word_embeddings: false
+query_pooling: max
+doc_pooling: max
+sparse_activation: log1p_relu

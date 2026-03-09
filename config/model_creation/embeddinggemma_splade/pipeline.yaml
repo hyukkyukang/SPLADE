@@ -1,0 +1,13 @@
+python_bin: python
+vocab_script: script/model_creation/embeddinggemma_splade/build_target_vocab.py
+vocab_config: config/model_creation/embeddinggemma_splade/vocab.yaml
+backbone_script: script/model_creation/embeddinggemma_splade/build_hf_backbone.py
+backbone_config: config/model_creation/embeddinggemma_splade/hf_backbone.yaml
+
+run_vocab: true
+run_backbone: true
+selection_only: false
+skip_vocab_if_cache_exists: false
+print_commands_only: false
+run_log_dir: outputs/model_creation/embeddinggemma_splade/pipeline_runs
+run_name: null

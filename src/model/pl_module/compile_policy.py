@@ -10,6 +10,7 @@ from src.model.pl_module.utils import (
 )
 from src.utils.logging import log_if_rank_zero
 from src.utils.normalize import normalize_optional_str
+from src.utils.trainer import resolve_effective_distributed_settings
 
 
 class _SharedCompiledEncoderAdapter(torch.nn.Module):
@@ -136,20 +137,14 @@ class TrainingCompilePolicyManager:
         )
         self.loss_compile_mode_kwargs = dict(compile_mode_kwargs)
 
-        strategy_name: str = str(cfg.training.get("strategy", "")).lower()
-        raw_num_devices: Any = cfg.training.get("num_devices", 1)
-        try:
-            configured_num_devices = (
-                1 if raw_num_devices is None else int(raw_num_devices)
-            )
-        except (TypeError, ValueError):
-            configured_num_devices = 1
-        ddp_enabled: bool = ("ddp" in strategy_name) or (configured_num_devices > 1)
+        runtime_settings = resolve_effective_distributed_settings(cfg.training)
         encoder_obj: Any = getattr(self.model, "encoder", None)
         freeze_backbone: bool = bool(getattr(encoder_obj, "freeze_backbone", False))
-        # Query/doc encoder wrappers share one encoder module. Under unfrozen DDP,
-        # compiling wrappers separately can be unstable; compile shared encoder once.
-        if ddp_enabled and not freeze_backbone:
+        doc_only_enabled: bool = bool(getattr(self.model, "doc_only", False))
+        # Query/doc encoder wrappers share one encoder module. Under unfrozen
+        # distributed training, compiling wrappers separately can be unstable;
+        # compile the shared encoder once.
+        if runtime_settings.distributed_enabled and not freeze_backbone:
             shared_encoder_kwargs: dict[str, Any] = dict(compile_mode_kwargs)
             self.loss_compile_mode_kwargs = dict(shared_encoder_kwargs)
             self._eager_query_encoder_fn = self.model._query_encoder_wrapper
@@ -170,7 +165,8 @@ class TrainingCompilePolicyManager:
                 self.loss_compile_mode_kwargs = dict(safe_loss_compile_kwargs)
                 log_if_rank_zero(
                     self.logger,
-                    "Shared-encoder torch.compile setup failed for unfrozen DDP "
+                    "Shared-encoder torch.compile setup failed for unfrozen "
+                    "distributed training "
                     f"({exc!r}); continuing with eager encoder wrappers and "
                     "loss-only compile fallback.",
                     level="warning",
@@ -192,7 +188,8 @@ class TrainingCompilePolicyManager:
             )
             log_if_rank_zero(
                 self.logger,
-                "Enabled shared-encoder torch.compile for unfrozen DDP and "
+                "Enabled shared-encoder torch.compile for unfrozen distributed "
+                "training and "
                 "disabled dual-wrapper compilation; this avoids the unstable path "
                 "where the same trainable encoder is compiled twice (can segfault).",
                 level="warning",
@@ -325,24 +322,31 @@ class TrainingCompilePolicyManager:
                 "compile mode overrides are enabled.",
                 level="warning",
             )
-        if compile_full_model:
-            static_graph_enabled: bool = bool(cfg.training.static_graph)
-            find_unused_parameters: bool = bool(
-                cfg.training.get("find_unused_parameters", False)
+        if compile_full_model and doc_only_enabled:
+            compile_full_model = False
+            log_if_rank_zero(
+                self.logger,
+                "Falling back to wrapper-only torch.compile because model.doc_only "
+                "uses a bag-of-words query path that is not safe for full-model "
+                "compile.",
+                level="warning",
             )
-            if (not static_graph_enabled) or find_unused_parameters:
+        if compile_full_model:
+            if not runtime_settings.full_model_compile_safe:
                 compile_full_model = False
                 log_if_rank_zero(
                     self.logger,
                     "Falling back to wrapper-only torch.compile despite "
-                    f"mode={compile_mode!r} because training.static_graph="
-                    f"{static_graph_enabled} and "
-                    "training.find_unused_parameters="
-                    f"{find_unused_parameters}. This keeps max-autotune enabled "
-                    "while avoiding the full-model cudagraph path that is unstable "
-                    "under dynamic DDP settings.",
+                    f"mode={compile_mode!r} because the effective runtime settings "
+                    "do not permit the full-model cudagraph path "
+                    f"(static_graph={runtime_settings.static_graph}, "
+                    "find_unused_parameters="
+                    f"{runtime_settings.find_unused_parameters}). This keeps "
+                    "max-autotune enabled while avoiding the unstable path under "
+                    "dynamic distributed settings.",
                     level="warning",
                 )
+        skip_query_compile_for_doc_only: bool = doc_only_enabled
         self.loss_compile_mode_kwargs = dict(loss_compile_mode_kwargs)
         if compile_full_model:
             self.torch_compile_mark_step = resolve_cudagraph_mark_step()
@@ -366,9 +370,14 @@ class TrainingCompilePolicyManager:
         self._compiled_query_encoder_fn = self._compile_wrapper(
             query_wrapper,
             compile_kwargs=query_compile_mode_kwargs,
-            skip_compile=skip_query_compile_for_large_vocab,
+            skip_compile=(
+                skip_query_compile_for_large_vocab or skip_query_compile_for_doc_only
+            ),
             skip_message=(
-                "Skipping torch.compile for query encoder wrapper under "
+                "Skipping torch.compile for query encoder wrapper because "
+                "model.doc_only uses a bag-of-words query path."
+                if skip_query_compile_for_doc_only
+                else "Skipping torch.compile for query encoder wrapper under "
                 "large-vocab max-autotune safety mode."
             ),
         )
@@ -406,24 +415,15 @@ class TrainingCompilePolicyManager:
         self,
         *,
         use_compiled: bool,
-        eager_loss_computer: Any | None = None,
-        compiled_loss_computer: Any | None = None,
-    ) -> Any | None:
-        active_loss_computer: Any | None = None
-        if eager_loss_computer is not None:
-            if use_compiled and compiled_loss_computer is not None:
-                active_loss_computer = compiled_loss_computer
-            else:
-                active_loss_computer = eager_loss_computer
-
+    ) -> None:
         if not self.torch_compile_enabled:
             self.compile_enabled_for_current_stage = False
-            return active_loss_computer
+            return
         if self.torch_compile_full_model:
             self.compile_enabled_for_current_stage = bool(
                 use_compiled and self.compiled_model is not None
             )
-            return active_loss_computer
+            return
 
         if use_compiled:
             if (
@@ -431,19 +431,19 @@ class TrainingCompilePolicyManager:
                 or self._compiled_doc_encoder_fn is None
             ):
                 self.compile_enabled_for_current_stage = False
-                return active_loss_computer
+                return
             self.model._query_encoder_fn = self._compiled_query_encoder_fn
             self.model._doc_encoder_fn = self._compiled_doc_encoder_fn
             self.compile_enabled_for_current_stage = True
-            return active_loss_computer
+            return
 
         if self._eager_query_encoder_fn is None or self._eager_doc_encoder_fn is None:
             self.compile_enabled_for_current_stage = False
-            return active_loss_computer
+            return
         self.model._query_encoder_fn = self._eager_query_encoder_fn
         self.model._doc_encoder_fn = self._eager_doc_encoder_fn
         self.compile_enabled_for_current_stage = False
-        return active_loss_computer
+        return
 
     def maybe_mark_step(self) -> None:
         if (

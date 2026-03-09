@@ -403,6 +403,8 @@ def build_inverted_index_from_shards(
         indptr: np.ndarray = np.load(shard.indptr_path)
         indices: np.ndarray = np.load(shard.indices_path)
         values: np.ndarray = np.load(shard.values_path)
+        if values.dtype != value_dtype:
+            values = values.astype(value_dtype, copy=False)
         _fill_postings(
             indptr=indptr,
             indices=indices,

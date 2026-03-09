@@ -27,6 +27,7 @@ class HydraConfigCompositionTest(unittest.TestCase):
         self.assertEqual(str(cfg.training.torch_compile_validation_mode), "default")
         self.assertIn("train_dataset", cfg)
         self.assertIn("val_dataset", cfg)
+        self.assertEqual(str(cfg.training.mlflow.experiment_name), "Train-SPLADE")
 
     def test_train_embeddinggemma_matrix_composes(self) -> None:
         cfg = self._compose(
@@ -80,6 +81,17 @@ class HydraConfigCompositionTest(unittest.TestCase):
         self.assertEqual(str(cfg.model.name), "splade_v2_pp")
         self.assertEqual(str(cfg.evaluation.type), "retrieval")
 
+    def test_default_msmarco_evaluation_uses_validation_qrels(self) -> None:
+        cfg = self._compose(
+            config_name="evaluate",
+            overrides=[],
+        )
+        self.assertEqual(str(cfg.dataset.name), "msmarco")
+        self.assertEqual(str(cfg.dataset.type), "beir")
+        self.assertEqual(str(cfg.dataset.qrels_hf_split), "validation")
+        self.assertEqual(str(cfg.mlflow.experiment_name), "Eval-MSMARCO")
+        self.assertTrue(bool(cfg.mlflow.enabled))
+
     def test_nanobeir_evaluation_config_uses_nanobeir_experiment(self) -> None:
         cfg = self._compose(
             config_name="evaluate_nanobeir",
@@ -88,12 +100,12 @@ class HydraConfigCompositionTest(unittest.TestCase):
         self.assertEqual(str(cfg.mlflow.experiment_name), "NanoBEIR")
         self.assertTrue(bool(cfg.mlflow.enabled))
 
-    def test_mteb_evaluation_config_uses_mteb_experiment(self) -> None:
+    def test_mteb_evaluation_config_uses_eval_mteb_experiment(self) -> None:
         cfg = self._compose(
             config_name="evaluate_mteb",
             overrides=["model=splade_v2_pp"],
         )
-        self.assertEqual(str(cfg.mlflow.experiment_name), "MTEB")
+        self.assertEqual(str(cfg.mlflow.experiment_name), "Eval-MTEB")
         self.assertTrue(bool(cfg.mlflow.enabled))
 
 

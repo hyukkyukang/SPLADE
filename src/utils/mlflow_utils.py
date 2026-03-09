@@ -1,5 +1,7 @@
 import logging
 import os
+import re
+from importlib.util import find_spec
 from collections.abc import Callable
 from typing import Any
 
@@ -103,6 +105,51 @@ def build_mlflow_dataset_input_from_metadata(
     return DatasetInput(
         dataset=dataset_entity,
         tags=[InputTag("mlflow.data.context", context)],
+    )
+
+
+def resolve_mlflow_logged_model_name(model_cfg: Any) -> str:
+    """Resolve the MLflow logged-model display name from model config."""
+    hf_model_name: str | None = normalize_optional_str(model_cfg.get("huggingface_name"))
+    model_name: str | None = normalize_optional_str(model_cfg.get("name"))
+    hf_model_leaf: str | None = None
+    if hf_model_name is not None:
+        hf_model_name = hf_model_name.rstrip("/\\")
+        hf_model_leaf = os.path.basename(hf_model_name) or hf_model_name
+
+    search_fields: list[str] = [
+        value
+        for value in (hf_model_name, hf_model_leaf, model_name)
+        if value is not None
+    ]
+    canonical_backbone_patterns: tuple[tuple[str, str], ...] = (
+        (r"modernbert[-_]?base", "ModernBERT-base"),
+        (r"modernbert[-_]?large", "ModernBERT-large"),
+        (r"embeddinggemma[-_]?300m", "EmbeddingGemma-300M"),
+        (r"embeddinggemma[-_]?2b", "EmbeddingGemma-2B"),
+        (r"distilbert[-_]?base[-_]?uncased", "DistilBERT-base-uncased"),
+        (r"co[-_]?condenser[-_]?marco", "CoCondenser-Marco"),
+        (r"anna[-_./\\]?large|anna_large_hf|trained_anna_large", "ANNA-large"),
+        (r"anna[-_./\\]?base|anna_base_hf|trained_anna_base", "ANNA-base"),
+        (r"(^|[\\/._-])anna([\\/._-]|$)", "ANNA-base"),
+        (r"bert[-_]?base[-_]?uncased", "BERT-base-uncased"),
+        (r"bert[-_]?large[-_]?uncased", "BERT-large-uncased"),
+    )
+    field: str
+    pattern: str
+    display_name: str
+    for field in search_fields:
+        for pattern, display_name in canonical_backbone_patterns:
+            if re.search(pattern, field, flags=re.IGNORECASE):
+                return display_name
+
+    if hf_model_leaf is not None:
+        return hf_model_leaf
+    if model_name is not None:
+        return model_name
+    raise ValueError(
+        "cfg.model.huggingface_name or cfg.model.name must be a non-empty string "
+        "for MLflow model logging."
     )
 
 
@@ -222,6 +269,66 @@ def is_truthy_env_flag(value: str | None) -> bool:
     if value is None:
         return False
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _resolve_mlflow_gpu_monitor_dependency() -> tuple[str, str] | None:
+    """Return the module/package pair MLflow needs for GPU system metrics."""
+    try:
+        import torch
+    except Exception:
+        return None
+
+    cuda_api: Any = getattr(torch, "cuda", None)
+    is_available_fn: Any = getattr(cuda_api, "is_available", None)
+    if not callable(is_available_fn) or not bool(is_available_fn()):
+        return None
+
+    torch_version: Any = getattr(torch, "version", None)
+    hip_version: Any = getattr(torch_version, "hip", None)
+    if hip_version:
+        return "pyrsmi", "pyrsmi"
+    return "pynvml", "nvidia-ml-py"
+
+
+def warn_if_mlflow_gpu_metrics_unavailable(
+    *,
+    mlflow_cfg: Any,
+    logger: logging.Logger,
+    is_logging_rank_zero: Callable[[], bool],
+) -> None:
+    """Warn when GPU metrics are enabled but MLflow lacks its GPU monitor dependency."""
+    if not is_logging_rank_zero():
+        return
+
+    system_metrics_enabled: bool | None = normalize_optional_bool(
+        mlflow_cfg.get("system_metrics_enabled")
+    )
+    if system_metrics_enabled is None and not is_truthy_env_flag(
+        os.environ.get("MLFLOW_ENABLE_SYSTEM_METRICS_LOGGING")
+    ):
+        return
+    if system_metrics_enabled is False:
+        return
+
+    gpu_monitor_dependency: tuple[str, str] | None = (
+        _resolve_mlflow_gpu_monitor_dependency()
+    )
+    if gpu_monitor_dependency is None:
+        return
+
+    module_name: str
+    package_name: str
+    module_name, package_name = gpu_monitor_dependency
+    if find_spec(module_name) is not None:
+        return
+
+    log_if_rank_zero(
+        logger,
+        "MLflow system metrics are enabled, but GPU metrics are unavailable because "
+        f"`{package_name}` is not installed. Install `{package_name}` to log GPU "
+        "utilization, memory, and power metrics.",
+        level="warning",
+    )
 
 
 def start_mlflow_system_metrics_monitor(

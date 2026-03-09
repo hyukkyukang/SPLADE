@@ -100,7 +100,7 @@ class RetrievalDataItem:
     qid: str
     relevance_judgments: Dict[str, float]
     query_text: str
-    # Shape: (seq_len,)
+    # Shape: (num_windows, seq_len)
     query_input_ids: torch.Tensor
     query_attention_mask: torch.Tensor
 
@@ -111,7 +111,7 @@ class EncodingDataItem:
 
     data_idx: int
     doc_id: str
-    # Shape: (seq_len,)
+    # Shape: (num_windows, seq_len)
     doc_input_ids: torch.Tensor
     doc_attention_mask: torch.Tensor
 

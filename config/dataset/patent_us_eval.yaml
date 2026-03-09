@@ -1,0 +1,31 @@
+# @package dataset
+defaults:
+  - _base@_here_
+
+name: patent_us_eval
+type: beir
+split: test
+corpus_split: train
+max_query_length: 512
+max_doc_length: 512
+query_long_doc_strategy: sliding_window
+query_sliding_window_overlap_tokens: 0
+
+query_corpus_hf_name: parquet
+query_hf_data_files:
+  test: data/eval/patent_us/queries.parquet
+corpus_hf_data_files:
+  train: .cache/hf/patent-us-corpus/patent_us_docs_slice*.parquet
+
+query_id_column: query_id
+query_text_column: text
+corpus_id_column: doc_id
+corpus_title_column: title
+corpus_text_column: abstract
+corpus_additional_text_columns:
+  - claims
+
+qrels_hf_name: parquet
+qrels_hf_split: test
+qrels_hf_data_files:
+  test: data/eval/patent_us/qrels.parquet

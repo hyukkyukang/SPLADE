@@ -13,7 +13,7 @@ from transformers import PreTrainedTokenizerBase
 from src.data.collator import UniversalCollator
 from src.data.dataclass import RetrievalDataItem
 from src.data.pd_module import PDModule
-from src.data.pd_module.utils import tokenize_text
+from src.data.pd_module.utils import tokenize_text, tokenize_text_windows
 from src.data.utils import resolve_dataset_column
 from src.utils.dist import is_rank_zero, maybe_barrier
 from src.utils.logging import get_logger, log_if_rank_zero
@@ -98,6 +98,18 @@ class RetrievalPDModule(PDModule):
         self._query_id_to_idx: dict[str, int] = {}
         self._qrels: Dict[str, Dict[str, float]] = {}
         self._qrels_dataset: Dataset | None = None
+        long_query_strategy_value: str = str(
+            self.cfg.get("query_long_doc_strategy", "truncate")
+        ).lower()
+        if long_query_strategy_value not in {"truncate", "sliding_window"}:
+            raise ValueError(
+                "dataset.query_long_doc_strategy must be 'truncate' or "
+                f"'sliding_window'. Got: {long_query_strategy_value}"
+            )
+        self._query_long_doc_strategy: str = long_query_strategy_value
+        self._query_sliding_window_overlap_tokens: int = max(
+            0, int(self.cfg.get("query_sliding_window_overlap_tokens", 0))
+        )
 
     def __len__(self) -> int:
         self._ensure_query_index()
@@ -110,12 +122,25 @@ class RetrievalPDModule(PDModule):
         query_text: str = self.dataset.query_text(query_idx)
         query_input_ids: torch.Tensor
         query_attention_mask: torch.Tensor
-        query_input_ids, query_attention_mask = tokenize_text(
-            self.tokenizer,
-            query_text,
-            max_length=self.max_query_length,
-            padding=True,
-        )
+        if self._query_long_doc_strategy == "sliding_window":
+            query_input_ids, query_attention_mask = tokenize_text_windows(
+                self.tokenizer,
+                query_text,
+                max_length=self.max_query_length,
+                max_padding=self.max_padding,
+                overlap_tokens=self._query_sliding_window_overlap_tokens,
+            )
+        else:
+            single_input_ids: torch.Tensor
+            single_attention_mask: torch.Tensor
+            single_input_ids, single_attention_mask = tokenize_text(
+                self.tokenizer,
+                query_text,
+                max_length=self.max_query_length,
+                max_padding=self.max_padding,
+            )
+            query_input_ids = single_input_ids.unsqueeze(0)
+            query_attention_mask = single_attention_mask.unsqueeze(0)
         return RetrievalDataItem(
             data_idx=int(idx),
             qid=qid,

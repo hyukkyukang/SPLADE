@@ -1,5 +1,8 @@
 # EmbeddingGemma SPLADE Native Workflow
 
+For the detailed build and rerun guide, see
+`doc/embeddinggemma_lsr_build_pipeline.md`.
+
 This workflow keeps model creation separate from training:
 
 1. Build a target vocabulary from corpus statistics.

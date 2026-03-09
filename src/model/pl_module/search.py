@@ -130,13 +130,17 @@ class RetrievalSearchLightningModule(L.LightningModule):
         query_attention_mask: torch.Tensor = batch["query_attention_mask"].to(
             self.device
         )
+        query_indptr: torch.Tensor = batch["query_indptr"]
         query_reps: torch.Tensor = self._retrieval_helper.encode_queries(
             self.model,
             query_input_ids,
             query_attention_mask,
             self._torch_compile_mark_step,
+            query_indptr=query_indptr,
         )
-        scored_results = self._retrieval_helper.score_queries(query_reps)
+        scored_results = self._retrieval_helper.score_queries(
+            query_reps, query_ids=qids
+        )
         for i, relevance_judgments in enumerate(relevance_judgments_list):
             selected_doc_ids, _ = scored_results[i]
 

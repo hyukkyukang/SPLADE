@@ -92,24 +92,29 @@ class RetrievalEvalLightningModule(L.LightningModule):
     ) -> None:
         _ = batch_idx
 
+        qids: List[str] = batch["qid"]
         relevance_judgments_list: List[Dict[str, int]] = batch["relevance_judgments"]
         query_input_ids: torch.Tensor = batch["query_input_ids"].to(self.device)
         query_attention_mask: torch.Tensor = batch["query_attention_mask"].to(
             self.device
         )
+        query_indptr: torch.Tensor = batch["query_indptr"]
         query_reps: torch.Tensor = self._retrieval_helper.encode_queries(
             self.model,
             query_input_ids,
             query_attention_mask,
             self._torch_compile_mark_step,
+            query_indptr=query_indptr,
         )
-        scored_results = self._retrieval_helper.score_queries(query_reps)
+        scored_results = self._retrieval_helper.score_queries(
+            query_reps, query_ids=qids
+        )
 
         world_size: int = int(self.trainer.world_size)
         global_rank: int = int(self.trainer.global_rank)
         base_offset: int = self._local_query_offset
         # Track per-rank progress to keep unique global indexes across batches.
-        batch_size: int = int(query_input_ids.shape[0])
+        batch_size: int = len(qids)
         self._local_query_offset += batch_size
 
         for i, relevance_judgments in enumerate(relevance_judgments_list):

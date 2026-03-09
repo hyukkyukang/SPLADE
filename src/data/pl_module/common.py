@@ -1,12 +1,36 @@
+import math
 from typing import Any, Callable
 
 import torch
 from omegaconf import DictConfig
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, Sampler
 from torch.utils.data.distributed import DistributedSampler
 from transformers import PreTrainedTokenizerBase
 
 from src.utils.transformers import build_tokenizer
+
+
+class ContiguousDistributedSampler(Sampler[int]):
+    """Distributed sampler that assigns contiguous index ranges per rank."""
+
+    def __init__(self, dataset: Dataset[Any]) -> None:
+        if not (torch.distributed.is_available() and torch.distributed.is_initialized()):
+            raise RuntimeError("torch.distributed must be initialized.")
+        self.dataset: Dataset[Any] = dataset
+        self.rank: int = int(torch.distributed.get_rank())
+        self.num_replicas: int = int(torch.distributed.get_world_size())
+        self.dataset_len: int = int(len(dataset))
+        self.num_samples: int = int(math.ceil(self.dataset_len / self.num_replicas))
+        start: int = (self.dataset_len * self.rank) // self.num_replicas
+        end: int = (self.dataset_len * (self.rank + 1)) // self.num_replicas
+        self.start_idx: int = start
+        self.end_idx: int = end
+
+    def __iter__(self):
+        return iter(range(self.start_idx, self.end_idx))
+
+    def __len__(self) -> int:
+        return self.end_idx - self.start_idx
 
 
 def build_model_tokenizer(model_cfg: DictConfig) -> PreTrainedTokenizerBase:
@@ -24,10 +48,12 @@ def build_model_tokenizer(model_cfg: DictConfig) -> PreTrainedTokenizerBase:
 
 def build_distributed_sampler(
     dataset: Dataset[Any], *, shuffle: bool
-) -> DistributedSampler | None:
+) -> Sampler[int] | None:
     """Build a distributed sampler when torch.distributed is initialized."""
     if not (torch.distributed.is_available() and torch.distributed.is_initialized()):
         return None
+    if not shuffle:
+        return ContiguousDistributedSampler(dataset)
     return DistributedSampler(dataset, shuffle=shuffle)
 
 
@@ -47,7 +73,7 @@ def build_inference_dataloader(
     sampler_shuffle: bool = (
         bool(distributed_shuffle) if distributed_shuffle is not None else bool(shuffle)
     )
-    sampler: DistributedSampler | None = build_distributed_sampler(
+    sampler: Sampler[int] | None = build_distributed_sampler(
         dataset, shuffle=sampler_shuffle
     )
     dataloader_kwargs: dict[str, Any] = {

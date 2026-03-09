@@ -5,17 +5,37 @@ import torch
 class TrainingMetricsService:
     """Own logging policy for training-step metrics."""
 
-    def __init__(self, *, step_only_metric_log_interval: int = 1) -> None:
+    def __init__(
+        self,
+        *,
+        step_only_metric_log_interval: int = 1,
+        validation_diagnostics_enabled: bool = True,
+        validation_diagnostics_log_interval: int = 1,
+    ) -> None:
         self.step_only_metric_log_interval: int = max(
             int(step_only_metric_log_interval), 1
         )
+        self.validation_diagnostics_enabled: bool = bool(
+            validation_diagnostics_enabled
+        )
+        self.validation_diagnostics_log_interval: int = max(
+            int(validation_diagnostics_log_interval), 1
+        )
 
-    def _should_log_step_only_metrics(self, module: L.LightningModule) -> bool:
+    def should_compute_step_only_metrics(self, module: L.LightningModule) -> bool:
         interval: int = self.step_only_metric_log_interval
         if interval <= 1:
             return True
         global_step: int = int(getattr(module, "global_step", 0))
         return global_step % interval == 0
+
+    def should_compute_validation_diagnostics(self, *, batch_idx: int) -> bool:
+        if not self.validation_diagnostics_enabled:
+            return False
+        interval: int = self.validation_diagnostics_log_interval
+        if interval <= 1:
+            return True
+        return int(batch_idx) % interval == 0
 
     def log_training_metrics(
         self, module: L.LightningModule, metrics: dict[str, torch.Tensor]
@@ -23,7 +43,7 @@ class TrainingMetricsService:
         detached_metrics: dict[str, torch.Tensor] = {
             name: value.detach() for name, value in metrics.items()
         }
-        should_log_step_only: bool = self._should_log_step_only_metrics(module)
+        should_log_step_only: bool = self.should_compute_step_only_metrics(module)
         module.log(
             "train_loss",
             detached_metrics["loss"],

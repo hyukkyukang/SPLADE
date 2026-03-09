@@ -15,6 +15,14 @@ def resolve_dataset_column(dataset: Any, column_name: str) -> pa.Array:
     column, which ignores any _indices from filtering. This function resolves the
     correct column values by applying _indices when present.
     """
+    if hasattr(dataset, "get_column"):
+        column = dataset.get_column(column_name)
+        if not isinstance(column, (pa.Array, pa.ChunkedArray)):
+            raise TypeError(
+                f"dataset.get_column({column_name!r}) must return a PyArrow column."
+            )
+        return column
+
     column: pa.Array | pa.ChunkedArray = dataset.data.column(column_name)
 
     # Apply _indices if the dataset was filtered to preserve row alignment.

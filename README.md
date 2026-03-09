@@ -30,6 +30,7 @@ Datasets default to the Hugging Face Hub; dataset configs live in
 - Command cookbook: `doc/analysis/command_cookbook.md`
 - Debug runbook: `doc/analysis/debug_runbook.md`
 - Baseline command matrix: `doc/analysis/baseline_command_matrix.md`
+- EmbeddingGemma build pipeline: `doc/embeddinggemma_lsr_build_pipeline.md`
 
 ## Train
 
@@ -130,9 +131,11 @@ Train with explicit MLflow tracking settings:
 
 ```
 python script/train.py \
-  training.mlflow.experiment_name=SPLADE \
   training.mlflow.tracking_uri=http://127.0.0.1:5000
 ```
+
+MLflow GPU system metrics use NVML via `nvidia-ml-py`. If GPU utilization or
+memory metrics are missing, refresh the environment with `pip install -r requirements.txt`.
 
 Resume an interrupted training run from a Lightning checkpoint:
 

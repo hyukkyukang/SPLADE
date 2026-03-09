@@ -14,7 +14,9 @@ class LossComputationOutputs:
     pairwise_loss: torch.Tensor
     in_batch_loss: torch.Tensor
     distill_loss: torch.Tensor
-    distill_losses: dict[str, torch.Tensor]
+    distill_mse_loss: torch.Tensor
+    distill_kl_loss: torch.Tensor
+    distill_margin_mse_loss: torch.Tensor
     q_reg: torch.Tensor
     d_reg: torch.Tensor
     lambda_scale_value: float
@@ -34,6 +36,11 @@ class LossRegularizationService:
         self.loss_type: str = str(self.loss_cfg.type).lower()
         self.in_batch_weight: float = float(self.loss_cfg.get("in_batch_weight", 1.0))
         self.pairwise_weight: float = float(self.loss_cfg.get("pairwise_weight", 1.0))
+        self._resolved_distill_losses: tuple[tuple[str, float], ...] = (
+            tuple(self._resolve_distill_losses())
+            if bool(self.distill_cfg.enabled)
+            else tuple()
+        )
 
         reg_weight_value: float | None = self.reg_cfg.weight
         if reg_weight_value is None:
@@ -46,24 +53,39 @@ class LossRegularizationService:
 
     def _resolve_distill_losses(self) -> list[tuple[str, float]]:
         distill_losses_cfg: Any | None = self.distill_cfg.losses
-        distill_losses: list[tuple[str, float]] = []
+        aggregated_weights: dict[str, float] = {
+            "mse": 0.0,
+            "kl": 0.0,
+            "margin_mse": 0.0,
+        }
         if distill_losses_cfg is None:
-            return distill_losses
+            return []
         for entry in distill_losses_cfg:
-            loss_type: str = str(entry.type)
+            loss_type: str = str(entry.type).replace("-", "_").lower()
             loss_weight: float = float(entry.weight)
-            distill_losses.append((loss_type, loss_weight))
-        return distill_losses
+            if loss_weight == 0.0:
+                continue
+            if loss_type not in aggregated_weights:
+                raise ValueError(f"Unsupported distillation loss: {entry.type}")
+            aggregated_weights[loss_type] += loss_weight
+        return [
+            (loss_type, loss_weight)
+            for loss_type, loss_weight in aggregated_weights.items()
+            if loss_weight != 0.0
+        ]
 
-    def build_loss_computer(self) -> LossComputer:
+    def build_loss_computer(self, *, loss_type: str | None = None) -> LossComputer:
+        resolved_loss_type: str = (
+            self.loss_type if loss_type is None else str(loss_type).lower()
+        )
         return LossComputer(
-            loss_type=self.loss_type,
+            loss_type=resolved_loss_type,
             temperature=self.temperature,
             distill_enabled=bool(self.distill_cfg.enabled),
             include_main_loss_when_distilling=bool(
                 self.distill_cfg.get("include_main_loss", False)
             ),
-            distill_losses=self._resolve_distill_losses(),
+            distill_losses=list(self._resolved_distill_losses),
             reg_query_weight=self.reg_query_weight,
             reg_doc_weight=self.reg_doc_weight,
             reg_type=str(self.reg_cfg.type),
@@ -85,6 +107,23 @@ class LossRegularizationService:
         )
         return progress * progress
 
+    def iter_enabled_distill_metric_tensors(
+        self, outputs: LossComputationOutputs
+    ) -> tuple[tuple[str, torch.Tensor], ...]:
+        enabled_metrics: list[tuple[str, torch.Tensor]] = []
+        for loss_type, _weight in self._resolved_distill_losses:
+            if loss_type == "mse":
+                enabled_metrics.append((loss_type, outputs.distill_mse_loss))
+                continue
+            if loss_type == "kl":
+                enabled_metrics.append((loss_type, outputs.distill_kl_loss))
+                continue
+            if loss_type == "margin_mse":
+                enabled_metrics.append((loss_type, outputs.distill_margin_mse_loss))
+                continue
+            raise ValueError(f"Unsupported distillation loss: {loss_type}")
+        return tuple(enabled_metrics)
+
     def compute_loss(
         self,
         *,
@@ -94,7 +133,6 @@ class LossRegularizationService:
         pos_mask: torch.Tensor,
         doc_mask: torch.Tensor,
         teacher_scores: torch.Tensor,
-        stage: str,
         global_step: int,
     ) -> LossComputationOutputs:
         lambda_scale_value: float = self.lambda_schedule_multiplier(global_step)
@@ -111,7 +149,9 @@ class LossRegularizationService:
             pairwise_loss,
             in_batch_loss,
             distill_loss,
-            distill_losses,
+            distill_mse_loss,
+            distill_kl_loss,
+            distill_margin_mse_loss,
             q_reg,
             d_reg,
         ) = loss_computer(
@@ -121,8 +161,6 @@ class LossRegularizationService:
             doc_mask=doc_mask,
             teacher_scores=teacher_scores,
             lambda_scale=lambda_scale,
-            # Keep validation candidate pools query-local for stable comparisons.
-            main_loss_type_override="pairwise" if stage == "val" else None,
         )
         return LossComputationOutputs(
             loss=loss,
@@ -130,7 +168,9 @@ class LossRegularizationService:
             pairwise_loss=pairwise_loss,
             in_batch_loss=in_batch_loss,
             distill_loss=distill_loss,
-            distill_losses=distill_losses,
+            distill_mse_loss=distill_mse_loss,
+            distill_kl_loss=distill_kl_loss,
+            distill_margin_mse_loss=distill_margin_mse_loss,
             q_reg=q_reg,
             d_reg=d_reg,
             lambda_scale_value=lambda_scale_value,

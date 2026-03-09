@@ -26,6 +26,7 @@ class EncodeDataModule(L.LightningDataModule):
         if self._dataset is None:
             self._dataset = EncodePDModule(
                 cfg=self.cfg.dataset,
+                encoding_cfg=self.cfg.encoding,
                 tokenizer=self.tokenizer,
                 seed=int(self.cfg.seed),
             )

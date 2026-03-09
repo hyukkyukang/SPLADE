@@ -1,6 +1,5 @@
 import logging
 import os
-import re
 from datetime import datetime
 from typing import Any
 
@@ -33,8 +32,10 @@ from src.utils.mlflow_utils import (
     has_logged_mlflow_dataset_inputs,
     has_logged_mlflow_model_outputs,
     log_mlflow_model_output,
+    resolve_mlflow_logged_model_name as resolve_mlflow_logged_model_name_impl,
     resolve_mlflow_tags,
     start_mlflow_system_metrics_monitor,
+    warn_if_mlflow_gpu_metrics_unavailable,
 )
 from src.utils.normalize import normalize_optional_bool
 from src.utils.progress_bar import StepAwareRichProgressBar
@@ -169,47 +170,7 @@ def _resolve_mlflow_run_name(training_cfg: DictConfig, tag_value: str | None) ->
 
 def _resolve_mlflow_logged_model_name(model_cfg: DictConfig) -> str:
     """Resolve the MLflow logged-model display name from model config."""
-    hf_model_name: str | None = normalize_optional_str(model_cfg.get("huggingface_name"))
-    model_name: str | None = normalize_optional_str(model_cfg.get("name"))
-    hf_model_leaf: str | None = None
-    if hf_model_name is not None:
-        hf_model_name = hf_model_name.rstrip("/\\")
-        hf_model_leaf = os.path.basename(hf_model_name) or hf_model_name
-
-    search_fields: list[str] = [
-        value
-        for value in (hf_model_name, hf_model_leaf, model_name)
-        if value is not None
-    ]
-    canonical_backbone_patterns: tuple[tuple[str, str], ...] = (
-        (r"modernbert[-_]?base", "ModernBERT-base"),
-        (r"modernbert[-_]?large", "ModernBERT-large"),
-        (r"embeddinggemma[-_]?300m", "EmbeddingGemma-300M"),
-        (r"embeddinggemma[-_]?2b", "EmbeddingGemma-2B"),
-        (r"distilbert[-_]?base[-_]?uncased", "DistilBERT-base-uncased"),
-        (r"co[-_]?condenser[-_]?marco", "CoCondenser-Marco"),
-        (r"anna[-_./\\]?large|anna_large_hf|trained_anna_large", "ANNA-large"),
-        (r"anna[-_./\\]?base|anna_base_hf|trained_anna_base", "ANNA-base"),
-        (r"(^|[\\/._-])anna([\\/._-]|$)", "ANNA-base"),
-        (r"bert[-_]?base[-_]?uncased", "BERT-base-uncased"),
-        (r"bert[-_]?large[-_]?uncased", "BERT-large-uncased"),
-    )
-    field: str
-    pattern: str
-    display_name: str
-    for field in search_fields:
-        for pattern, display_name in canonical_backbone_patterns:
-            if re.search(pattern, field, flags=re.IGNORECASE):
-                return display_name
-
-    if hf_model_leaf is not None:
-        return hf_model_leaf
-    if model_name is not None:
-        return model_name
-    raise ValueError(
-        "cfg.model.huggingface_name or cfg.model.name must be a non-empty string "
-        "for MLflow model logging."
-    )
+    return resolve_mlflow_logged_model_name_impl(model_cfg)
 
 
 def _build_mlflow_tags(
@@ -343,10 +304,16 @@ def _build_lightning_loggers(
     if mlflow_enabled is False:
         return loggers, None
     configure_mlflow_tls(mlflow_cfg)
+    warn_if_mlflow_gpu_metrics_unavailable(
+        mlflow_cfg=mlflow_cfg,
+        logger=logger,
+        is_logging_rank_zero=is_logging_rank_zero,
+    )
 
     mlflow_run_id: str | None = normalize_optional_str(mlflow_cfg.get("run_id"))
+    experiment_name: str = "Train-SPLADE"
     mlflow_logger: MLFlowLogger = MLFlowLogger(
-        experiment_name=str(mlflow_cfg.experiment_name),
+        experiment_name=experiment_name,
         run_name=_resolve_mlflow_run_name(training_cfg, tag_value),
         tracking_uri=normalize_optional_str(mlflow_cfg.get("tracking_uri")),
         save_dir=str(mlflow_cfg.save_dir),

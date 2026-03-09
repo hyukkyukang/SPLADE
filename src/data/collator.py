@@ -224,9 +224,54 @@ class UniversalCollator:
         }
 
     def _collate_retrieval(self, batch: Sequence[RetrievalDataItem]) -> dict[str, Any]:
-        query_input_ids: torch.Tensor
-        query_attention_mask: torch.Tensor
-        query_input_ids, query_attention_mask = self._pad_query(batch)
+        batch_size: int = len(batch)
+        total_windows: int = 0
+        if self.max_padding:
+            resolved_max_query_length: int = self._require_fixed_query_length()
+        else:
+            resolved_max_query_length = 0
+        item: RetrievalDataItem
+        for item in batch:
+            item_input_ids: torch.Tensor = item.query_input_ids
+            if item_input_ids.ndim == 1:
+                item_input_ids = item_input_ids.unsqueeze(0)
+            total_windows += int(item_input_ids.shape[0])
+            if not self.max_padding:
+                resolved_max_query_length = max(
+                    resolved_max_query_length, int(item_input_ids.shape[1])
+                )
+
+        query_input_ids: torch.Tensor = torch.full(
+            (total_windows, resolved_max_query_length),
+            self.pad_token_id,
+            dtype=torch.long,
+        )
+        query_attention_mask: torch.Tensor = torch.zeros(
+            (total_windows, resolved_max_query_length), dtype=torch.long
+        )
+        query_indptr: torch.Tensor = torch.zeros(batch_size + 1, dtype=torch.int64)
+        window_offset: int = 0
+        for batch_idx, item in enumerate(batch):
+            item_input_ids = item.query_input_ids
+            item_attention_mask: torch.Tensor = item.query_attention_mask
+            if item_input_ids.ndim == 1:
+                item_input_ids = item_input_ids.unsqueeze(0)
+                item_attention_mask = item_attention_mask.unsqueeze(0)
+            window_count: int = int(item_input_ids.shape[0])
+            query_indptr[batch_idx + 1] = query_indptr[batch_idx] + window_count
+            if window_count == 0:
+                continue
+            query_len: int = min(
+                int(item_input_ids.shape[1]), resolved_max_query_length
+            )
+            next_offset: int = window_offset + window_count
+            query_input_ids[window_offset:next_offset, :query_len] = item_input_ids[
+                :window_count, :query_len
+            ]
+            query_attention_mask[
+                window_offset:next_offset, :query_len
+            ] = item_attention_mask[:window_count, :query_len]
+            window_offset = next_offset
         qids: list[str] = [item.qid for item in batch]
         query_texts: list[str] = [item.query_text for item in batch]
         relevance_judgments: list[dict[str, float]] = [
@@ -235,6 +280,7 @@ class UniversalCollator:
         return {
             "query_input_ids": query_input_ids,
             "query_attention_mask": query_attention_mask,
+            "query_indptr": query_indptr,
             "qid": qids,
             "query_text": query_texts,
             "relevance_judgments": relevance_judgments,
@@ -281,42 +327,47 @@ class UniversalCollator:
 
     def _collate_encoding(self, batch: Sequence[EncodingDataItem]) -> dict[str, Any]:
         doc_ids: list[str] = [item.doc_id for item in batch]
+        batch_size: int = len(batch)
+        total_windows: int = sum(int(item.doc_input_ids.shape[0]) for item in batch)
         if self.max_padding:
             max_doc_length: int | None = self.max_doc_length
             if max_doc_length is None or max_doc_length <= 0:
                 raise ValueError("max_padding requires a positive max_doc_length.")
-            batch_size: int = len(batch)
-            doc_input_ids: torch.Tensor = torch.full(
-                (batch_size, max_doc_length),
-                self.pad_token_id,
-                dtype=torch.long,
-            )
-            doc_attention_mask: torch.Tensor = torch.zeros(
-                (batch_size, max_doc_length), dtype=torch.long
-            )
-            for batch_idx, item in enumerate(batch):
-                doc_len: int = min(
-                    int(item.doc_input_ids.shape[0]), max_doc_length
-                )
-                if doc_len == 0:
-                    continue
-                doc_input_ids[batch_idx, :doc_len] = item.doc_input_ids[:doc_len]
-                doc_attention_mask[batch_idx, :doc_len] = item.doc_attention_mask[
-                    :doc_len
-                ]
+            resolved_max_doc_length: int = int(max_doc_length)
         else:
-            doc_input_ids = pad_sequence(
-                [item.doc_input_ids for item in batch],
-                batch_first=True,
-                padding_value=self.pad_token_id,
+            resolved_max_doc_length = max(
+                int(item.doc_input_ids.shape[1]) for item in batch
             )
-            doc_attention_mask = pad_sequence(
-                [item.doc_attention_mask for item in batch],
-                batch_first=True,
-                padding_value=0,
+
+        doc_input_ids = torch.full(
+            (total_windows, resolved_max_doc_length),
+            self.pad_token_id,
+            dtype=torch.long,
+        )
+        doc_attention_mask = torch.zeros(
+            (total_windows, resolved_max_doc_length), dtype=torch.long
+        )
+        doc_indptr: torch.Tensor = torch.zeros(batch_size + 1, dtype=torch.int64)
+        window_offset: int = 0
+        for batch_idx, item in enumerate(batch):
+            window_count: int = int(item.doc_input_ids.shape[0])
+            doc_indptr[batch_idx + 1] = doc_indptr[batch_idx] + window_count
+            if window_count == 0:
+                continue
+            doc_len: int = min(
+                int(item.doc_input_ids.shape[1]), resolved_max_doc_length
             )
+            next_offset: int = window_offset + window_count
+            doc_input_ids[window_offset:next_offset, :doc_len] = item.doc_input_ids[
+                :window_count, :doc_len
+            ]
+            doc_attention_mask[window_offset:next_offset, :doc_len] = (
+                item.doc_attention_mask[:window_count, :doc_len]
+            )
+            window_offset = next_offset
         return {
             "doc_ids": doc_ids,
             "doc_input_ids": doc_input_ids,
             "doc_attention_mask": doc_attention_mask,
+            "doc_indptr": doc_indptr,
         }

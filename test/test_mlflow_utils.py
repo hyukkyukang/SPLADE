@@ -10,6 +10,7 @@ from src.utils.mlflow_utils import (
     configure_mlflow_tls,
     finish_mlflow_system_metrics_monitor,
     start_mlflow_system_metrics_monitor,
+    warn_if_mlflow_gpu_metrics_unavailable,
 )
 
 
@@ -79,6 +80,41 @@ class MlflowUtilsTest(unittest.TestCase):
             )
         self.assertIsNone(resolved)
         start_run.assert_not_called()
+
+    def test_warn_if_gpu_metrics_dependency_missing(self) -> None:
+        cfg = OmegaConf.create({"system_metrics_enabled": True})
+        logger = get_logger("test.mlflow_utils.warn_gpu.missing")
+        with patch(
+            "src.utils.mlflow_utils._resolve_mlflow_gpu_monitor_dependency",
+            return_value=("pynvml", "nvidia-ml-py"),
+        ), patch("src.utils.mlflow_utils.find_spec", return_value=None), patch(
+            "src.utils.mlflow_utils.log_if_rank_zero"
+        ) as log_warn:
+            warn_if_mlflow_gpu_metrics_unavailable(
+                mlflow_cfg=cfg,
+                logger=logger,
+                is_logging_rank_zero=lambda: True,
+            )
+
+        log_warn.assert_called_once()
+        self.assertIn("nvidia-ml-py", log_warn.call_args.args[1])
+
+    def test_warn_if_gpu_metrics_dependency_present_skips(self) -> None:
+        cfg = OmegaConf.create({"system_metrics_enabled": True})
+        logger = get_logger("test.mlflow_utils.warn_gpu.present")
+        with patch(
+            "src.utils.mlflow_utils._resolve_mlflow_gpu_monitor_dependency",
+            return_value=("pynvml", "nvidia-ml-py"),
+        ), patch("src.utils.mlflow_utils.find_spec", return_value=object()), patch(
+            "src.utils.mlflow_utils.log_if_rank_zero"
+        ) as log_warn:
+            warn_if_mlflow_gpu_metrics_unavailable(
+                mlflow_cfg=cfg,
+                logger=logger,
+                is_logging_rank_zero=lambda: True,
+            )
+
+        log_warn.assert_not_called()
 
     def test_finish_system_metrics_monitor_ends_matching_run(self) -> None:
         logger = get_logger("test.mlflow_utils.finish")

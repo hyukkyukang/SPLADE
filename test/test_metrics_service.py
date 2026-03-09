@@ -34,6 +34,15 @@ class TrainingMetricsServiceTest(unittest.TestCase):
         self.assertIn("train_loss", module.logged_names)
         self.assertIn("train_q_active_dims", module.logged_names)
 
+    def test_validation_diagnostics_respect_interval(self) -> None:
+        service = TrainingMetricsService(validation_diagnostics_log_interval=3)
+        self.assertFalse(service.should_compute_validation_diagnostics(batch_idx=2))
+        self.assertTrue(service.should_compute_validation_diagnostics(batch_idx=3))
+
+    def test_validation_diagnostics_can_be_disabled(self) -> None:
+        service = TrainingMetricsService(validation_diagnostics_enabled=False)
+        self.assertFalse(service.should_compute_validation_diagnostics(batch_idx=0))
+
 
 if __name__ == "__main__":
     unittest.main()

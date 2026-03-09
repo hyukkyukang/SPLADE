@@ -81,6 +81,12 @@ validation_metrics:
   # `custom` uses deterministic tie-aware metric computation for validation.
   # `torchmetrics` keeps previous behavior.
   backend: custom
+  # Toggle expensive validation representation diagnostics
+  # (rep magnitude, active dims, sparsity).
+  diagnostics_enabled: true
+  # Compute and log validation diagnostics every N validation batches.
+  # `1` keeps previous behavior.
+  diagnostics_log_interval: 1
   # Seed for deterministic tie-break keys used only when backend=custom.
   tie_break_seed: 0
   k_list: [1, 5, 10, 50, 100]
@@ -123,7 +129,7 @@ beir_eval:
 
 mlflow:
   enabled: true
-  experiment_name: ${oc.env:MLFLOW_EXPERIMENT_NAME,splade}
+  experiment_name: Train-SPLADE
   tracking_uri: ${oc.env:MLFLOW_TRACKING_URI,null}
   run_name: ${oc.env:MLFLOW_RUN_NAME,null}
   artifact_location: ${oc.env:MLFLOW_ARTIFACT_LOCATION,null}

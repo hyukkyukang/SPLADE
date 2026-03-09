@@ -40,7 +40,6 @@ _MainLossFn = Callable[
 _DistillLossFn = Callable[
     [torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor
 ]
-_DistillLossSpec = tuple[str, float, _DistillLossFn]
 _RegLossFn = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
 
 
@@ -81,8 +80,14 @@ class LossComputer(nn.Module):
             persistent=False,
         )
         self._main_loss_fn: _MainLossFn = self._resolve_main_loss_fn(self.loss_type)
-        self._distill_losses: list[_DistillLossSpec] = (
-            self._resolve_distill_losses(distill_losses) if self.distill_enabled else []
+        (
+            self._distill_mse_weight,
+            self._distill_kl_weight,
+            self._distill_margin_mse_weight,
+        ) = (
+            self._resolve_distill_loss_weights(distill_losses)
+            if self.distill_enabled
+            else (0.0, 0.0, 0.0)
         )
         self._reg_query_fn: _RegLossFn = self._resolve_reg_loss_fn(
             self.reg_type, enabled=self.reg_query_weight > 0
@@ -364,32 +369,37 @@ class LossComputer(nn.Module):
             return self._main_loss_in_batch_plus_pairwise
         raise ValueError(f"Unsupported loss type: {loss_type}")
 
-    def _resolve_distill_loss_fn(self, loss_type: str) -> _DistillLossFn:
-        if loss_type == "mse":
-            return self._distill_loss_mse
-        if loss_type == "kl":
-            return self._distill_loss_kl
-        if loss_type == "margin_mse":
-            return self._distill_loss_margin_mse
-        raise ValueError(f"Unsupported distillation loss: {loss_type}")
-
-    def _resolve_distill_losses(
+    def _resolve_distill_loss_weights(
         self, distill_losses: list[tuple[str, float]]
-    ) -> list[_DistillLossSpec]:
-        resolved: list[_DistillLossSpec] = []
+    ) -> tuple[float, float, float]:
+        mse_weight: float = 0.0
+        kl_weight: float = 0.0
+        margin_mse_weight: float = 0.0
         for loss_type, weight in distill_losses:
             loss_key: str = str(loss_type).replace("-", "_").lower()
             loss_weight: float = float(weight)
             if loss_weight == 0.0:
                 continue
-            loss_fn: _DistillLossFn = self._resolve_distill_loss_fn(loss_key)
-            resolved.append((loss_key, loss_weight, loss_fn))
-        if not resolved:
+            if loss_key == "mse":
+                mse_weight += loss_weight
+                continue
+            if loss_key == "kl":
+                kl_weight += loss_weight
+                continue
+            if loss_key == "margin_mse":
+                margin_mse_weight += loss_weight
+                continue
+            raise ValueError(f"Unsupported distillation loss: {loss_type}")
+        if (
+            mse_weight == 0.0
+            and kl_weight == 0.0
+            and margin_mse_weight == 0.0
+        ):
             raise ValueError(
                 "distill.losses must include at least one non-zero weight loss "
                 "when distill is enabled."
             )
-        return resolved
+        return mse_weight, kl_weight, margin_mse_weight
 
     def _resolve_reg_loss_fn(self, reg_type: str, *, enabled: bool) -> _RegLossFn:
         if not enabled:
@@ -409,14 +419,15 @@ class LossComputer(nn.Module):
         doc_mask: torch.Tensor,
         teacher_scores: torch.Tensor,
         lambda_scale: torch.Tensor,
-        main_loss_type_override: str | None = None,
     ) -> tuple[
         torch.Tensor,
         torch.Tensor,
         torch.Tensor,
         torch.Tensor,
         torch.Tensor,
-        dict[str, torch.Tensor],
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
         torch.Tensor,
         torch.Tensor,
     ]:
@@ -427,12 +438,8 @@ class LossComputer(nn.Module):
         use_main_loss: bool = (
             not self.distill_enabled or self.include_main_loss_when_distilling
         )
-        main_loss_fn: _MainLossFn = self._main_loss_fn
-        if main_loss_type_override is not None:
-            override_loss_type: str = str(main_loss_type_override).replace("-", "_").lower()
-            main_loss_fn = self._resolve_main_loss_fn(override_loss_type)
         if use_main_loss:
-            loss, pairwise_loss, in_batch_loss = main_loss_fn(
+            loss, pairwise_loss, in_batch_loss = self._main_loss_fn(
                 pairwise_scores, q_reps, doc_reps, pos_mask, doc_mask
             )
         else:
@@ -443,14 +450,31 @@ class LossComputer(nn.Module):
             in_batch_loss = zero
 
         distill_loss: torch.Tensor = pairwise_scores.new_zeros(())
-        distill_losses: dict[str, torch.Tensor] = {}
+        distill_mse_loss: torch.Tensor = pairwise_scores.new_zeros(())
+        distill_kl_loss: torch.Tensor = pairwise_scores.new_zeros(())
+        distill_margin_mse_loss: torch.Tensor = pairwise_scores.new_zeros(())
         if self.distill_enabled:
-            for loss_key, loss_weight, loss_fn in self._distill_losses:
-                loss_value: torch.Tensor = loss_fn(
+            if self._distill_mse_weight != 0.0:
+                distill_mse_loss = self._distill_loss_mse(
                     pairwise_scores, teacher_scores, pos_mask, doc_mask
                 )
-                distill_losses[loss_key] = loss_value
-                distill_loss = distill_loss + (loss_weight * loss_value)
+                distill_loss = distill_loss + (
+                    self._distill_mse_weight * distill_mse_loss
+                )
+            if self._distill_kl_weight != 0.0:
+                distill_kl_loss = self._distill_loss_kl(
+                    pairwise_scores, teacher_scores, pos_mask, doc_mask
+                )
+                distill_loss = distill_loss + (
+                    self._distill_kl_weight * distill_kl_loss
+                )
+            if self._distill_margin_mse_weight != 0.0:
+                distill_margin_mse_loss = self._distill_loss_margin_mse(
+                    pairwise_scores, teacher_scores, pos_mask, doc_mask
+                )
+                distill_loss = distill_loss + (
+                    self._distill_margin_mse_weight * distill_margin_mse_loss
+                )
         loss = loss + distill_loss
 
         query_row_mask: torch.Tensor = torch.ones(
@@ -470,7 +494,9 @@ class LossComputer(nn.Module):
             pairwise_loss,
             in_batch_loss,
             distill_loss,
-            distill_losses,
+            distill_mse_loss,
+            distill_kl_loss,
+            distill_margin_mse_loss,
             q_reg,
             d_reg,
         )

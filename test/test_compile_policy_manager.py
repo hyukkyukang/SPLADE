@@ -40,7 +40,13 @@ class _DummyWrapper(torch.nn.Module):
 
 
 class _DummyModel(torch.nn.Module):
-    def __init__(self, *, freeze_backbone: bool, vocab_size: int = 30522) -> None:
+    def __init__(
+        self,
+        *,
+        freeze_backbone: bool,
+        vocab_size: int = 30522,
+        doc_only: bool = False,
+    ) -> None:
         super().__init__()
         self.encoder = _DummyEncoder(
             freeze_backbone=freeze_backbone,
@@ -58,6 +64,7 @@ class _DummyModel(torch.nn.Module):
         )
         self._query_encoder_fn = self._query_encoder_wrapper
         self._doc_encoder_fn = self._doc_encoder_wrapper
+        self.doc_only = bool(doc_only)
 
 
 class _DeviceTrackingModule(torch.nn.Module):
@@ -136,6 +143,47 @@ class CompilePolicyManagerTest(unittest.TestCase):
         self.assertEqual(compile_mock.call_count, 2)
         self.assertIsNotNone(manager._compiled_query_encoder_fn)
         self.assertIsNotNone(manager._compiled_doc_encoder_fn)
+
+    def test_effective_dynamic_ddp_blocks_full_model_compile(self) -> None:
+        model = _DummyModel(freeze_backbone=True, vocab_size=30522)
+        manager = TrainingCompilePolicyManager(
+            model=model,
+            logger=get_logger("test.compile_policy.dynamic_ddp_guard"),
+        )
+        cfg = _build_training_cfg(
+            torch_compile_mode="max-autotune",
+            static_graph=True,
+            torch_compile_ddp_safe_mode=True,
+        )
+
+        with patch("torch.compile", side_effect=lambda module, **kwargs: module) as compile_mock:
+            manager.setup(cfg)
+
+        self.assertTrue(manager.torch_compile_enabled)
+        self.assertFalse(manager.torch_compile_full_model)
+        self.assertTrue(manager.compile_enabled_for_current_stage)
+        self.assertEqual(compile_mock.call_count, 2)
+
+    def test_doc_only_never_uses_full_model_compile(self) -> None:
+        model = _DummyModel(freeze_backbone=True, vocab_size=30522, doc_only=True)
+        manager = TrainingCompilePolicyManager(
+            model=model,
+            logger=get_logger("test.compile_policy.doc_only"),
+        )
+        cfg = _build_training_cfg(
+            torch_compile_mode="max-autotune",
+            strategy="single",
+            num_devices=1,
+        )
+
+        with patch("torch.compile", side_effect=lambda module, **kwargs: module) as compile_mock:
+            manager.setup(cfg)
+
+        self.assertTrue(manager.torch_compile_enabled)
+        self.assertFalse(manager.torch_compile_full_model)
+        self.assertTrue(manager.compile_enabled_for_current_stage)
+        # doc_only keeps the bag-of-words query path eager and compiles docs only.
+        self.assertEqual(compile_mock.call_count, 1)
 
     def test_prepare_for_device_moves_wrapper_modules(self) -> None:
         model = _DummyModel(freeze_backbone=True, vocab_size=30522)

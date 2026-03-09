@@ -22,6 +22,21 @@ evaluation:
   # Supported values: retrieval, reranking.
   type: retrieval
 
+mlflow:
+  enabled: true
+  experiment_name: Eval-MSMARCO
+  tracking_uri: ${oc.env:MLFLOW_TRACKING_URI,null}
+  run_name: ${oc.env:MLFLOW_RUN_NAME,null}
+  artifact_location: ${oc.env:MLFLOW_ARTIFACT_LOCATION,null}
+  insecure_tls: ${oc.decode:${oc.env:MLFLOW_TRACKING_INSECURE_TLS,true}}
+  server_cert_path: ${oc.env:MLFLOW_TRACKING_SERVER_CERT_PATH,null}
+  client_cert_path: ${oc.env:MLFLOW_TRACKING_CLIENT_CERT_PATH,null}
+  system_metrics_enabled: ${oc.decode:${oc.env:MLFLOW_ENABLE_SYSTEM_METRICS_LOGGING,true}}
+  system_metrics_sampling_interval: ${oc.decode:${oc.env:MLFLOW_SYSTEM_METRICS_SAMPLING_INTERVAL,30}}
+  system_metrics_samples_before_logging: ${oc.decode:${oc.env:MLFLOW_SYSTEM_METRICS_SAMPLES_BEFORE_LOGGING,1}}
+  log_artifacts: false
+  tags: {}
+
 hydra:
   output_subdir: null
   run:

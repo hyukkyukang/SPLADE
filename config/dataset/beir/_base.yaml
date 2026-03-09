@@ -10,7 +10,8 @@ corpus_split: train
 
 beir_dataset: null
 
-hf_name: Hyukkyu/beir-${dataset.beir_dataset}-qrels
+hf_name: Hyukkyu/beir-${dataset.beir_dataset}
+qrels_hf_name: Hyukkyu/beir-${dataset.beir_dataset}-qrels
 
 # Column names for query/corpus datasets.
 query_id_column: _id

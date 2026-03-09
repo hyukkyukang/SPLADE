@@ -5,3 +5,4 @@ defaults:
 name: msmarco
 type: beir
 beir_dataset: msmarco
+qrels_hf_split: validation

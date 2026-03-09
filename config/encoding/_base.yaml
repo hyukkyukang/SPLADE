@@ -5,10 +5,13 @@ batch_size: 1024
 num_workers: 8
 prefetch_factor: 2
 max_padding: true
+long_doc_strategy: truncate
+sliding_window_overlap_tokens: 0
+max_windows_per_forward: null
 
 precision: bf16-mixed
 torch_compile: true
-torch_compile_mode: default
+torch_compile_mode: max-autotune
 use_cpu: false
 strategy: ddp
 static_graph: true
@@ -21,9 +24,9 @@ index_dir: "data/index"
 index_tag: ${tag}
 
 shard_max_docs: 100000
-value_dtype: float32
-sparse_min_weight: 0.0
-sparse_top_k: 1024
+value_dtype: float16
+sparse_min_weight: 0.01
+sparse_top_k: 512
 wand_block_size: 256
 
 async_write: true

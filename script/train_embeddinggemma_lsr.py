@@ -8,11 +8,16 @@ from typing import Any
 
 import numpy as np
 import torch
-from omegaconf import OmegaConf
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
+from src.prototype.embeddinggemma_lsr.cli import (
+    apply_config_overrides,
+    parser_default_values,
+    resolve_torch_device,
+    resolve_torch_dtype,
+)
 from src.prototype.embeddinggemma_lsr.data import (
     TextPair,
     build_text_pairs,
@@ -147,44 +152,19 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _default_values() -> dict[str, Any]:
-    parser: argparse.ArgumentParser = _build_parser()
-    defaults: dict[str, Any] = {}
-    action: argparse.Action
-    for action in parser._actions:
-        if action.dest in {None, "help"}:
-            continue
-        defaults[str(action.dest)] = action.default
-    return defaults
+    return parser_default_values(_build_parser())
 
 
 def _apply_config_overrides(args: argparse.Namespace) -> argparse.Namespace:
-    if args.config is None:
-        return args
-    cfg = OmegaConf.load(args.config)
-    payload: dict[str, Any] = OmegaConf.to_container(cfg, resolve=True)
-    defaults: dict[str, Any] = _default_values()
-    for key, value in payload.items():
-        if not hasattr(args, key):
-            continue
-        if key in defaults and getattr(args, key) == defaults[key]:
-            setattr(args, key, value)
-    return args
+    return apply_config_overrides(args, defaults=_default_values())
 
 
 def _resolve_device(device_value: str) -> torch.device:
-    text: str = str(device_value).strip().lower()
-    if text == "auto":
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    return torch.device(text)
+    return resolve_torch_device(device_value)
 
 
 def _resolve_dtype(dtype_name: str) -> torch.dtype:
-    key: str = str(dtype_name).lower()
-    if key == "float16":
-        return torch.float16
-    if key == "bfloat16":
-        return torch.bfloat16
-    return torch.float32
+    return resolve_torch_dtype(dtype_name)
 
 
 def _set_seed(seed: int) -> None:

@@ -58,6 +58,17 @@ def _strip_compiled_wrapper_segments(key: str) -> str:
     # Handle nested optimized modules like encoder._orig_mod.(module.)*
     cleaned: str = key.replace("._orig_mod.module.", ".")
     cleaned = cleaned.replace("._orig_mod.", ".")
+    splade_wrapper_prefixes: tuple[str, ...] = (
+        "_query_encoder_wrapper.encoder.",
+        "_doc_encoder_wrapper.encoder.",
+        "_query_encoder_fn.encoder.",
+        "_doc_encoder_fn.encoder.",
+        "_query_encoder_fn._encoder_fn.",
+        "_doc_encoder_fn._encoder_fn.",
+    )
+    for prefix in splade_wrapper_prefixes:
+        if cleaned.startswith(prefix):
+            return "encoder." + cleaned[len(prefix) :]
     return cleaned
 
 
@@ -101,7 +112,9 @@ def _normalize_checkpoint_state_dict(state_dict: dict[str, Any]) -> dict[str, An
         stripped = _strip_checkpoint_prefix(key, prefixes)
         if stripped is None:
             continue
-        normalized[_strip_compiled_wrapper_segments(stripped)] = value
+        cleaned_key: str = _strip_compiled_wrapper_segments(stripped)
+        if cleaned_key not in normalized or stripped == cleaned_key:
+            normalized[cleaned_key] = value
     if normalized:
         return _expand_splade_encoder_aliases(normalized)
 

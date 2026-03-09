@@ -1,6 +1,7 @@
 import random
 import unittest
 
+from datasets import Dataset
 from omegaconf import DictConfig, OmegaConf
 
 from src.data.dataset.msmarco_hard_negatives import MSMARCOHardNegativesDataset
@@ -36,6 +37,8 @@ def build_dataset_cfg() -> DictConfig:
                 "random_k": None,
                 "random_pool": None,
             },
+            "num_positives": 1,
+            "num_negatives": 4,
             "query_subset_name": "queries",
             "query_split_name": "train",
             "query_id_column": "query_id",
@@ -147,6 +150,106 @@ class MSMARCOHardNegativesDatasetTest(unittest.TestCase):
     def test_registry_resolves_dataset_type(self) -> None:
         builder = resolve_dataset_builder(build_dataset_cfg())
         self.assertIs(builder, MSMARCOHardNegativesDataset)
+
+    def test_resolve_meta_dataset_filters_rows_missing_positive_ids(self) -> None:
+        class _StubMSMARCOHardNegativesDataset(MSMARCOHardNegativesDataset):
+            def __init__(self, cfg: DictConfig, rows: list[dict[str, object]]) -> None:
+                self._rows: list[dict[str, object]] = rows
+                super().__init__(cfg)
+
+            def _load_hf_dataset(
+                self,
+                hf_name: str,
+                hf_subset: str | None,
+                split: str,
+                cache_dir: str | None,
+                data_files: dict[str, object] | None,
+            ) -> Dataset:
+                _ = hf_name, hf_subset, split, cache_dir, data_files
+                return Dataset.from_list(self._rows)
+
+        rows = [
+            {"qid": "q1", "pos": [1], "neg": {"dense_a": [2]}},
+            {"qid": "q2", "pos": [], "neg": {"dense_a": [3]}},
+            {"qid": "q3", "pos": [4], "neg": {"dense_a": [5]}},
+        ]
+        dataset = _StubMSMARCOHardNegativesDataset(build_dataset_cfg(), rows)
+        qids = [str(row["qid"]) for row in dataset.meta_dataset]
+        self.assertEqual(qids, ["q1", "q3"])
+
+    def test_resolve_meta_dataset_filters_rows_without_usable_negatives(self) -> None:
+        class _StubMSMARCOHardNegativesDataset(MSMARCOHardNegativesDataset):
+            def __init__(self, cfg: DictConfig, rows: list[dict[str, object]]) -> None:
+                self._rows: list[dict[str, object]] = rows
+                super().__init__(cfg)
+
+            def _load_hf_dataset(
+                self,
+                hf_name: str,
+                hf_subset: str | None,
+                split: str,
+                cache_dir: str | None,
+                data_files: dict[str, object] | None,
+            ) -> Dataset:
+                _ = hf_name, hf_subset, split, cache_dir, data_files
+                return Dataset.from_list(self._rows)
+
+        rows = [
+            {"qid": "q1", "pos": [1], "neg": {"dense_a": [1]}},
+            {"qid": "q2", "pos": [2], "neg": {"dense_a": [3]}},
+        ]
+        dataset = _StubMSMARCOHardNegativesDataset(build_dataset_cfg(), rows)
+        qids = [str(row["qid"]) for row in dataset.meta_dataset]
+        self.assertEqual(qids, ["q2"])
+
+    def test_resolve_meta_dataset_materializes_precomputed_fields(self) -> None:
+        class _StubMSMARCOHardNegativesDataset(MSMARCOHardNegativesDataset):
+            def __init__(self, cfg: DictConfig, rows: list[dict[str, object]]) -> None:
+                self._rows: list[dict[str, object]] = rows
+                super().__init__(cfg)
+
+            def _load_hf_dataset(
+                self,
+                hf_name: str,
+                hf_subset: str | None,
+                split: str,
+                cache_dir: str | None,
+                data_files: dict[str, object] | None,
+            ) -> Dataset:
+                _ = hf_name, hf_subset, split, cache_dir, data_files
+                return Dataset.from_list(self._rows)
+
+        rows = [
+            {
+                "qid": "q1",
+                "pos": [1],
+                "neg": {"dense_a": [10, 11], "bm25": [20]},
+            }
+        ]
+        dataset = _StubMSMARCOHardNegativesDataset(build_dataset_cfg(), rows)
+        row = dict(dataset.meta_dataset[0])
+        self.assertEqual(row["__splade_hn_qid"], "q1")
+        self.assertEqual(row["__splade_hn_pos_ids"], ["1"])
+        self.assertEqual(row["__splade_hn_neg_ids"], ["10", "11", "20"])
+
+    def test_row_to_meta_item_prefers_precomputed_negative_ids(self) -> None:
+        dataset = MSMARCOHardNegativesDataset(cfg=build_dataset_cfg())
+        row = {
+            "qid": "q_precomputed",
+            "pos": [100],
+            "neg": {"dense_a": [200, 201, 202]},
+            "__splade_hn_neg_ids": ["900", "901", "902"],
+        }
+
+        meta_item = dataset._row_to_meta_item(
+            row,
+            0,
+            num_positives=1,
+            num_negatives=2,
+            rng=random.Random(0),
+        )
+
+        self.assertEqual(meta_item.neg_ids, ["900", "901"])
 
 
 if __name__ == "__main__":
