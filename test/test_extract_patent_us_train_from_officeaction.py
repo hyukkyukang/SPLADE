@@ -1,4 +1,8 @@
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+import pyarrow.parquet as pq
 
 from script.preprocess.patent.extract_patent_us_train_from_officeaction import (
     compose_doc_text,
@@ -6,6 +10,7 @@ from script.preprocess.patent.extract_patent_us_train_from_officeaction import (
     select_segment_positive_ids,
     select_positive_ids,
     split_rejection_text,
+    write_hf_like_train_parquet,
 )
 
 
@@ -107,6 +112,101 @@ class ExtractPatentUsTrainFromOfficeactionTest(unittest.TestCase):
         )
 
         self.assertEqual(text, "Title Abstract line 1 Abstract line 2 Claims")
+
+    def test_write_hf_like_train_parquet_emits_stable_ids(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            candidate_path = tmp_path / "candidate.jsonl"
+            train_path = tmp_path / "train.parquet"
+            candidate_path.write_text(
+                "\n".join(
+                    [
+                        (
+                            '{"question":"segment text","patent_application_number":"US12345678",'
+                            '"candidate_positive_ids":["US87654321","US23456789"]}'
+                        )
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            stats = write_hf_like_train_parquet(
+                candidate_jsonl_path=candidate_path,
+                train_parquet_path=train_path,
+                patent_text_lookup={
+                    "US12345678": "query text",
+                    "US87654321": "doc one",
+                    "US23456789": "doc two",
+                },
+                normalize_question_whitespace=False,
+                keep_empty_labels=False,
+                question_id_style="patent_application_number",
+                label_id_style="positive_patent_id",
+                aggregate_by_question_id=False,
+            )
+
+            rows = pq.read_table(train_path.as_posix()).to_pylist()
+            self.assertEqual(stats.emitted_question_rows, 1)
+            self.assertEqual(
+                rows,
+                [
+                    {
+                        "question_id": "US12345678",
+                        "label_id": ["US87654321", "US23456789"],
+                    }
+                ],
+            )
+
+    def test_write_hf_like_train_parquet_aggregates_by_question_id(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            candidate_path = tmp_path / "candidate.jsonl"
+            train_path = tmp_path / "train.parquet"
+            candidate_path.write_text(
+                "\n".join(
+                    [
+                        (
+                            '{"question":"segment text 1","patent_application_number":"US12345678",'
+                            '"candidate_positive_ids":["US87654321","US23456789"]}'
+                        ),
+                        (
+                            '{"question":"segment text 2","patent_application_number":"US12345678",'
+                            '"candidate_positive_ids":["US23456789","US34567890"]}'
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            stats = write_hf_like_train_parquet(
+                candidate_jsonl_path=candidate_path,
+                train_parquet_path=train_path,
+                patent_text_lookup={
+                    "US12345678": "query text",
+                    "US87654321": "doc one",
+                    "US23456789": "doc two",
+                    "US34567890": "doc three",
+                },
+                normalize_question_whitespace=False,
+                keep_empty_labels=False,
+                question_id_style="patent_application_number",
+                label_id_style="positive_patent_id",
+                aggregate_by_question_id=True,
+            )
+
+            rows = pq.read_table(train_path.as_posix()).to_pylist()
+            self.assertEqual(stats.emitted_question_rows, 1)
+            self.assertEqual(
+                rows,
+                [
+                    {
+                        "question_id": "US12345678",
+                        "label_id": ["US87654321", "US23456789", "US34567890"],
+                    }
+                ],
+            )
 
 
 if __name__ == "__main__":

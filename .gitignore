@@ -31,3 +31,6 @@ indexes/
 /usc102103_train.json
 /new_*_Electrical_Electronics_testset_*_list.json
 /script/preprocess/anna/native/anna_fast_rs/target/
+.cache
+/run_logs/
+/run_pids/

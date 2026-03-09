@@ -1,15 +1,16 @@
-# Office Action JSONL Schema and Inferred Mapping to `Hyukkyu/patent-us`
+# Office Action JSONL Schema and Current Inferred Mapping to `Hyukkyu/patent-us`
 
 This note documents two things:
 
 1. The observed schema of `officeaction_102_103_20250105-20250330_cpc.jsonl`
-2. The current inferred method by which its contents were likely transformed into the Hugging Face dataset `Hyukkyu/patent-us`
+2. The current inferred method by which its contents were transformed into the live Hugging Face dataset `Hyukkyu/patent-us`
 
-Important caveat:
+Important caveats:
 
-- The final publishing step is verified from local code.
-- The earlier conversion from the office-action JSONL into `usc102103_train.json` is not present in this repository.
-- Therefore, the extraction pipeline below is partly inferred from the JSONL contents, the published dataset schema, and the local publish scripts.
+- As of `2026-03-09`, the live Hugging Face dataset uses raw application-style IDs, not hashed text IDs.
+- A local publishing script in this repository still hashes `question` and `positive_ctxs[*].text`, so it appears to describe an older dataset revision or a different publishing path.
+- The exact upstream extraction script is still not present in this repository.
+- Therefore, the downstream mapping below is based on the JSONL contents, the live Hugging Face dataset, the local notebook `make_reject_paragraph_by_industry.ipynb`, and direct overlap checks.
 
 ## File Summary
 
@@ -118,6 +119,7 @@ What this example shows:
 - `ClaimRejections103.text` can contain a long multi-paragraph office-action narrative.
 - `CitedPublicationNumbers103` contains raw extracted prior-art references.
 - `SearchPublicationNumbers103` contains normalized search-friendly publication IDs.
+- `DedupApplicationCheck103` can still be empty even when rejection text and normalized publication references are present.
 - `patentPublicationNumber` and `patentAbstract` may be empty even when rejection text is populated.
 
 ### Example 2: Row with populated `ClaimRejections102`
@@ -176,7 +178,7 @@ What this example shows:
 What this example shows:
 
 - `ClaimRejections102` can be populated while `ClaimRejections103` is empty.
-- The publication/application match arrays can already contain apparently resolved identifiers.
+- The application-match arrays can already contain apparently resolved identifiers.
 - Rows with a non-empty `patentPublicationNumber` typically also have a non-empty `patentAbstract`.
 
 ### Example 3: Row with empty CPC list
@@ -300,178 +302,218 @@ In this file:
 - `CitedApplicationNumbers102/103` are always empty
 - `SearchApplicationNumbers102/103` are always empty
 
-## Verified Local Code About `Hyukkyu/patent-us`
+## Live Hugging Face Dataset State (`2026-03-09`)
 
-The local publishing script shows that the Hugging Face `train` split is created from `usc102103_train.json`, not directly from the JSONL:
+The live dataset `Hyukkyu/patent-us` no longer uses hashed IDs.
 
-- `question_id = "q_" + sha1(row["question"])`
-- `label_id = ["d_" + sha1(ctx["text"]) for ctx in row["positive_ctxs"]]`
+Observed live metadata:
 
-See:
+- Features:
+  - `question_id: string`
+  - `label_id: list[string]`
+- Splits:
+  - `train = 68,734`
+  - `test = 22,638`
+- `question_id` values are raw application-style IDs such as `US15257351`
+- `label_id` values are lists of raw application-style IDs such as `["US05551375", "US05823137", ...]`
 
-- `script/preprocess/patent/publish_patent_id_datasets.py`
+Implication:
 
-That means the intermediate training file almost certainly has rows shaped roughly like:
+- The current live dataset is application-to-application linkage data.
+- It is not an ID-only text-hash dataset in its current form.
 
-```json
-{
-  "question": "some training query text",
-  "positive_ctxs": [
-    {"text": "some positive patent document text"},
-    {"text": "another positive patent document text"}
-  ]
-}
+## What the Notebook Confirms
+
+The notebook `make_reject_paragraph_by_industry.ipynb` parses the office-action JSONL and builds records with this logic:
+
+```python
+if DedupApplicationCheck102:
+    question_id = patentApplicationNumber
+    label_id = DedupApplicationCheck102
+    reject = ClaimRejections102.text
+elif DedupApplicationCheck103:
+    question_id = patentApplicationNumber
+    label_id = DedupApplicationCheck103
+    reject = ClaimRejections103.text
+else:
+    skip
 ```
 
-Everything else in `usc102103_train.json` would be ignored by the publisher for the HF `train` split.
+This is strong evidence that the relevant office-action fields for the live Hugging Face dataset are:
 
-## Inferred Mapping From the Office-action JSONL
+- `patentApplicationNumber`
+- `ClaimRejections102.DedupApplicationCheck102`
+- `ClaimRejections103.DedupApplicationCheck103`
 
-The most likely fields used from `officeaction_102_103_20250105-20250330_cpc.jsonl` are:
+The notebook also shows that:
 
-### Likely source of `question`
+- `patentCPCList` is used only for industry filtering
+- `ClaimRejections102.text` / `ClaimRejections103.text` are carried as supporting text
+- the downstream dataset structure is based on application IDs, not text hashing
 
-- `ClaimRejections102.text`
-- `ClaimRejections103.text`
+## Notebook Limitations
 
-Reason:
+The notebook is informative, but it is not the full production extractor.
 
-- These are the only large free-text rejection narratives in the file.
-- The HF train publisher only needs a question string.
-- The HF train split has `298,114` rows, which is much larger than the `129,484` JSONL rows, so the source was likely segmented into multiple training examples per office-action row.
+Known limitations:
 
-The strongest inference is:
+- It prefers `102` over `103` and drops `103` when both are present.
+- It does not union labels across both rejection sections.
+- It does not fall back beyond `DedupApplicationCheck102/103`.
+- It does not split rejection text into paragraphs despite the notebook name.
+- It filters by only the first CPC in `patentCPCList`.
+- Its CPC wildcard handling is weak:
+  - it strips `*` and then uses exact `isin(...)`
+  - entries like `A61K*` become `A61K`, which do not exactly match derived values like `A61K36/`
 
-- Each non-empty `ClaimRejections102.text` and `ClaimRejections103.text` was split into smaller rejection-level snippets.
-- Each snippet became one intermediate `question`.
+## Direct Comparison to the Live Hugging Face Dataset
 
-Examples of plausible segmentation units:
+### Strict notebook-style extraction across the whole office-action file
 
-- A rejection block beginning with text like `Claims 1-3 are rejected under 35 U.S.C. 103 ...`
-- A claim-group-specific rationale block within the longer office-action text
+If the notebook logic is applied to the whole JSONL without industry filtering:
 
-This is consistent with the observed scale:
+- Candidate rows: `65,167`
+- Candidate unique `question_id`: `64,734`
 
-- JSONL rows: `129,484`
-- Observed rejection-like spans in text via a simple scan: about `337,971`
-- HF train rows: `298,114`
+Compared with live HF `train`:
 
-That relationship strongly suggests rejection-level segmentation rather than one-row-per-office-action conversion.
+- HF `train` rows: `68,734`
+- Shared `question_id` values: `64,456`
+- Exact row overlap under strict notebook logic: `50,528`
 
-### Likely source of positive patent references
+This is already strong evidence that the office-action file is the source.
 
-Most likely primary fields:
+### Unioning `102` and `103` labels makes the match much stronger
 
-- `ClaimRejections102.DedupPublicationCheck102`
-- `ClaimRejections103.DedupPublicationCheck103`
+If `label_id` is built as the deduplicated union of:
 
-Likely fallback fields if dedup arrays were empty:
+- `DedupApplicationCheck102`
+- `DedupApplicationCheck103`
 
-- `OpenSearchPublicationMatches102/103`
-- `SearchPublicationNumbers102/103`
-- `CitedPublicationNumbers102/103`
+then the overlap improves materially.
 
-Reason:
+Against live HF `train`:
 
-- The names imply a progression from raw extracted citation -> normalized search ID -> matched publication ID -> deduplicated final ID.
-- The final publisher hashes `positive_ctxs[*].text`, so there must have been a step that resolved these publication IDs into actual patent document text.
+- Exact order-sensitive matches: `62,651`
+- Set-equality matches ignoring label order: `62,745`
 
-### Likely source of patent document text for positives
+Against live HF `test`:
 
-The positive document text likely did not come from the office-action JSONL itself.
+- All `22,638 / 22,638` rows match by label set
+- The remaining difference is label ordering only
 
-Instead, the likely process was:
+This makes the likely production rule much clearer:
 
-1. Extract rejection text from `ClaimRejections102.text` / `ClaimRejections103.text`
-2. Extract cited or matched publication IDs from the nested citation arrays
-3. Retrieve the corresponding patent document text from a patent corpus or OpenSearch-backed patent store
-4. Store that retrieved document text into `positive_ctxs[*].text`
-5. Publish only hashed IDs to `Hyukkyu/patent-us`
+- `question_id = patentApplicationNumber`
+- `label_id = union(DedupApplicationCheck102, DedupApplicationCheck103)`
 
-This is supported by the local patent corpus export scripts, which build a separate US patent text corpus with:
+### Additional fallback fields are still needed for part of `train`
 
-- `doc_id`
-- `title`
-- `abstract`
-- `claims`
-- `description`
-- `application_id`
+Not all live HF `train` rows are covered by the dedup-application arrays alone.
 
-## Current Inferred End-to-end Processing Outline
+Useful observations:
 
-The current best reconstruction of the missing extraction script is:
+- All live HF `train` `question_id` values exist in the office-action file
+- Some unmatched rows have empty `DedupApplicationCheck102/103` but non-empty:
+  - `OpenSearchApplicationMatches102/103`
+  - `SearchPublicationNumbers102/103`
+  - rejection text in `ClaimRejections102.text` or `ClaimRejections103.text`
+
+Using a simple extra fallback:
+
+- if both dedup-application arrays are empty, use `OpenSearchApplicationMatches102/103`
+
+improves `train` overlap to:
+
+- Exact order-sensitive matches: `62,893`
+- Set-equality matches ignoring label order: `62,987`
+
+This still leaves a remaining gap, which most likely comes from rows where:
+
+- application-level match arrays are empty
+- publication-level identifiers exist
+- those publication identifiers were later resolved to application IDs in the real pipeline
+
+## Current Best Inferred Extraction Logic
+
+The current best reconstruction of the live dataset creation logic is:
 
 1. Read each JSONL row from `officeaction_102_103_20250105-20250330_cpc.jsonl`
-2. For each row, inspect:
-   - `ClaimRejections102.text`
-   - `ClaimRejections103.text`
-3. Skip empty rejection texts
-4. Split each non-empty rejection text into smaller rejection-level training units
-5. For each training unit, collect the related cited prior-art identifiers from:
-   - preferably `DedupPublicationCheck102/103`
-   - otherwise `OpenSearchPublicationMatches102/103`
-   - otherwise normalized or raw citation fields
-6. Resolve those publication identifiers to actual patent documents in an external patent corpus / OpenSearch index
-7. Build an intermediate row:
+2. Set:
+   - `question_id = patentApplicationNumber`
+3. Build candidate labels from both rejection sections, not just one:
+   - `DedupApplicationCheck102`
+   - `DedupApplicationCheck103`
+4. Deduplicate and union those application IDs into `label_id`
+5. If both dedup-application arrays are empty, fall back to:
+   - `OpenSearchApplicationMatches102/103`
+6. If application-match arrays are still empty but publication identifiers exist, resolve publication IDs to application IDs using:
+   - `SearchPublicationNumbers102/103`
+   - possibly `OpenSearchPublicationMatches102/103`
+   - possibly `DedupPublicationCheck102/103`
+7. Write the resulting rows as:
 
 ```json
 {
-  "question": "rejection snippet text",
-  "positive_ctxs": [
-    {"text": "resolved patent document text"},
-    {"text": "resolved patent document text"}
+  "question_id": "US15257351",
+  "label_id": [
+    "US05551375",
+    "US05823137",
+    "US05572950",
+    "US05911194"
   ]
 }
 ```
 
-8. Write these rows into `usc102103_train.json`
-9. Run the local publisher:
-   - hash `question` into `question_id`
-   - hash each `positive_ctxs[*].text` into `label_id`
-   - dedupe duplicate label texts per row
-10. Push the resulting ID-only dataset to `Hyukkyu/patent-us`
+This is now the simplest explanation that fits:
+
+- the live Hugging Face dataset format
+- the notebook logic
+- and the observed overlap statistics
 
 ## Confidence by Field
 
 ### High confidence
 
-- `ClaimRejections102.text` is used
-- `ClaimRejections103.text` is used
-- Some publication-based citation field is used to choose positives
+- `question_id` comes from `patentApplicationNumber`
+- `label_id` is application-based, not publication-based in the final dataset
+- `DedupApplicationCheck102/103` is part of the real extraction path
+- `102` and `103` are combined more symmetrically than the notebook does
 
 ### Medium confidence
 
-- `DedupPublicationCheck102/103` is the primary positive-source field
-- Rejection text is split into multiple training examples per office-action row
+- `OpenSearchApplicationMatches102/103` is a real fallback source
+- publication-number fields are used only when application-match fields are missing
 
 ### Low confidence
 
-- Exact segmentation rules for creating one `question` from longer rejection text
-- Exact fallback order among `DedupPublicationCheck*`, `OpenSearchPublicationMatches*`, `SearchPublicationNumbers*`, and `CitedPublicationNumbers*`
-- Whether application-based match fields were used as backup during retrieval
+- Exact fallback priority among:
+  - `OpenSearchApplicationMatches*`
+  - `SearchPublicationNumbers*`
+  - `OpenSearchPublicationMatches*`
+  - `DedupPublicationCheck*`
+- Exact label ordering rule used in the final dataset
+- How duplicated `patentApplicationNumber` rows in the JSONL are merged when the same application appears more than once
 
-## Fields Likely Not Used as Primary Inputs to the HF Train Dataset
+## Fields Likely Not Used as Primary Inputs to the Live HF ID Mapping
 
 - `inventionTitle`
 - `filingDate`
 - `patentPublicationNumber`
 - `patentAbstract`
 - `patentCPCList`
-- `CitedApplicationNumbers102/103`
-- `SearchApplicationNumbers102/103`
 
-These may have been useful for filtering or metadata, but they do not look like the main source for training `question` or `positive_ctxs`.
+These may still be useful for filtering, enrichment, or analysis, but they do not look like the primary source of `question_id` or `label_id`.
 
 ## Bottom Line
 
-The strongest current inference is:
+The clearest current interpretation is:
 
-- `question` in the missing `usc102103_train.json` was derived from segmented content of:
-  - `ClaimRejections102.text`
-  - `ClaimRejections103.text`
+- The live `Hyukkyu/patent-us` dataset is built from the office-action JSONL using raw application IDs.
+- `question_id` is the examined application's `patentApplicationNumber`.
+- `label_id` is a deduplicated application-ID list derived primarily from:
+  - `DedupApplicationCheck102`
+  - `DedupApplicationCheck103`
+- The real extractor likely unions `102` and `103`, then falls back to other application/publication match fields when the dedup arrays are empty.
 
-- `positive_ctxs[*].text` was derived by resolving cited prior-art publications, most likely starting from:
-  - `DedupPublicationCheck102`
-  - `DedupPublicationCheck103`
-
-The office-action JSONL is therefore best understood as the supervision source, while the actual positive patent texts were likely fetched from a separate patent corpus.
+The notebook `make_reject_paragraph_by_industry.ipynb` is therefore not the full production extractor, but it reveals the correct core field mapping and makes the current live dataset much easier to explain.

@@ -435,10 +435,12 @@ class SPLADETrainingModule(L.LightningModule):
             stage == "val"
             and int(flat_docs.shape[0]) > self._validation_doc_encode_chunk_size
         )
+        training_cfg = getattr(getattr(self, "cfg", None), "training", None)
+        fuse_query_doc_encoding_when_possible = bool(
+            training_cfg.get("fuse_query_doc_encoding_when_possible", False)
+        ) if training_cfg is not None else False
         use_fused_query_doc_encoding: bool = (
-            bool(
-                self.cfg.training.get("fuse_query_doc_encoding_when_possible", False)
-            )
+            fuse_query_doc_encoding_when_possible
             and not use_chunked_validation_doc_encoding
             and not self._compile_policy.torch_compile_full_model
             and int(batch["query_input_ids"].shape[1]) == int(flat_docs.shape[1])

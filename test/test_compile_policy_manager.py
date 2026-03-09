@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import patch
 
 import torch
+import torch._inductor.config as inductor_config
 from omegaconf import OmegaConf
 
 from src.model.pl_module.compile_policy import TrainingCompilePolicyManager
@@ -121,6 +122,37 @@ class CompilePolicyManagerTest(unittest.TestCase):
         self.assertIsNotNone(manager._compiled_query_encoder_fn)
         self.assertIsNotNone(manager._compiled_doc_encoder_fn)
         self.assertEqual(manager.loss_compile_mode_kwargs.get("mode"), "max-autotune")
+
+    def test_unfrozen_ddp_applies_large_vocab_aten_gemm_safety(self) -> None:
+        model = _DummyModel(freeze_backbone=False, vocab_size=30522)
+        manager = TrainingCompilePolicyManager(
+            model=model,
+            logger=get_logger("test.compile_policy.unfrozen_large_vocab"),
+        )
+        cfg = _build_training_cfg(
+            torch_compile_mode="max-autotune",
+            torch_compile_large_vocab_threshold=30000,
+        )
+
+        original_backend = getattr(
+            inductor_config, "max_autotune_gemm_backends", None
+        )
+        try:
+            inductor_config.max_autotune_gemm_backends = "TRITON"
+            with patch(
+                "torch.compile", side_effect=lambda module, **kwargs: module
+            ) as compile_mock:
+                manager.setup(cfg)
+            self.assertEqual(compile_mock.call_count, 1)
+            self.assertEqual(inductor_config.max_autotune_gemm_backends, "ATEN")
+        finally:
+            if original_backend is None:
+                try:
+                    delattr(inductor_config, "max_autotune_gemm_backends")
+                except AttributeError:
+                    pass
+            else:
+                inductor_config.max_autotune_gemm_backends = original_backend
 
     def test_frozen_ddp_dynamic_graph_uses_wrapper_compile(self) -> None:
         model = _DummyModel(freeze_backbone=True, vocab_size=30522)

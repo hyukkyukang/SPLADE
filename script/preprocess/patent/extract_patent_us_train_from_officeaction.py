@@ -66,6 +66,8 @@ class BuildStats:
     emitted_candidate_examples: int = 0
     emitted_question_rows: int = 0
     empty_question_rows: int = 0
+    empty_question_id_rows: int = 0
+    unresolved_query_id_rows: int = 0
     rows_with_empty_label_id: int = 0
     distinct_positive_ids_needed: int = 0
     resolved_positive_ids: int = 0
@@ -431,9 +433,10 @@ def write_candidate_examples_jsonl(
     positive_id_mode: str,
     prefer_application_matches: bool,
     positive_selection_scope: str,
-) -> tuple[BuildStats, set[str], Counter[str]]:
+) -> tuple[BuildStats, set[str], set[str], Counter[str]]:
     stats = BuildStats()
     needed_positive_ids: set[str] = set()
+    needed_question_ids: set[str] = set()
     positive_field_usage: Counter[str] = Counter()
     candidate_jsonl_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -445,6 +448,9 @@ def write_candidate_examples_jsonl(
                 stats.rows_scanned += 1
                 row = json.loads(raw_line)
                 patent_application_number = str(row.get("patentApplicationNumber", ""))
+                normalized_question_id = normalize_identifier(patent_application_number)
+                if normalized_question_id:
+                    needed_question_ids.add(normalized_question_id)
                 for section_name, section_suffix in (
                     ("ClaimRejections102", "102"),
                     ("ClaimRejections103", "103"),
@@ -496,7 +502,7 @@ def write_candidate_examples_jsonl(
                         writer.write("\n")
 
     stats.distinct_positive_ids_needed = len(needed_positive_ids)
-    return stats, needed_positive_ids, positive_field_usage
+    return stats, needed_positive_ids, needed_question_ids, positive_field_usage
 
 
 def build_patent_text_lookup(
@@ -537,6 +543,9 @@ def write_hf_like_train_parquet(
     patent_text_lookup: dict[str, str],
     normalize_question_whitespace: bool,
     keep_empty_labels: bool,
+    question_id_style: str,
+    label_id_style: str,
+    aggregate_by_question_id: bool,
 ) -> BuildStats:
     stats = BuildStats()
     train_parquet_path.parent.mkdir(parents=True, exist_ok=True)
@@ -544,6 +553,8 @@ def write_hf_like_train_parquet(
     rows_buffer: list[dict[str, Any]] = []
     missing_positive_ids: set[str] = set()
     resolved_positive_ids: set[str] = set()
+    aggregated_rows: dict[str, list[str]] = {}
+    aggregated_seen: dict[str, set[str]] = {}
 
     try:
         with candidate_jsonl_path.open("r", encoding="utf-8") as handle:
@@ -558,6 +569,21 @@ def write_hf_like_train_parquet(
                     stats.empty_question_rows += 1
                     continue
 
+                if question_id_style == "hash_question_text":
+                    question_id = _sha1_id("q_", question)
+                elif question_id_style == "patent_application_number":
+                    question_id = normalize_identifier(
+                        str(payload.get("patent_application_number", ""))
+                    )
+                    if not question_id:
+                        stats.empty_question_id_rows += 1
+                        continue
+                    if question_id not in patent_text_lookup:
+                        stats.unresolved_query_id_rows += 1
+                        continue
+                else:
+                    raise ValueError(f"Unsupported question_id_style: {question_id_style}")
+
                 label_ids: list[str] = []
                 for positive_id in payload.get("candidate_positive_ids", []):
                     positive_key = normalize_identifier(str(positive_id))
@@ -568,19 +594,29 @@ def write_hf_like_train_parquet(
                         missing_positive_ids.add(positive_key)
                         continue
                     resolved_positive_ids.add(positive_key)
-                    label_ids.append(_sha1_id("d_", doc_text))
+                    if label_id_style == "hash_doc_text":
+                        label_ids.append(_sha1_id("d_", doc_text))
+                    elif label_id_style == "positive_patent_id":
+                        label_ids.append(positive_key)
+                    else:
+                        raise ValueError(f"Unsupported label_id_style: {label_id_style}")
                 label_ids = _dedupe_preserve_order(label_ids)
                 if not label_ids and not keep_empty_labels:
                     continue
                 if not label_ids:
                     stats.rows_with_empty_label_id += 1
 
-                rows_buffer.append(
-                    {
-                        "question_id": _sha1_id("q_", question),
-                        "label_id": label_ids,
-                    }
-                )
+                if aggregate_by_question_id:
+                    existing = aggregated_rows.setdefault(question_id, [])
+                    seen = aggregated_seen.setdefault(question_id, set(existing))
+                    for label_id in label_ids:
+                        if label_id in seen:
+                            continue
+                        seen.add(label_id)
+                        existing.append(label_id)
+                    continue
+
+                rows_buffer.append({"question_id": question_id, "label_id": label_ids})
                 stats.emitted_question_rows += 1
 
                 if len(rows_buffer) >= 10000:
@@ -595,6 +631,20 @@ def write_hf_like_train_parquet(
             if writer is None:
                 writer = pq.ParquetWriter(train_parquet_path.as_posix(), QUESTION_SCHEMA)
             writer.write_table(table)
+        if aggregate_by_question_id and aggregated_rows:
+            aggregate_buffer = [
+                {"question_id": question_id, "label_id": label_ids}
+                for question_id, label_ids in aggregated_rows.items()
+            ]
+            stats.emitted_question_rows = len(aggregate_buffer)
+            start = 0
+            while start < len(aggregate_buffer):
+                chunk = aggregate_buffer[start : start + 10000]
+                table = pa.Table.from_pylist(chunk, schema=QUESTION_SCHEMA)
+                if writer is None:
+                    writer = pq.ParquetWriter(train_parquet_path.as_posix(), QUESTION_SCHEMA)
+                writer.write_table(table)
+                start += len(chunk)
     finally:
         if writer is not None:
             writer.close()
@@ -734,6 +784,23 @@ def parse_args() -> argparse.Namespace:
         help="Drop rows that resolve to no positive labels.",
     )
     parser.add_argument(
+        "--question-id-style",
+        choices=["hash_question_text", "patent_application_number"],
+        default="hash_question_text",
+        help="How to emit train question IDs.",
+    )
+    parser.add_argument(
+        "--label-id-style",
+        choices=["hash_doc_text", "positive_patent_id"],
+        default="hash_doc_text",
+        help="How to emit train positive IDs.",
+    )
+    parser.add_argument(
+        "--aggregate-by-question-id",
+        action="store_true",
+        help="Merge rows with the same emitted question_id by unioning label_id values.",
+    )
+    parser.add_argument(
         "--reference-repo",
         default=None,
         help="Optional reference HF dataset repo, e.g. Hyukkyu/patent-us.",
@@ -771,7 +838,8 @@ def main() -> None:
     metadata_path = output_dir / "metadata.json"
     comparison_path = output_dir / "comparison.json"
 
-    candidate_stats, needed_positive_ids, positive_field_usage = write_candidate_examples_jsonl(
+    candidate_stats, needed_positive_ids, needed_question_ids, positive_field_usage = (
+        write_candidate_examples_jsonl(
         officeaction_path=officeaction_path,
         candidate_jsonl_path=candidate_jsonl_path,
         segment_mode=args.segment_mode,
@@ -779,11 +847,12 @@ def main() -> None:
         positive_id_mode=args.positive_id_mode,
         prefer_application_matches=not bool(args.prefer_publication_matches),
         positive_selection_scope=str(args.positive_selection_scope),
+        )
     )
 
     patent_text_lookup = build_patent_text_lookup(
         corpus_paths=corpus_paths,
-        target_ids=needed_positive_ids,
+        target_ids=needed_positive_ids | needed_question_ids,
         columns=args.doc_columns,
         normalize_doc_whitespace=bool(args.normalize_doc_whitespace),
     )
@@ -794,6 +863,9 @@ def main() -> None:
         patent_text_lookup=patent_text_lookup,
         normalize_question_whitespace=bool(args.normalize_question_whitespace),
         keep_empty_labels=not bool(args.drop_empty_labels),
+        question_id_style=str(args.question_id_style),
+        label_id_style=str(args.label_id_style),
+        aggregate_by_question_id=bool(args.aggregate_by_question_id),
     )
 
     metadata = {
@@ -808,6 +880,9 @@ def main() -> None:
         "normalize_question_whitespace": bool(args.normalize_question_whitespace),
         "normalize_doc_whitespace": bool(args.normalize_doc_whitespace),
         "drop_empty_labels": bool(args.drop_empty_labels),
+        "question_id_style": str(args.question_id_style),
+        "label_id_style": str(args.label_id_style),
+        "aggregate_by_question_id": bool(args.aggregate_by_question_id),
         "candidate_examples_path": candidate_jsonl_path.as_posix(),
         "train_parquet_path": train_parquet_path.as_posix(),
         "candidate_stats": asdict(candidate_stats),

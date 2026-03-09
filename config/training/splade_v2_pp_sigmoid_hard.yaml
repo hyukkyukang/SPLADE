@@ -4,6 +4,11 @@ defaults:
 
 name: splade_v2_pp_sigmoid_hard
 
+# The hard-negative training set is smaller than the base SPLADE runs, so the
+# base integer interval (5000 batches) can exceed the per-epoch batch count and
+# fail Lightning setup. Validate once per epoch by default for this config.
+val_check_interval: 1.0
+
 loss:
   type: sigmoid_pairwise_hard
   sigmoid:

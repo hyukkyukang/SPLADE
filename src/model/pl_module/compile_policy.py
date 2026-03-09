@@ -141,6 +141,45 @@ class TrainingCompilePolicyManager:
         encoder_obj: Any = getattr(self.model, "encoder", None)
         freeze_backbone: bool = bool(getattr(encoder_obj, "freeze_backbone", False))
         doc_only_enabled: bool = bool(getattr(self.model, "doc_only", False))
+        try:
+            vocab_size: int = int(getattr(encoder_obj, "vocab_size", 0))
+        except Exception:
+            vocab_size = 0
+        large_vocab_threshold: int = int(
+            cfg.training.get("torch_compile_large_vocab_threshold", 100000)
+        )
+        force_aten_for_large_vocab: bool = bool(
+            cfg.training.get("torch_compile_force_aten_gemm_for_large_vocab", True)
+        )
+        if (
+            compile_mode == "max-autotune"
+            and force_aten_for_large_vocab
+            and vocab_size >= large_vocab_threshold
+        ):
+            try:
+                import torch._inductor.config as inductor_config
+
+                safe_gemm_backends: str = "ATEN"
+                current_gemm_backends: str = str(
+                    getattr(inductor_config, "max_autotune_gemm_backends", "")
+                )
+                if current_gemm_backends.upper() != safe_gemm_backends:
+                    inductor_config.max_autotune_gemm_backends = safe_gemm_backends
+                    log_if_rank_zero(
+                        self.logger,
+                        "Forcing torch.compile max-autotune GEMM backends to "
+                        f"{safe_gemm_backends!r} because vocab_size={vocab_size} "
+                        f"(>= {large_vocab_threshold}) can trigger Triton "
+                        "autotune illegal-address failures.",
+                        level="warning",
+                    )
+            except Exception as exc:
+                log_if_rank_zero(
+                    self.logger,
+                    "Could not configure torch._inductor GEMM backends for "
+                    f"large-vocab compile safety: {exc!r}",
+                    level="warning",
+                )
         # Query/doc encoder wrappers share one encoder module. Under unfrozen
         # distributed training, compiling wrappers separately can be unstable;
         # compile the shared encoder once.
@@ -207,16 +246,6 @@ class TrainingCompilePolicyManager:
         skip_doc_compile_for_large_vocab: bool = False
         # Large-vocab heads can trigger unstable Triton autotune kernels.
         if compile_mode == "max-autotune":
-            try:
-                vocab_size: int = int(getattr(encoder_obj, "vocab_size", 0))
-            except Exception:
-                vocab_size = 0
-            large_vocab_threshold: int = int(
-                cfg.training.get("torch_compile_large_vocab_threshold", 100000)
-            )
-            force_aten_for_large_vocab: bool = bool(
-                cfg.training.get("torch_compile_force_aten_gemm_for_large_vocab", True)
-            )
             if force_aten_for_large_vocab and vocab_size >= large_vocab_threshold:
                 query_fallback_mode_value: str | None = normalize_optional_str(
                     cfg.training.get("torch_compile_large_vocab_query_fallback_mode")
@@ -281,32 +310,6 @@ class TrainingCompilePolicyManager:
                         self.logger,
                         "Using compile mode override for loss module: "
                         f"{compile_mode!r} -> {loss_compile_mode!r}.",
-                        level="warning",
-                    )
-                try:
-                    import torch._inductor.config as inductor_config
-
-                    safe_gemm_backends: str = "ATEN"
-                    current_gemm_backends: str = str(
-                        getattr(inductor_config, "max_autotune_gemm_backends", "")
-                    )
-                    if current_gemm_backends.upper() != safe_gemm_backends:
-                        inductor_config.max_autotune_gemm_backends = (
-                            safe_gemm_backends
-                        )
-                        log_if_rank_zero(
-                            self.logger,
-                            "Forcing torch.compile max-autotune GEMM backends to "
-                            f"{safe_gemm_backends!r} because vocab_size={vocab_size} "
-                            f"(>= {large_vocab_threshold}) can trigger Triton "
-                            "autotune illegal-address failures.",
-                            level="warning",
-                        )
-                except Exception as exc:
-                    log_if_rank_zero(
-                        self.logger,
-                        "Could not configure torch._inductor GEMM backends for "
-                        f"large-vocab compile safety: {exc!r}",
                         level="warning",
                     )
 

@@ -25,6 +25,7 @@ class HydraConfigCompositionTest(unittest.TestCase):
         self.assertEqual(str(cfg.training.name), "splade_v2_pp")
         self.assertFalse(bool(cfg.training.disable_compile_for_validation))
         self.assertEqual(str(cfg.training.torch_compile_validation_mode), "default")
+        self.assertEqual(int(cfg.training.torch_compile_large_vocab_threshold), 30000)
         self.assertIn("train_dataset", cfg)
         self.assertIn("val_dataset", cfg)
         self.assertEqual(str(cfg.training.mlflow.experiment_name), "Train-SPLADE")
@@ -70,6 +71,8 @@ class HydraConfigCompositionTest(unittest.TestCase):
         )
         self.assertAlmostEqual(float(cfg.training.loss.sigmoid.init_bias), -8.0)
         self.assertAlmostEqual(float(cfg.training.loss.sigmoid.max_bias), -5.0)
+        self.assertEqual(float(cfg.training.val_check_interval), 1.0)
+        self.assertEqual(int(cfg.training.torch_compile_large_vocab_threshold), 30000)
 
     def test_validation_matrix_composes(self) -> None:
         cfg = self._compose(

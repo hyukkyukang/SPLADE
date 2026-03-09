@@ -6,6 +6,11 @@ name: splade_v2_pp
 
 torch_compile: true
 torch_compile_loss: true
+# BERT-based SPLADE uses a 30,522-term vocabulary projection. In max-autotune
+# mode, Triton GEMM autotuning on this head can trigger illegal-address failures
+# on some GPUs, so route these large projections through the existing ATEN
+# safety path.
+torch_compile_large_vocab_threshold: 30000
 batch_size: 32
 eval_batch_size: 8
 grad_accumulation: 1
