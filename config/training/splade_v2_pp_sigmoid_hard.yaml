@@ -1,0 +1,15 @@
+# @package training
+defaults:
+  - splade_v2_pp
+
+name: splade_v2_pp_sigmoid_hard
+
+loss:
+  type: sigmoid_pairwise_hard
+  sigmoid:
+    init_logit_scale: 2.302585093
+    max_logit_scale: 100.0
+    init_bias: -10.0
+    max_bias: -5.0
+    pos_weight: 1.0
+    neg_weight: 1.0

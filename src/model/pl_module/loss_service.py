@@ -5,6 +5,7 @@ import torch
 from omegaconf import DictConfig
 
 from src.model.losses import LossComputer
+from src.model.sigmoid_pairwise import SigmoidPairwiseConfig
 
 
 @dataclass(frozen=True)
@@ -23,6 +24,10 @@ class LossComputationOutputs:
     lambda_scale: torch.Tensor
     reg_query_lambda: torch.Tensor
     reg_doc_lambda: torch.Tensor
+    sigmoid_pos_loss: torch.Tensor | None = None
+    sigmoid_neg_loss: torch.Tensor | None = None
+    sigmoid_logit_scale: torch.Tensor | None = None
+    sigmoid_bias: torch.Tensor | None = None
 
 
 class LossRegularizationService:
@@ -36,6 +41,7 @@ class LossRegularizationService:
         self.loss_type: str = str(self.loss_cfg.type).lower()
         self.in_batch_weight: float = float(self.loss_cfg.get("in_batch_weight", 1.0))
         self.pairwise_weight: float = float(self.loss_cfg.get("pairwise_weight", 1.0))
+        self.sigmoid_cfg: SigmoidPairwiseConfig | None = self._resolve_sigmoid_config()
         self._resolved_distill_losses: tuple[tuple[str, float], ...] = (
             tuple(self._resolve_distill_losses())
             if bool(self.distill_cfg.enabled)
@@ -50,6 +56,21 @@ class LossRegularizationService:
             # Single lambda applied to both query and document regularization.
             self.reg_query_weight = float(reg_weight_value)
             self.reg_doc_weight = float(reg_weight_value)
+
+    def _resolve_sigmoid_config(self) -> SigmoidPairwiseConfig | None:
+        if self.loss_type != "sigmoid_pairwise_hard":
+            return None
+        raw_sigmoid_cfg: DictConfig | None = self.loss_cfg.get("sigmoid")
+        if raw_sigmoid_cfg is None:
+            raise ValueError("loss.sigmoid must be configured for sigmoid_pairwise_hard.")
+        return SigmoidPairwiseConfig(
+            init_logit_scale=float(raw_sigmoid_cfg.get("init_logit_scale", 2.302585093)),
+            max_logit_scale=float(raw_sigmoid_cfg.get("max_logit_scale", 100.0)),
+            init_bias=float(raw_sigmoid_cfg.get("init_bias", -10.0)),
+            max_bias=float(raw_sigmoid_cfg.get("max_bias", -5.0)),
+            pos_weight=float(raw_sigmoid_cfg.get("pos_weight", 1.0)),
+            neg_weight=float(raw_sigmoid_cfg.get("neg_weight", 1.0)),
+        )
 
     def _resolve_distill_losses(self) -> list[tuple[str, float]]:
         distill_losses_cfg: Any | None = self.distill_cfg.losses
@@ -78,6 +99,9 @@ class LossRegularizationService:
         resolved_loss_type: str = (
             self.loss_type if loss_type is None else str(loss_type).lower()
         )
+        sigmoid_config: SigmoidPairwiseConfig | None = (
+            self.sigmoid_cfg if resolved_loss_type == "sigmoid_pairwise_hard" else None
+        )
         return LossComputer(
             loss_type=resolved_loss_type,
             temperature=self.temperature,
@@ -92,7 +116,17 @@ class LossRegularizationService:
             reg_paper_faithful=bool(self.reg_cfg.paper_faithful),
             in_batch_weight=self.in_batch_weight,
             pairwise_weight=self.pairwise_weight,
+            sigmoid_config=sigmoid_config,
         )
+
+    def resolve_validation_loss_type(self) -> str:
+        if self.loss_type == "sigmoid_pairwise_hard":
+            return self.loss_type
+        return "pairwise"
+
+    @property
+    def has_trainable_loss_parameters(self) -> bool:
+        return self.sigmoid_cfg is not None
 
     def lambda_schedule_multiplier(self, global_step: int) -> float:
         schedule_steps: int | None = self.reg_cfg.schedule_steps
@@ -154,6 +188,10 @@ class LossRegularizationService:
             distill_margin_mse_loss,
             q_reg,
             d_reg,
+            sigmoid_pos_loss,
+            sigmoid_neg_loss,
+            sigmoid_logit_scale,
+            sigmoid_bias,
         ) = loss_computer(
             q_reps=q_reps,
             doc_reps=doc_reps,
@@ -177,4 +215,8 @@ class LossRegularizationService:
             lambda_scale=lambda_scale,
             reg_query_lambda=reg_query_lambda,
             reg_doc_lambda=reg_doc_lambda,
+            sigmoid_pos_loss=sigmoid_pos_loss,
+            sigmoid_neg_loss=sigmoid_neg_loss,
+            sigmoid_logit_scale=sigmoid_logit_scale,
+            sigmoid_bias=sigmoid_bias,
         )

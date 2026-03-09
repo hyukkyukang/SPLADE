@@ -54,6 +54,32 @@ class _DummyLossService:
         )
 
 
+class _DummySigmoidLossService(_DummyLossService):
+    def compute_loss(self, **_: object) -> LossComputationOutputs:
+        outputs = super().compute_loss()
+        scalar = torch.tensor(1.0, dtype=torch.float32)
+        return LossComputationOutputs(
+            loss=outputs.loss,
+            pairwise_scores=outputs.pairwise_scores,
+            pairwise_loss=outputs.pairwise_loss,
+            in_batch_loss=outputs.in_batch_loss,
+            distill_loss=outputs.distill_loss,
+            distill_mse_loss=outputs.distill_mse_loss,
+            distill_kl_loss=outputs.distill_kl_loss,
+            distill_margin_mse_loss=outputs.distill_margin_mse_loss,
+            q_reg=outputs.q_reg,
+            d_reg=outputs.d_reg,
+            lambda_scale_value=outputs.lambda_scale_value,
+            lambda_scale=outputs.lambda_scale,
+            reg_query_lambda=outputs.reg_query_lambda,
+            reg_doc_lambda=outputs.reg_doc_lambda,
+            sigmoid_pos_loss=scalar,
+            sigmoid_neg_loss=scalar * 2.0,
+            sigmoid_logit_scale=scalar * 3.0,
+            sigmoid_bias=-scalar * 4.0,
+        )
+
+
 class TrainingMetricGatingTest(unittest.TestCase):
     def test_skips_expensive_train_metrics_when_interval_not_due(self) -> None:
         module = SimpleNamespace()
@@ -189,6 +215,53 @@ class TrainingMetricGatingTest(unittest.TestCase):
 
         self.assertIn("q_reg", metrics)
         self.assertIn("d_reg", metrics)
+
+    def test_sigmoid_metrics_are_exposed_for_sigmoid_loss_type(self) -> None:
+        module = SimpleNamespace()
+        module._compile_policy = _DummyCompilePolicy()
+        module.model = _DummyModel()
+        module._validation_doc_encode_chunk_size = 16
+        module._loss_service = _DummySigmoidLossService()
+        module.loss_computer = object()
+        module.loss_type = "sigmoid_pairwise_hard"
+        module.distill_cfg = SimpleNamespace(enabled=False)
+        module.reg_cfg = SimpleNamespace(
+            query_weight=0.0,
+            doc_weight=0.0,
+            paper_faithful=True,
+            type="l1",
+        )
+        module.reg_query_weight = 0.0
+        module.reg_doc_weight = 0.0
+        module._metrics_service = SimpleNamespace(
+            should_compute_step_only_metrics=lambda _: False
+        )
+        module.global_step = 1
+        module._compute_rep_magnitude = lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("expensive magnitude metric should be skipped")
+        )
+        module._add_sparsity_metrics = lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("expensive sparsity metric should be skipped")
+        )
+        batch = {
+            "query_input_ids": torch.ones((2, 3), dtype=torch.long),
+            "query_attention_mask": torch.ones((2, 3), dtype=torch.long),
+            "doc_input_ids": torch.ones((2, 2, 3), dtype=torch.long),
+            "doc_attention_mask": torch.ones((2, 2, 3), dtype=torch.long),
+            "pos_mask": torch.tensor([[True, False], [True, False]]),
+            "doc_mask": torch.tensor([[True, True], [True, True]]),
+            "teacher_scores": torch.zeros((2, 2), dtype=torch.float32),
+        }
+
+        metrics = SPLADETrainingModule._training_step_shared(
+            module, batch, stage="train"
+        )
+
+        self.assertIn("pairwise_loss", metrics)
+        self.assertIn("sigmoid_pos_loss", metrics)
+        self.assertIn("sigmoid_neg_loss", metrics)
+        self.assertIn("sigmoid_logit_scale", metrics)
+        self.assertIn("sigmoid_bias", metrics)
 
 
 if __name__ == "__main__":

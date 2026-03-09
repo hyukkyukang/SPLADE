@@ -4,6 +4,12 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
+from src.model.sigmoid_pairwise import (
+    SigmoidPairwiseConfig,
+    SigmoidPairwiseOutputs,
+    SigmoidPairwiseState,
+)
+
 
 def multi_positive_contrastive_loss(
     scores: torch.Tensor,
@@ -59,6 +65,7 @@ class LossComputer(nn.Module):
         reg_paper_faithful: bool,
         in_batch_weight: float = 1.0,
         pairwise_weight: float = 1.0,
+        sigmoid_config: SigmoidPairwiseConfig | None = None,
     ) -> None:
         super().__init__()
         self.loss_type: str = loss_type.replace("-", "_").lower()
@@ -73,13 +80,27 @@ class LossComputer(nn.Module):
         self.reg_paper_faithful: bool = bool(reg_paper_faithful)
         self.in_batch_weight: float = float(in_batch_weight)
         self.pairwise_weight: float = float(pairwise_weight)
+        self.sigmoid_config: SigmoidPairwiseConfig | None = sigmoid_config
+        if self.loss_type == "sigmoid_pairwise_hard" and self.sigmoid_config is None:
+            raise ValueError(
+                "sigmoid_config must be provided for sigmoid_pairwise_hard."
+            )
         self._neg_inf: torch.Tensor
         self.register_buffer(
             "_neg_inf",
             torch.tensor(float("-inf"), dtype=torch.float32),
             persistent=False,
         )
-        self._main_loss_fn: _MainLossFn = self._resolve_main_loss_fn(self.loss_type)
+        self._sigmoid_state: SigmoidPairwiseState | None = (
+            None
+            if sigmoid_config is None
+            else SigmoidPairwiseState(sigmoid_config)
+        )
+        self._main_loss_fn: _MainLossFn | None = (
+            None
+            if self.loss_type == "sigmoid_pairwise_hard"
+            else self._resolve_main_loss_fn(self.loss_type)
+        )
         (
             self._distill_mse_weight,
             self._distill_kl_weight,
@@ -411,6 +432,15 @@ class LossComputer(nn.Module):
         raise ValueError(f"Unsupported regularization: {reg_type}")
 
     # --- Public methods ---
+    @property
+    def has_trainable_main_loss_parameters(self) -> bool:
+        return self._sigmoid_state is not None
+
+    def clamp_parameters(self) -> None:
+        if self._sigmoid_state is None:
+            return
+        self._sigmoid_state.clamp_parameters()
+
     def forward(
         self,
         q_reps: torch.Tensor,
@@ -430,18 +460,42 @@ class LossComputer(nn.Module):
         torch.Tensor,
         torch.Tensor,
         torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
     ]:
         pairwise_scores: torch.Tensor = self._compute_pairwise_scores(q_reps, doc_reps)
+        zero_scalar: torch.Tensor = pairwise_scores.new_zeros(())
         loss: torch.Tensor
         pairwise_loss: torch.Tensor
         in_batch_loss: torch.Tensor
         use_main_loss: bool = (
             not self.distill_enabled or self.include_main_loss_when_distilling
         )
+        sigmoid_outputs: SigmoidPairwiseOutputs | None = None
         if use_main_loss:
-            loss, pairwise_loss, in_batch_loss = self._main_loss_fn(
-                pairwise_scores, q_reps, doc_reps, pos_mask, doc_mask
-            )
+            if self.loss_type == "sigmoid_pairwise_hard":
+                if self._sigmoid_state is None:
+                    raise RuntimeError(
+                        "sigmoid_pairwise_hard requires sigmoid state."
+                    )
+                sigmoid_outputs = self._sigmoid_state(
+                    scores=pairwise_scores,
+                    pos_mask=pos_mask,
+                    doc_mask=doc_mask,
+                )
+                loss = sigmoid_outputs.loss
+                pairwise_loss = sigmoid_outputs.loss
+                in_batch_loss = torch.zeros_like(sigmoid_outputs.loss)
+            else:
+                if self._main_loss_fn is None:
+                    raise RuntimeError(
+                        f"Main loss function is not configured for {self.loss_type!r}."
+                    )
+                loss, pairwise_loss, in_batch_loss = self._main_loss_fn(
+                    pairwise_scores, q_reps, doc_reps, pos_mask, doc_mask
+                )
         else:
             # Distillation-only mode keeps retrieval objective disabled.
             zero = pairwise_scores.new_zeros(())
@@ -453,6 +507,21 @@ class LossComputer(nn.Module):
         distill_mse_loss: torch.Tensor = pairwise_scores.new_zeros(())
         distill_kl_loss: torch.Tensor = pairwise_scores.new_zeros(())
         distill_margin_mse_loss: torch.Tensor = pairwise_scores.new_zeros(())
+        sigmoid_pos_loss: torch.Tensor = zero_scalar
+        sigmoid_neg_loss: torch.Tensor = zero_scalar
+        sigmoid_logit_scale: torch.Tensor = zero_scalar
+        sigmoid_bias: torch.Tensor = zero_scalar
+        if self._sigmoid_state is not None and self.loss_type == "sigmoid_pairwise_hard":
+            if sigmoid_outputs is None:
+                sigmoid_outputs = self._sigmoid_state(
+                    scores=pairwise_scores,
+                    pos_mask=pos_mask,
+                    doc_mask=doc_mask,
+                )
+            sigmoid_pos_loss = sigmoid_outputs.pos_loss
+            sigmoid_neg_loss = sigmoid_outputs.neg_loss
+            sigmoid_logit_scale = sigmoid_outputs.logit_scale
+            sigmoid_bias = sigmoid_outputs.bias
         if self.distill_enabled:
             if self._distill_mse_weight != 0.0:
                 distill_mse_loss = self._distill_loss_mse(
@@ -499,4 +568,8 @@ class LossComputer(nn.Module):
             distill_margin_mse_loss,
             q_reg,
             d_reg,
+            sigmoid_pos_loss,
+            sigmoid_neg_loss,
+            sigmoid_logit_scale,
+            sigmoid_bias,
         )

@@ -124,13 +124,15 @@ class SPLADETrainingModule(L.LightningModule):
         self.reg_cfg = self._loss_service.reg_cfg
         self.loss_cfg = self._loss_service.loss_cfg
         self.loss_type = self._loss_service.loss_type
+        self.validation_loss_type: str = self._loss_service.resolve_validation_loss_type()
         self.reg_query_weight = self._loss_service.reg_query_weight
         self.reg_doc_weight = self._loss_service.reg_doc_weight
 
         self._eager_train_loss_computer = self._loss_service.build_loss_computer()
-        self._eager_validation_loss_computer = self._loss_service.build_loss_computer(
-            loss_type="pairwise"
-        )
+        if self.validation_loss_type != self.loss_type:
+            self._eager_validation_loss_computer = self._loss_service.build_loss_computer(
+                loss_type=self.validation_loss_type
+            )
         self.loss_computer: Any = self._eager_train_loss_computer
         if self._train_compile_policy.torch_compile_enabled and compile_loss:
             self._compiled_train_loss_computer = torch.compile(
@@ -145,10 +147,21 @@ class SPLADETrainingModule(L.LightningModule):
             and validation_policy.torch_compile_enabled
             and compile_loss
         ):
-            self._compiled_validation_loss_computer = torch.compile(
-                self._eager_validation_loss_computer,
-                **validation_policy.loss_compile_mode_kwargs,
+            validation_eager_loss: LossComputer = (
+                self._eager_train_loss_computer
+                if self._eager_validation_loss_computer is None
+                else self._eager_validation_loss_computer
             )
+            if (
+                validation_policy is self._train_compile_policy
+                and validation_eager_loss is self._eager_train_loss_computer
+            ):
+                self._compiled_validation_loss_computer = None
+            else:
+                self._compiled_validation_loss_computer = torch.compile(
+                    validation_eager_loss,
+                    **validation_policy.loss_compile_mode_kwargs,
+                )
         self._activate_compile_policy(
             policy=self._train_compile_policy,
             use_compiled=self._train_compile_policy.compile_enabled_for_current_stage,
@@ -214,8 +227,16 @@ class SPLADETrainingModule(L.LightningModule):
             eager_loss_computer = self._eager_train_loss_computer
             compiled_loss_computer = self._compiled_train_loss_computer
         elif stage == "val":
-            eager_loss_computer = self._eager_validation_loss_computer
-            compiled_loss_computer = self._compiled_validation_loss_computer
+            eager_loss_computer = (
+                self._eager_train_loss_computer
+                if self._eager_validation_loss_computer is None
+                else self._eager_validation_loss_computer
+            )
+            compiled_loss_computer = (
+                self._compiled_train_loss_computer
+                if self._compiled_validation_loss_computer is None
+                else self._compiled_validation_loss_computer
+            )
         else:
             raise ValueError(f"Unsupported stage: {stage}")
         if use_compiled and compiled_loss_computer is not None:
@@ -450,10 +471,19 @@ class SPLADETrainingModule(L.LightningModule):
             metrics["doc_rep_magnitude"] = self._compute_rep_magnitude(
                 flat_doc_reps_for_metrics, flat_doc_mask_for_metrics
             )
-        if self.loss_type in {"pairwise", "in_batch_plus_pairwise"}:
+        if self.loss_type in {
+            "pairwise",
+            "in_batch_plus_pairwise",
+            "sigmoid_pairwise_hard",
+        }:
             metrics["pairwise_loss"] = pairwise_loss
         if self.loss_type in {"in_batch", "in_batch_plus_pairwise"}:
             metrics["in_batch_loss"] = in_batch_loss
+        if self.loss_type == "sigmoid_pairwise_hard":
+            metrics["sigmoid_pos_loss"] = loss_outputs.sigmoid_pos_loss
+            metrics["sigmoid_neg_loss"] = loss_outputs.sigmoid_neg_loss
+            metrics["sigmoid_logit_scale"] = loss_outputs.sigmoid_logit_scale
+            metrics["sigmoid_bias"] = loss_outputs.sigmoid_bias
         if self.distill_cfg.enabled:
             metrics["distill_loss"] = distill_loss
             for (
@@ -806,6 +836,22 @@ class SPLADETrainingModule(L.LightningModule):
                 finally:
                     self._offload_nanobeir_cache_to_cpu()
             self._nanobeir_barrier()
+
+    def optimizer_step(
+        self,
+        epoch: int,
+        batch_idx: int,
+        optimizer: torch.optim.Optimizer,
+        optimizer_closure: Any | None = None,
+    ) -> None:
+        super().optimizer_step(
+            epoch,
+            batch_idx,
+            optimizer,
+            optimizer_closure=optimizer_closure,
+        )
+        if self._eager_train_loss_computer is not None:
+            self._eager_train_loss_computer.clamp_parameters()
 
     def configure_optimizers(self) -> torch.optim.Optimizer | dict[str, Any]:
         optimizer_name: str = str(self.cfg.training.optimizer).lower()

@@ -74,6 +74,34 @@ class TrainingMetricsService:
                 on_step=True,
                 on_epoch=True,
             )
+        if "sigmoid_pos_loss" in detached_metrics:
+            module.log(
+                "train_sigmoid_pos_loss",
+                detached_metrics["sigmoid_pos_loss"],
+                on_step=True,
+                on_epoch=True,
+            )
+        if "sigmoid_neg_loss" in detached_metrics:
+            module.log(
+                "train_sigmoid_neg_loss",
+                detached_metrics["sigmoid_neg_loss"],
+                on_step=True,
+                on_epoch=True,
+            )
+        if "sigmoid_logit_scale" in detached_metrics:
+            module.log(
+                "train_sigmoid_logit_scale",
+                detached_metrics["sigmoid_logit_scale"],
+                on_step=True,
+                on_epoch=True,
+            )
+        if "sigmoid_bias" in detached_metrics:
+            module.log(
+                "train_sigmoid_bias",
+                detached_metrics["sigmoid_bias"],
+                on_step=True,
+                on_epoch=True,
+            )
         if "in_batch_loss" in detached_metrics:
             module.log(
                 "train_in_batch_loss",

@@ -127,6 +127,25 @@ class LossServiceTest(unittest.TestCase):
             places=6,
         )
 
+    def test_sigmoid_pairwise_hard_keeps_same_validation_loss_type(self) -> None:
+        cfg = _build_training_cfg()
+        cfg.loss.type = "sigmoid_pairwise_hard"
+        cfg.loss.sigmoid = {
+            "init_logit_scale": 2.302585093,
+            "max_logit_scale": 100.0,
+            "init_bias": -10.0,
+            "max_bias": -5.0,
+            "pos_weight": 1.0,
+            "neg_weight": 1.0,
+        }
+        service = LossRegularizationService(cfg)
+
+        self.assertEqual(service.resolve_validation_loss_type(), "sigmoid_pairwise_hard")
+        self.assertTrue(service.has_trainable_loss_parameters)
+
+        loss_computer = service.build_loss_computer()
+        self.assertTrue(loss_computer.has_trainable_main_loss_parameters)
+
 
 if __name__ == "__main__":
     unittest.main()

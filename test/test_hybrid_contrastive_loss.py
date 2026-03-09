@@ -57,6 +57,7 @@ class HybridContrastiveLossTest(unittest.TestCase):
             _distill_margin_mse_loss,
             _q_reg,
             _d_reg,
+            *_extra_metrics,
         ) = model(
             q_reps=q_reps,
             doc_reps=doc_reps,
