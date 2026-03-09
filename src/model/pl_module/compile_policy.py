@@ -445,6 +445,64 @@ class TrainingCompilePolicyManager:
         self.compile_enabled_for_current_stage = False
         return
 
+    def can_fuse_query_doc_encoding(self) -> bool:
+        model: torch.nn.Module = self.eager_model
+        if bool(getattr(model, "doc_only", False)):
+            return False
+        query_pooling_mode: Any = getattr(model, "_query_pooling_mode", None)
+        doc_pooling_mode: Any = getattr(model, "_doc_pooling_mode", None)
+        if not isinstance(query_pooling_mode, torch.Tensor):
+            return False
+        if not isinstance(doc_pooling_mode, torch.Tensor):
+            return False
+        if query_pooling_mode.numel() != 1 or doc_pooling_mode.numel() != 1:
+            return False
+        return float(query_pooling_mode.item()) == float(doc_pooling_mode.item())
+
+    def encode_queries_and_docs(
+        self,
+        *,
+        query_input_ids: torch.Tensor,
+        query_attention_mask: torch.Tensor,
+        doc_input_ids: torch.Tensor,
+        doc_attention_mask: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if not self.can_fuse_query_doc_encoding():
+            raise RuntimeError(
+                "Query/doc fused encoding is not available for the active model."
+            )
+
+        model: torch.nn.Module = self.eager_model
+        query_batch_size: int = int(query_input_ids.shape[0])
+        combined_input_ids: torch.Tensor = torch.cat(
+            (query_input_ids, doc_input_ids), dim=0
+        )
+        combined_attention_mask: torch.Tensor = torch.cat(
+            (query_attention_mask, doc_attention_mask), dim=0
+        )
+        pooling_mode: torch.Tensor = cast(torch.Tensor, model._query_pooling_mode)
+        encoder_fn: Callable[..., torch.Tensor]
+        if (
+            self.compile_enabled_for_current_stage
+            and self._compiled_shared_encoder_module is not None
+        ):
+            encoder_fn = cast(
+                Callable[..., torch.Tensor], self._compiled_shared_encoder_module
+            )
+        else:
+            encoder_fn = cast(Callable[..., torch.Tensor], model.encoder)
+        combined_reps: torch.Tensor = encoder_fn(
+            input_ids=combined_input_ids,
+            attention_mask=combined_attention_mask,
+            pooling_mode=pooling_mode,
+        )
+        query_reps: torch.Tensor = combined_reps[:query_batch_size]
+        doc_reps: torch.Tensor = combined_reps[query_batch_size:]
+        if bool(getattr(model, "normalize", False)):
+            query_reps = torch.nn.functional.normalize(query_reps, p=2, dim=-1)
+            doc_reps = torch.nn.functional.normalize(doc_reps, p=2, dim=-1)
+        return query_reps, doc_reps
+
     def maybe_mark_step(self) -> None:
         if (
             self.compile_enabled_for_current_stage

@@ -12,6 +12,7 @@ from lightning.pytorch.callbacks import (
     ModelCheckpoint,
 )
 from lightning.pytorch.loggers import CSVLogger, Logger, MLFlowLogger
+from lightning.pytorch.profilers import Profiler, PyTorchProfiler
 from mlflow.tracking import MlflowClient
 from omegaconf import DictConfig, OmegaConf
 
@@ -155,6 +156,77 @@ def _build_progress_bar(training_cfg: DictConfig) -> StepAwareRichProgressBar | 
         return None
     refresh_rate_value: float = float(progress_cfg.refresh_rate)
     return StepAwareRichProgressBar(refresh_rate=refresh_rate_value)
+
+
+def _build_lightning_profiler(
+    cfg: DictConfig, training_cfg: DictConfig
+) -> Profiler | None:
+    """Build an opt-in Lightning PyTorch profiler."""
+    profiler_cfg: DictConfig | None = training_cfg.get("profiler")
+    if profiler_cfg is None or not bool(profiler_cfg.enabled):
+        return None
+
+    wait_steps: int = int(profiler_cfg.get("wait_steps", 10))
+    warmup_steps: int = int(profiler_cfg.get("warmup_steps", 5))
+    active_steps: int = int(profiler_cfg.get("active_steps", 5))
+    repeat: int = int(profiler_cfg.get("repeat", 1))
+    if wait_steps < 0 or warmup_steps < 0 or active_steps <= 0 or repeat <= 0:
+        raise ValueError(
+            "training.profiler requires wait_steps >= 0, warmup_steps >= 0, "
+            "active_steps > 0, and repeat > 0."
+        )
+
+    profiler_dir: str = os.path.join(
+        str(cfg.log_dir), str(profiler_cfg.get("dir_name", "profiler"))
+    )
+    os.makedirs(profiler_dir, exist_ok=True)
+
+    activities: list[torch.profiler.ProfilerActivity] = [
+        torch.profiler.ProfilerActivity.CPU
+    ]
+    if not bool(training_cfg.use_cpu):
+        activities.append(torch.profiler.ProfilerActivity.CUDA)
+
+    sort_by_key: str
+    if bool(training_cfg.use_cpu):
+        sort_by_key = str(profiler_cfg.get("sort_by_key", "self_cpu_time_total"))
+    else:
+        sort_by_key = str(profiler_cfg.get("sort_by_key", "cuda_time_total"))
+    record_module_names: bool = bool(profiler_cfg.get("record_module_names", True))
+    if bool(training_cfg.get("torch_compile", False)) and record_module_names:
+        record_module_names = False
+        log_if_rank_zero(
+            logger,
+            "Disabled Lightning PyTorchProfiler record_module_names because it "
+            "causes torch.compile recompiles inside profiler hooks.",
+            level="warning",
+        )
+
+    profiler: PyTorchProfiler = PyTorchProfiler(
+        dirpath=profiler_dir,
+        filename=str(profiler_cfg.get("filename", "trace")),
+        schedule=torch.profiler.schedule(
+            wait=wait_steps,
+            warmup=warmup_steps,
+            active=active_steps,
+            repeat=repeat,
+        ),
+        activities=activities,
+        record_shapes=bool(profiler_cfg.get("record_shapes", True)),
+        profile_memory=bool(profiler_cfg.get("profile_memory", True)),
+        with_stack=bool(profiler_cfg.get("with_stack", False)),
+        export_to_chrome=bool(profiler_cfg.get("export_to_chrome", True)),
+        row_limit=int(profiler_cfg.get("row_limit", 40)),
+        sort_by_key=sort_by_key,
+        record_module_names=record_module_names,
+    )
+    log_if_rank_zero(
+        logger,
+        "Enabled Lightning PyTorchProfiler with schedule "
+        f"(wait={wait_steps}, warmup={warmup_steps}, active={active_steps}, "
+        f"repeat={repeat}) writing to {profiler_dir}.",
+    )
+    return profiler
 
 
 def _resolve_mlflow_run_name(training_cfg: DictConfig, tag_value: str | None) -> str:
@@ -411,6 +483,7 @@ def main(cfg: DictConfig) -> None:
     ]
     if progress_bar is not None:
         callbacks.append(progress_bar)
+    lightning_profiler: Profiler | None = _build_lightning_profiler(cfg, training_cfg)
 
     trainer: L.Trainer = L.Trainer(
         deterministic=False,
@@ -424,6 +497,7 @@ def main(cfg: DictConfig) -> None:
         logger=lightning_loggers,
         callbacks=callbacks,
         gradient_clip_val=gradient_clip_val,
+        profiler=lightning_profiler,
         **trainer_kwargs,
     )
 

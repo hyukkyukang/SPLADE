@@ -27,6 +27,9 @@ lr: 2e-5
 warmup_steps: 6000
 scheduler: linear
 max_grad_norm: 1.0
+optimizer_fused: auto
+optimizer_foreach: false
+gradient_norm_monitor_interval: 0
 
 precision: bf16-mixed
 use_cpu: false
@@ -48,13 +51,17 @@ torch_compile_large_vocab_doc_fallback_mode: max-autotune
 torch_compile_large_vocab_loss_fallback_mode: max-autotune
 torch_compile_skip_query_encoder_for_large_vocab: false
 torch_compile_skip_doc_encoder_for_large_vocab: false
-# Enable safer DDP settings for compile-heavy modes by default.
-torch_compile_ddp_safe_mode: true
+# Keep the configured DDP settings by default even for compile-heavy modes.
+torch_compile_ddp_safe_mode: false
 # Keep torch.compile enabled during validation by default.
 disable_compile_for_validation: false
+fuse_query_doc_encoding_when_possible: false
 strategy: ddp
 static_graph: true
 find_unused_parameters: false
+gradient_as_bucket_view: true
+broadcast_buffers: true
+bucket_cap_mb: 100
 num_devices: null
 sparse_top_k: 0
 sparse_min_weight: 0.0
@@ -62,9 +69,9 @@ sparse_min_weight: 0.0
 val_check_interval: 5000
 limit_val_batches: 1.0
 log_every_n_steps: 200
-# Gate expensive step-only metrics (active dims/sparsity/flops proxy) to reduce
-# per-step logging overhead. `1` keeps previous behavior (log every step).
-step_only_metric_log_interval: 1
+# Keep `train_loss` as the only dense training metric and sparsely sample the
+# remaining training metrics every N steps. `1` restores per-step logging.
+step_only_metric_log_interval: 100
 val_sample_size: 4096
 
 progress_bar:
@@ -75,6 +82,22 @@ progress_bar:
   #   - 0.2 means 1 update every 5 seconds. 
   #   - 1.0 means 1 update every 1 second. 
   refresh_rate: 0.1
+
+profiler:
+  enabled: false
+  dir_name: profiler
+  filename: trace
+  wait_steps: 10
+  warmup_steps: 5
+  active_steps: 5
+  repeat: 1
+  record_shapes: true
+  profile_memory: true
+  with_stack: false
+  export_to_chrome: true
+  row_limit: 40
+  sort_by_key: cuda_time_total
+  record_module_names: true
 
 validation_metrics:
   enabled: true

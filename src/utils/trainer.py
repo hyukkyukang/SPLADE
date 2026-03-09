@@ -20,6 +20,8 @@ class EffectiveDistributedSettings:
     static_graph: bool
     find_unused_parameters: bool
     gradient_as_bucket_view: bool
+    broadcast_buffers: bool
+    bucket_cap_mb: int | None
     full_model_compile_safe: bool
     start_method: str | None = None
 
@@ -70,6 +72,11 @@ def resolve_effective_distributed_settings(
     find_unused_parameters: bool = raw_find_unused_parameters
     gradient_as_bucket_view: bool = bool(
         cfg_section.get("gradient_as_bucket_view", True)
+    )
+    broadcast_buffers: bool = bool(cfg_section.get("broadcast_buffers", True))
+    raw_bucket_cap_mb: Any | None = cfg_section.get("bucket_cap_mb")
+    bucket_cap_mb: int | None = (
+        None if raw_bucket_cap_mb is None else max(int(raw_bucket_cap_mb), 1)
     )
     ddp_enabled: bool = False
     distributed_enabled: bool = False
@@ -126,9 +133,30 @@ def resolve_effective_distributed_settings(
         static_graph=static_graph,
         find_unused_parameters=find_unused_parameters,
         gradient_as_bucket_view=gradient_as_bucket_view,
+        broadcast_buffers=broadcast_buffers,
+        bucket_cap_mb=bucket_cap_mb,
         full_model_compile_safe=full_model_compile_safe,
         start_method=start_method,
     )
+
+
+def _build_ddp_strategy(
+    settings: EffectiveDistributedSettings,
+    *,
+    include_gradient_as_bucket_view: bool,
+) -> DDPStrategy:
+    strategy_kwargs: dict[str, Any] = {
+        "timeout": timedelta(hours=DDP_TIMEOUT_HOURS),
+        "static_graph": settings.static_graph,
+        "find_unused_parameters": settings.find_unused_parameters,
+        "broadcast_buffers": settings.broadcast_buffers,
+        "bucket_cap_mb": settings.bucket_cap_mb,
+    }
+    if include_gradient_as_bucket_view:
+        strategy_kwargs["gradient_as_bucket_view"] = settings.gradient_as_bucket_view
+    if settings.start_method is not None:
+        strategy_kwargs["start_method"] = settings.start_method
+    return DDPStrategy(**strategy_kwargs)
 
 
 def get_cpu_trainer_kwargs(cfg_section: DictConfig) -> dict[str, Any]:
@@ -144,20 +172,17 @@ def get_cpu_trainer_kwargs(cfg_section: DictConfig) -> dict[str, Any]:
 
     if strategy_name == "ddp":
         if settings.ddp_enabled:
-            kwargs["strategy"] = DDPStrategy(
-                timeout=timedelta(hours=DDP_TIMEOUT_HOURS),
-                static_graph=settings.static_graph,
-                find_unused_parameters=settings.find_unused_parameters,
+            kwargs["strategy"] = _build_ddp_strategy(
+                settings,
+                include_gradient_as_bucket_view=False,
             )
         else:
             kwargs["strategy"] = "auto"
     elif strategy_name == "ddp_spawn":
         if settings.ddp_enabled:
-            kwargs["strategy"] = DDPStrategy(
-                timeout=timedelta(hours=DDP_TIMEOUT_HOURS),
-                static_graph=settings.static_graph,
-                find_unused_parameters=settings.find_unused_parameters,
-                start_method=settings.start_method,
+            kwargs["strategy"] = _build_ddp_strategy(
+                settings,
+                include_gradient_as_bucket_view=False,
             )
         else:
             kwargs["strategy"] = "auto"
@@ -178,19 +203,14 @@ def get_gpu_trainer_kwargs(cfg_section: DictConfig) -> dict[str, Any]:
     kwargs: dict[str, Any] = {"accelerator": "cuda", "devices": settings.num_devices}
 
     if strategy_name == "ddp":
-        kwargs["strategy"] = DDPStrategy(
-            timeout=timedelta(hours=DDP_TIMEOUT_HOURS),
-            static_graph=settings.static_graph,
-            find_unused_parameters=settings.find_unused_parameters,
-            gradient_as_bucket_view=settings.gradient_as_bucket_view,
+        kwargs["strategy"] = _build_ddp_strategy(
+            settings,
+            include_gradient_as_bucket_view=True,
         )
     elif strategy_name == "ddp_spawn":
-        kwargs["strategy"] = DDPStrategy(
-            timeout=timedelta(hours=DDP_TIMEOUT_HOURS),
-            static_graph=settings.static_graph,
-            find_unused_parameters=settings.find_unused_parameters,
-            gradient_as_bucket_view=settings.gradient_as_bucket_view,
-            start_method=settings.start_method,
+        kwargs["strategy"] = _build_ddp_strategy(
+            settings,
+            include_gradient_as_bucket_view=True,
         )
     elif strategy_name == "fsdp":
         kwargs["strategy"] = FSDPStrategy(timeout=timedelta(hours=DDP_TIMEOUT_HOURS))

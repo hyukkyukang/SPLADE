@@ -1,3 +1,5 @@
+import inspect
+import math
 from typing import Any, Callable, TypeVar, cast
 
 import lightning as L
@@ -19,6 +21,7 @@ from src.utils.script_setup import normalize_optional_str
 logger = get_logger("SPLADETrainingModule")
 _TCallable = TypeVar("_TCallable", bound=Callable[..., Any])
 _VALIDATION_DOC_ENCODE_CHUNK_SIZE = 10
+_TRI_STATE_CONFIG_MODES = {"auto", "true", "false"}
 
 
 def _dynamo_disable(fn: _TCallable) -> _TCallable:
@@ -47,6 +50,47 @@ def _is_masked_lm_incompatibility_error(exc: Exception) -> bool:
         "unrecognized configuration class" in message
         or "for this kind of automodel" in message
     )
+
+
+def _normalize_tri_state_config(value: Any, *, field_name: str) -> str:
+    """Parse bool/None/string config knobs into auto/true/false."""
+    normalized: str
+    if isinstance(value, bool):
+        normalized = "true" if value else "false"
+    elif value is None:
+        normalized = "auto"
+    else:
+        normalized = str(value).strip().lower()
+    if normalized not in _TRI_STATE_CONFIG_MODES:
+        raise ValueError(
+            f"{field_name} must be one of: auto, true, false. Got: {value!r}"
+        )
+    return normalized
+
+
+def _optimizer_supports_kwarg(
+    optimizer_cls: type[torch.optim.Optimizer], kwarg_name: str
+) -> bool:
+    return kwarg_name in inspect.signature(optimizer_cls).parameters
+
+
+def _optimizer_grad_parameters(
+    optimizer: torch.optim.Optimizer,
+) -> list[torch.nn.Parameter]:
+    return [
+        parameter
+        for group in optimizer.param_groups
+        for parameter in cast(list[torch.nn.Parameter], group["params"])
+        if parameter.grad is not None
+    ]
+
+
+def _normalize_gradient_clip_algorithm(
+    gradient_clip_algorithm: str | None,
+) -> str:
+    return str(
+        gradient_clip_algorithm if gradient_clip_algorithm is not None else "norm"
+    ).split(".")[-1].lower()
 
 
 class SPLADETrainingModule(L.LightningModule):
@@ -109,7 +153,7 @@ class SPLADETrainingModule(L.LightningModule):
         self._loss_service = LossRegularizationService(cfg.training)
         self._metrics_service = TrainingMetricsService(
             step_only_metric_log_interval=int(
-                cfg.training.get("step_only_metric_log_interval", 1)
+                cfg.training.get("step_only_metric_log_interval", 100)
             ),
             validation_diagnostics_enabled=bool(
                 cfg.training.validation_metrics.get("diagnostics_enabled", True)
@@ -118,6 +162,15 @@ class SPLADETrainingModule(L.LightningModule):
                 cfg.training.validation_metrics.get("diagnostics_log_interval", 1)
             ),
         )
+        self._gradient_norm_monitor_interval: int = max(
+            int(cfg.training.get("gradient_norm_monitor_interval", 0)), 0
+        )
+        self._gradient_norm_monitor_count: int = 0
+        self._gradient_norm_nonfinite_count: int = 0
+        self._gradient_norm_over_clip_count: int = 0
+        self._gradient_norm_monitor_sum: float = 0.0
+        self._gradient_norm_monitor_max: float = 0.0
+        self._gradient_norm_monitor_max_step: int = -1
         # Keep compatibility with existing call sites while service extraction is ongoing.
         self.temperature = self._loss_service.temperature
         self.distill_cfg = self._loss_service.distill_cfg
@@ -382,39 +435,69 @@ class SPLADETrainingModule(L.LightningModule):
             stage == "val"
             and int(flat_docs.shape[0]) > self._validation_doc_encode_chunk_size
         )
+        use_fused_query_doc_encoding: bool = (
+            bool(
+                self.cfg.training.get("fuse_query_doc_encoding_when_possible", False)
+            )
+            and not use_chunked_validation_doc_encoding
+            and not self._compile_policy.torch_compile_full_model
+            and int(batch["query_input_ids"].shape[1]) == int(flat_docs.shape[1])
+            and self._compile_policy.can_fuse_query_doc_encoding()
+        )
         if use_chunked_validation_doc_encoding:
-            if use_compile:
-                self._compile_policy.maybe_mark_step()
-            q_reps = self.model.encode_queries(
-                batch["query_input_ids"], batch["query_attention_mask"]
-            )
-            flat_doc_reps = self._encode_docs_in_chunks(
-                flat_docs,
-                flat_masks,
-                chunk_size=self._validation_doc_encode_chunk_size,
-                use_compile=use_compile,
-            )
+            with torch.autograd.profiler.record_function("splade.encode_queries"):
+                if use_compile:
+                    self._compile_policy.maybe_mark_step()
+                q_reps = self.model.encode_queries(
+                    batch["query_input_ids"], batch["query_attention_mask"]
+                )
+            with torch.autograd.profiler.record_function(
+                "splade.encode_docs_chunked"
+            ):
+                flat_doc_reps = self._encode_docs_in_chunks(
+                    flat_docs,
+                    flat_masks,
+                    chunk_size=self._validation_doc_encode_chunk_size,
+                    use_compile=use_compile,
+                )
         elif self._compile_policy.torch_compile_full_model:
             active_model: torch.nn.Module = (
                 self._compile_policy.resolve_active_model_for_train_step()
             )
-            if use_compile:
-                self._compile_policy.maybe_mark_step()
-            q_reps, flat_doc_reps = active_model(
-                batch["query_input_ids"],
-                batch["query_attention_mask"],
-                flat_docs,
-                flat_masks,
-            )
+            with torch.autograd.profiler.record_function(
+                "splade.encode_full_model"
+            ):
+                if use_compile:
+                    self._compile_policy.maybe_mark_step()
+                q_reps, flat_doc_reps = active_model(
+                    batch["query_input_ids"],
+                    batch["query_attention_mask"],
+                    flat_docs,
+                    flat_masks,
+                )
+        elif use_fused_query_doc_encoding:
+            with torch.autograd.profiler.record_function(
+                "splade.encode_queries_docs_fused"
+            ):
+                if use_compile:
+                    self._compile_policy.maybe_mark_step()
+                q_reps, flat_doc_reps = self._compile_policy.encode_queries_and_docs(
+                    query_input_ids=batch["query_input_ids"],
+                    query_attention_mask=batch["query_attention_mask"],
+                    doc_input_ids=flat_docs,
+                    doc_attention_mask=flat_masks,
+                )
         else:
-            if use_compile:
-                self._compile_policy.maybe_mark_step()
-            q_reps = self.model.encode_queries(
-                batch["query_input_ids"], batch["query_attention_mask"]
-            )
-            if use_compile:
-                self._compile_policy.maybe_mark_step()
-            flat_doc_reps = self.model.encode_docs(flat_docs, flat_masks)
+            with torch.autograd.profiler.record_function("splade.encode_queries"):
+                if use_compile:
+                    self._compile_policy.maybe_mark_step()
+                q_reps = self.model.encode_queries(
+                    batch["query_input_ids"], batch["query_attention_mask"]
+                )
+            with torch.autograd.profiler.record_function("splade.encode_docs"):
+                if use_compile:
+                    self._compile_policy.maybe_mark_step()
+                flat_doc_reps = self.model.encode_docs(flat_docs, flat_masks)
 
         doc_reps: torch.Tensor = flat_doc_reps.view(bsz, doc_count, -1)
 
@@ -434,15 +517,16 @@ class SPLADETrainingModule(L.LightningModule):
             )
         else:
             should_compute_expensive_metrics = True
-        loss_outputs = self._loss_service.compute_loss(
-            loss_computer=self.loss_computer,
-            q_reps=q_reps,
-            doc_reps=doc_reps,
-            pos_mask=pos_mask,
-            doc_mask=doc_mask,
-            teacher_scores=teacher_scores,
-            global_step=int(self.global_step),
-        )
+        with torch.autograd.profiler.record_function("splade.compute_loss"):
+            loss_outputs = self._loss_service.compute_loss(
+                loss_computer=self.loss_computer,
+                q_reps=q_reps,
+                doc_reps=doc_reps,
+                pos_mask=pos_mask,
+                doc_mask=doc_mask,
+                teacher_scores=teacher_scores,
+                global_step=int(self.global_step),
+            )
         loss: torch.Tensor
         pairwise_loss: torch.Tensor
         in_batch_loss: torch.Tensor
@@ -575,6 +659,90 @@ class SPLADETrainingModule(L.LightningModule):
     @_dynamo_disable
     def _log_metrics(self, metrics: dict[str, torch.Tensor]) -> None:
         self._metrics_service.log_training_metrics(self, metrics)
+
+    def _compute_total_grad_norm(self) -> torch.Tensor:
+        total_sq_norm: torch.Tensor | None = None
+        parameter: torch.nn.Parameter
+        for parameter in self.parameters():
+            grad: torch.Tensor | None = parameter.grad
+            if grad is None:
+                continue
+            detached_grad: torch.Tensor = grad.detach()
+            if detached_grad.is_sparse:
+                detached_grad = detached_grad.coalesce().values()
+            grad_sq_norm: torch.Tensor = detached_grad.float().pow(2).sum()
+            total_sq_norm = (
+                grad_sq_norm if total_sq_norm is None else total_sq_norm + grad_sq_norm
+            )
+        if total_sq_norm is None:
+            return torch.zeros((), dtype=torch.float32, device=self.device)
+        return total_sq_norm.sqrt()
+
+    def on_before_optimizer_step(self, optimizer: torch.optim.Optimizer) -> None:
+        super().on_before_optimizer_step(optimizer)
+        interval: int = self._gradient_norm_monitor_interval
+        if interval <= 0:
+            return
+        global_step: int = int(getattr(self, "global_step", 0))
+        if global_step % interval != 0:
+            return
+
+        total_grad_norm: torch.Tensor = self._compute_total_grad_norm()
+        total_grad_norm_value: float = float(total_grad_norm.detach().cpu().item())
+        self._gradient_norm_monitor_count += 1
+        self._gradient_norm_monitor_sum += total_grad_norm_value
+        if not math.isfinite(total_grad_norm_value):
+            self._gradient_norm_nonfinite_count += 1
+        if total_grad_norm_value > self._gradient_norm_monitor_max:
+            self._gradient_norm_monitor_max = total_grad_norm_value
+            self._gradient_norm_monitor_max_step = global_step
+
+        clip_threshold: float = float(self.cfg.training.get("max_grad_norm", 0.0))
+        if clip_threshold > 0.0 and total_grad_norm_value > clip_threshold:
+            self._gradient_norm_over_clip_count += 1
+
+        self.log(
+            "train_preclip_grad_norm",
+            total_grad_norm.detach(),
+            on_step=True,
+            on_epoch=False,
+            prog_bar=False,
+            sync_dist=False,
+        )
+        if clip_threshold > 0.0:
+            self.log(
+                "train_preclip_grad_over_clip_ratio",
+                total_grad_norm.detach() / total_grad_norm.new_tensor(clip_threshold),
+                on_step=True,
+                on_epoch=False,
+                prog_bar=False,
+                sync_dist=False,
+            )
+
+    def on_train_end(self) -> None:
+        super().on_train_end()
+        monitor_count: int = self._gradient_norm_monitor_count
+        if monitor_count <= 0:
+            return
+        mean_grad_norm: float = self._gradient_norm_monitor_sum / float(monitor_count)
+        clip_threshold: float = float(self.cfg.training.get("max_grad_norm", 0.0))
+        summary_message: str = (
+            "Observed pre-clip grad norms on rank 0: "
+            f"samples={monitor_count}, mean={mean_grad_norm:.4f}, "
+            f"max={self._gradient_norm_monitor_max:.4f}, "
+            f"max_step={self._gradient_norm_monitor_max_step}, "
+            f"nonfinite={self._gradient_norm_nonfinite_count}"
+        )
+        if clip_threshold > 0.0:
+            over_clip_ratio: float = self._gradient_norm_over_clip_count / float(
+                monitor_count
+            )
+            summary_message += (
+                f", threshold={clip_threshold:.4f}, "
+                f"over_threshold={self._gradient_norm_over_clip_count}/{monitor_count} "
+                f"({over_clip_ratio:.1%})"
+            )
+        log_if_rank_zero(logger, summary_message)
 
     def on_validation_start(self) -> None:
         if self._train_compile_policy.torch_compile_enabled:
@@ -865,6 +1033,52 @@ class SPLADETrainingModule(L.LightningModule):
         if self._eager_train_loss_computer is not None:
             self._eager_train_loss_computer.clamp_parameters()
 
+    def configure_gradient_clipping(
+        self,
+        optimizer: torch.optim.Optimizer,
+        gradient_clip_val: int | float | None = None,
+        gradient_clip_algorithm: str | None = None,
+    ) -> None:
+        clip_value: float = (
+            0.0 if gradient_clip_val is None else float(gradient_clip_val)
+        )
+        if clip_value <= 0.0:
+            return
+        optimizer_defaults: dict[str, Any] = cast(
+            dict[str, Any], getattr(optimizer, "defaults", {})
+        )
+        if not bool(optimizer_defaults.get("fused", False)):
+            super().configure_gradient_clipping(
+                optimizer,
+                gradient_clip_val=gradient_clip_val,
+                gradient_clip_algorithm=gradient_clip_algorithm,
+            )
+            return
+
+        precision_plugin: Any | None = getattr(self.trainer, "precision_plugin", None)
+        if getattr(precision_plugin, "scaler", None) is not None:
+            raise RuntimeError(
+                "Fused optimizer gradient clipping in SPLADETrainingModule only "
+                "supports precision modes without GradScaler."
+            )
+
+        algorithm_name: str = _normalize_gradient_clip_algorithm(
+            gradient_clip_algorithm
+        )
+        parameters: list[torch.nn.Parameter] = _optimizer_grad_parameters(optimizer)
+        if not parameters:
+            return
+        if algorithm_name == "norm":
+            torch.nn.utils.clip_grad_norm_(parameters, max_norm=clip_value)
+            return
+        if algorithm_name == "value":
+            torch.nn.utils.clip_grad_value_(parameters, clip_value=clip_value)
+            return
+        raise ValueError(
+            "Unsupported gradient clip algorithm for fused optimizer path: "
+            f"{gradient_clip_algorithm!r}"
+        )
+
     def configure_optimizers(self) -> torch.optim.Optimizer | dict[str, Any]:
         optimizer_name: str = str(self.cfg.training.optimizer).lower()
         raw_betas: Any = self.cfg.training.get("adam_betas", (0.9, 0.999))
@@ -884,17 +1098,108 @@ class SPLADETrainingModule(L.LightningModule):
             "betas": adam_betas,
             "eps": adam_eps,
         }
+        optimizer_fused_value: Any = self.cfg.training.get("optimizer_fused", "auto")
+        optimizer_fused_mode: str = _normalize_tri_state_config(
+            optimizer_fused_value, field_name="training.optimizer_fused"
+        )
+        optimizer_foreach_value: Any = self.cfg.training.get("optimizer_foreach", False)
+        optimizer_foreach_mode: str = _normalize_tri_state_config(
+            optimizer_foreach_value, field_name="training.optimizer_foreach"
+        )
 
         optimizer: torch.optim.Optimizer
+        optimizer_cls: type[torch.optim.Optimizer]
         if optimizer_name == "adamw":
-            optimizer = torch.optim.AdamW(**optimizer_kwargs)
+            optimizer_cls = torch.optim.AdamW
         elif optimizer_name == "adam":
-            optimizer = torch.optim.Adam(**optimizer_kwargs)
+            optimizer_cls = torch.optim.Adam
         else:
             raise ValueError(
                 f"Unsupported optimizer: {optimizer_name}. "
                 "Supported optimizers are: adam, adamw."
             )
+        gradient_clipping_enabled: bool = (
+            float(self.cfg.training.get("max_grad_norm", 0.0)) > 0.0
+        )
+        precision_name: str = str(self.cfg.training.get("precision", "")).lower()
+        fused_clipping_supported: bool = (
+            gradient_clipping_enabled
+            and "bf16" in precision_name
+            and not bool(self.cfg.training.use_cpu)
+            and torch.cuda.is_available()
+            and torch.cuda.is_bf16_supported()
+        )
+        fused_supported: bool = _optimizer_supports_kwarg(optimizer_cls, "fused")
+        fused_requested: bool = optimizer_fused_mode in {"auto", "true"}
+        if fused_requested and gradient_clipping_enabled and not fused_clipping_supported:
+            if optimizer_fused_mode == "true":
+                raise ValueError(
+                    f"Fused {optimizer_cls.__name__} is incompatible with the "
+                    "current Lightning AMP gradient clipping path. Set "
+                    "training.max_grad_norm=0 to benchmark fused optimizer mode."
+                )
+            fused_requested = False
+            log_if_rank_zero(
+                logger,
+                f"Auto-disabled fused {optimizer_cls.__name__} because "
+                "training.max_grad_norm > 0 uses Lightning AMP gradient clipping.",
+                level="warning",
+            )
+        fused_enabled: bool = (
+            fused_requested
+            and fused_supported
+            and not bool(self.cfg.training.use_cpu)
+            and torch.cuda.is_available()
+        )
+        foreach_supported: bool = _optimizer_supports_kwarg(
+            optimizer_cls, "foreach"
+        )
+        foreach_requested: bool = optimizer_foreach_mode in {"auto", "true"}
+        foreach_enabled: bool = (
+            foreach_requested
+            and foreach_supported
+            and not fused_enabled
+            and not bool(self.cfg.training.use_cpu)
+            and torch.cuda.is_available()
+        )
+        if fused_enabled:
+            optimizer_kwargs["fused"] = True
+            log_if_rank_zero(
+                logger,
+                f"Enabled fused {optimizer_cls.__name__} optimizer on CUDA.",
+            )
+            if gradient_clipping_enabled:
+                log_if_rank_zero(
+                    logger,
+                    f"Using SPLADETrainingModule custom gradient clipping for fused "
+                    f"{optimizer_cls.__name__} in bf16 precision.",
+                )
+        elif optimizer_fused_mode == "true" and not fused_enabled:
+            raise ValueError(
+                f"Fused {optimizer_cls.__name__} requested but unsupported in the "
+                "current runtime. Set training.optimizer_fused=auto or false."
+            )
+        if foreach_enabled:
+            optimizer_kwargs["foreach"] = True
+            log_if_rank_zero(
+                logger,
+                f"Enabled foreach {optimizer_cls.__name__} optimizer on CUDA.",
+            )
+        elif optimizer_foreach_mode == "true" and not foreach_enabled:
+            if fused_enabled:
+                log_if_rank_zero(
+                    logger,
+                    f"Ignoring foreach {optimizer_cls.__name__} request because "
+                    "fused optimizer mode is enabled.",
+                    level="warning",
+                )
+            else:
+                raise ValueError(
+                    f"Foreach {optimizer_cls.__name__} requested but unsupported in "
+                    "the current runtime. Set training.optimizer_foreach=auto or "
+                    "false."
+                )
+        optimizer = optimizer_cls(**optimizer_kwargs)
 
         if self.cfg.training.scheduler == "linear":
             from transformers import get_linear_schedule_with_warmup

@@ -11,7 +11,6 @@ eval_batch_size: 8
 grad_accumulation: 1
 static_graph: true
 find_unused_parameters: false
-gradient_as_bucket_view: false
 
 regularization:
   query_weight: 0.0002
