@@ -28,6 +28,10 @@ class LossComputationOutputs:
     sigmoid_neg_loss: torch.Tensor | None = None
     sigmoid_logit_scale: torch.Tensor | None = None
     sigmoid_bias: torch.Tensor | None = None
+    sigmoid_pos_score_mean: torch.Tensor | None = None
+    sigmoid_neg_score_mean: torch.Tensor | None = None
+    sigmoid_pos_margin_mean: torch.Tensor | None = None
+    sigmoid_neg_margin_mean: torch.Tensor | None = None
 
 
 class LossRegularizationService:
@@ -64,9 +68,9 @@ class LossRegularizationService:
         if raw_sigmoid_cfg is None:
             raise ValueError("loss.sigmoid must be configured for sigmoid_pairwise_hard.")
         return SigmoidPairwiseConfig(
-            init_logit_scale=float(raw_sigmoid_cfg.get("init_logit_scale", 2.302585093)),
+            init_logit_scale=float(raw_sigmoid_cfg.get("init_logit_scale", -6.907755279)),
             max_logit_scale=float(raw_sigmoid_cfg.get("max_logit_scale", 100.0)),
-            init_bias=float(raw_sigmoid_cfg.get("init_bias", -10.0)),
+            init_bias=float(raw_sigmoid_cfg.get("init_bias", -8.0)),
             max_bias=float(raw_sigmoid_cfg.get("max_bias", -5.0)),
             pos_weight=float(raw_sigmoid_cfg.get("pos_weight", 1.0)),
             neg_weight=float(raw_sigmoid_cfg.get("neg_weight", 1.0)),
@@ -192,6 +196,10 @@ class LossRegularizationService:
             sigmoid_neg_loss,
             sigmoid_logit_scale,
             sigmoid_bias,
+            sigmoid_pos_score_mean,
+            sigmoid_neg_score_mean,
+            sigmoid_pos_margin_mean,
+            sigmoid_neg_margin_mean,
         ) = loss_computer(
             q_reps=q_reps,
             doc_reps=doc_reps,
@@ -219,4 +227,8 @@ class LossRegularizationService:
             sigmoid_neg_loss=sigmoid_neg_loss,
             sigmoid_logit_scale=sigmoid_logit_scale,
             sigmoid_bias=sigmoid_bias,
+            sigmoid_pos_score_mean=sigmoid_pos_score_mean,
+            sigmoid_neg_score_mean=sigmoid_neg_score_mean,
+            sigmoid_pos_margin_mean=sigmoid_pos_margin_mean,
+            sigmoid_neg_margin_mean=sigmoid_neg_margin_mean,
         )

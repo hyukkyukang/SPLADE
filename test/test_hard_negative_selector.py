@@ -1,13 +1,36 @@
+import random
 import unittest
 
 from src.data.dataset.hard_negative_selector import (
     HardNegativeSelectionSettings,
+    partition_hard_negative_doc_ids,
     resolve_model_order,
     select_hard_negative_doc_ids,
 )
 
 
 class HardNegativeSelectorTest(unittest.TestCase):
+    def test_partition_splits_deprioritized_models_into_tail_pool(self) -> None:
+        neg_value = {
+            "dense_a": [10, 11],
+            "dense_b": [20],
+            "bm25": [100, 101],
+        }
+        settings = HardNegativeSelectionSettings(
+            model_priority=("dense_a", "dense_b", "bm25"),
+            deprioritized_models=("bm25",),
+            append_unlisted_models=True,
+        )
+
+        prioritized, deprioritized = partition_hard_negative_doc_ids(
+            neg_value,
+            positive_doc_ids=[],
+            settings=settings,
+        )
+
+        self.assertEqual(prioritized, ["10", "11", "20"])
+        self.assertEqual(deprioritized, ["100", "101"])
+
     def test_resolve_model_order_moves_deprioritized_models_to_end(self) -> None:
         neg_map = {
             "bm25": [100],
@@ -82,6 +105,52 @@ class HardNegativeSelectorTest(unittest.TestCase):
         )
 
         self.assertEqual(selected, ["7", "8"])
+
+    def test_random_sampling_uses_bm25_only_for_backfill(self) -> None:
+        settings = HardNegativeSelectionSettings(
+            model_priority=("dense_a", "dense_b", "bm25"),
+            deprioritized_models=("bm25",),
+            append_unlisted_models=True,
+        )
+        rng = random.Random(7)
+
+        selected = select_hard_negative_doc_ids(
+            {
+                "dense_a": [10, 11, 12],
+                "dense_b": [20, 21],
+                "bm25": [100, 101, 102],
+            },
+            positive_doc_ids=[],
+            target_count=3,
+            settings=settings,
+            rng=rng,
+        )
+
+        self.assertEqual(len(selected), 3)
+        self.assertTrue(set(selected).issubset({"10", "11", "12", "20", "21"}))
+
+    def test_random_sampling_backfills_from_bm25_when_priority_pool_is_short(self) -> None:
+        settings = HardNegativeSelectionSettings(
+            model_priority=("dense_a", "dense_b", "bm25"),
+            deprioritized_models=("bm25",),
+            append_unlisted_models=True,
+        )
+        rng = random.Random(11)
+
+        selected = select_hard_negative_doc_ids(
+            {
+                "dense_a": [10],
+                "bm25": [100, 101, 102],
+            },
+            positive_doc_ids=[],
+            target_count=3,
+            settings=settings,
+            rng=rng,
+        )
+
+        self.assertEqual(selected[0], "10")
+        self.assertEqual(len(selected), 3)
+        self.assertTrue(set(selected[1:]).issubset({"100", "101", "102"}))
 
 
 if __name__ == "__main__":

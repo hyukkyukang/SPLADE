@@ -102,6 +102,34 @@ class TrainingMetricsService:
                 on_step=True,
                 on_epoch=True,
             )
+        if "sigmoid_pos_score_mean" in detached_metrics:
+            module.log(
+                "train_sigmoid_pos_score_mean",
+                detached_metrics["sigmoid_pos_score_mean"],
+                on_step=True,
+                on_epoch=True,
+            )
+        if "sigmoid_neg_score_mean" in detached_metrics:
+            module.log(
+                "train_sigmoid_neg_score_mean",
+                detached_metrics["sigmoid_neg_score_mean"],
+                on_step=True,
+                on_epoch=True,
+            )
+        if "sigmoid_pos_margin_mean" in detached_metrics:
+            module.log(
+                "train_sigmoid_pos_margin_mean",
+                detached_metrics["sigmoid_pos_margin_mean"],
+                on_step=True,
+                on_epoch=True,
+            )
+        if "sigmoid_neg_margin_mean" in detached_metrics:
+            module.log(
+                "train_sigmoid_neg_margin_mean",
+                detached_metrics["sigmoid_neg_margin_mean"],
+                on_step=True,
+                on_epoch=True,
+            )
         if "in_batch_loss" in detached_metrics:
             module.log(
                 "train_in_batch_loss",

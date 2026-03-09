@@ -66,8 +66,9 @@ class HydraConfigCompositionTest(unittest.TestCase):
         self.assertEqual(str(cfg.train_dataset.name), "msmarco_hard_negatives")
         self.assertEqual(str(cfg.training.loss.type), "sigmoid_pairwise_hard")
         self.assertAlmostEqual(
-            float(cfg.training.loss.sigmoid.init_logit_scale), 2.302585093
+            float(cfg.training.loss.sigmoid.init_logit_scale), -6.907755279
         )
+        self.assertAlmostEqual(float(cfg.training.loss.sigmoid.init_bias), -8.0)
         self.assertAlmostEqual(float(cfg.training.loss.sigmoid.max_bias), -5.0)
 
     def test_validation_matrix_composes(self) -> None:

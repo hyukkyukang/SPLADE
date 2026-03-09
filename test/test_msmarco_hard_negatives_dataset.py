@@ -66,7 +66,7 @@ def build_dataset_cfg() -> DictConfig:
 
 
 class MSMARCOHardNegativesDatasetTest(unittest.TestCase):
-    def test_row_to_meta_item_selects_dense_models_before_bm25(self) -> None:
+    def test_row_to_meta_item_samples_from_dense_pools_before_bm25(self) -> None:
         dataset = MSMARCOHardNegativesDataset(cfg=build_dataset_cfg())
         row = {
             "qid": 100,
@@ -88,7 +88,11 @@ class MSMARCOHardNegativesDatasetTest(unittest.TestCase):
 
         self.assertEqual(meta_item.qid, "100")
         self.assertEqual(meta_item.pos_ids, ["1000"])
-        self.assertEqual(meta_item.neg_ids, ["2001", "2002", "3001"])
+        self.assertEqual(len(meta_item.neg_ids), 3)
+        self.assertTrue(
+            set(meta_item.neg_ids).issubset({"2001", "2002", "3001", "3002"})
+        )
+        self.assertTrue(set(meta_item.neg_ids).isdisjoint({"9001", "9002"}))
 
     def test_row_to_meta_item_spills_to_bm25_when_needed(self) -> None:
         dataset = MSMARCOHardNegativesDataset(cfg=build_dataset_cfg())
@@ -109,7 +113,9 @@ class MSMARCOHardNegativesDatasetTest(unittest.TestCase):
             rng=random.Random(0),
         )
 
-        self.assertEqual(meta_item.neg_ids, ["2101", "9101", "9102"])
+        self.assertEqual(len(meta_item.neg_ids), 3)
+        self.assertEqual(meta_item.neg_ids[0], "2101")
+        self.assertTrue(set(meta_item.neg_ids[1:]).issubset({"9101", "9102"}))
 
     def test_row_to_meta_item_filters_positive_overlaps_and_dedupes(self) -> None:
         dataset = MSMARCOHardNegativesDataset(cfg=build_dataset_cfg())
@@ -132,7 +138,7 @@ class MSMARCOHardNegativesDatasetTest(unittest.TestCase):
         )
 
         self.assertEqual(meta_item.pos_ids, ["1100"])
-        self.assertEqual(meta_item.neg_ids, ["2200", "2201", "2300", "2400"])
+        self.assertEqual(set(meta_item.neg_ids), {"2200", "2201", "2300", "2400"})
 
     def test_row_to_meta_item_requires_positive_ids(self) -> None:
         dataset = MSMARCOHardNegativesDataset(cfg=build_dataset_cfg())
@@ -230,15 +236,17 @@ class MSMARCOHardNegativesDatasetTest(unittest.TestCase):
         row = dict(dataset.meta_dataset[0])
         self.assertEqual(row["__splade_hn_qid"], "q1")
         self.assertEqual(row["__splade_hn_pos_ids"], ["1"])
-        self.assertEqual(row["__splade_hn_neg_ids"], ["10", "11", "20"])
+        self.assertEqual(row["__splade_hn_priority_neg_ids"], ["10", "11"])
+        self.assertEqual(row["__splade_hn_deprioritized_neg_ids"], ["20"])
 
-    def test_row_to_meta_item_prefers_precomputed_negative_ids(self) -> None:
+    def test_row_to_meta_item_prefers_precomputed_negative_pools(self) -> None:
         dataset = MSMARCOHardNegativesDataset(cfg=build_dataset_cfg())
         row = {
             "qid": "q_precomputed",
             "pos": [100],
             "neg": {"dense_a": [200, 201, 202]},
-            "__splade_hn_neg_ids": ["900", "901", "902"],
+            "__splade_hn_priority_neg_ids": ["900", "901", "902"],
+            "__splade_hn_deprioritized_neg_ids": ["990"],
         }
 
         meta_item = dataset._row_to_meta_item(
@@ -249,7 +257,43 @@ class MSMARCOHardNegativesDatasetTest(unittest.TestCase):
             rng=random.Random(0),
         )
 
-        self.assertEqual(meta_item.neg_ids, ["900", "901"])
+        self.assertEqual(len(meta_item.neg_ids), 2)
+        self.assertTrue(set(meta_item.neg_ids).issubset({"900", "901", "902"}))
+
+    def test_row_to_meta_item_randomizes_hard_negative_subset_across_rng_states(self) -> None:
+        dataset = MSMARCOHardNegativesDataset(cfg=build_dataset_cfg())
+        row = {
+            "qid": "q_random",
+            "pos": [100],
+            "neg": {
+                "dense_a": [200, 201, 202],
+                "dense_b": [300, 301],
+                "bm25": [900, 901],
+            },
+        }
+
+        meta_item_seed_0 = dataset._row_to_meta_item(
+            row,
+            0,
+            num_positives=1,
+            num_negatives=3,
+            rng=random.Random(0),
+        )
+        meta_item_seed_1 = dataset._row_to_meta_item(
+            row,
+            0,
+            num_positives=1,
+            num_negatives=3,
+            rng=random.Random(1),
+        )
+
+        self.assertNotEqual(meta_item_seed_0.neg_ids, meta_item_seed_1.neg_ids)
+        self.assertTrue(
+            set(meta_item_seed_0.neg_ids).issubset({"200", "201", "202", "300", "301"})
+        )
+        self.assertTrue(
+            set(meta_item_seed_1.neg_ids).issubset({"200", "201", "202", "300", "301"})
+        )
 
 
 if __name__ == "__main__":

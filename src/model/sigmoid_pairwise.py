@@ -25,6 +25,10 @@ class SigmoidPairwiseOutputs:
     neg_loss: torch.Tensor
     logit_scale: torch.Tensor
     bias: torch.Tensor
+    pos_score_mean: torch.Tensor
+    neg_score_mean: torch.Tensor
+    pos_margin_mean: torch.Tensor
+    neg_margin_mean: torch.Tensor
 
 
 class SigmoidPairwiseState(nn.Module):
@@ -59,6 +63,12 @@ class SigmoidPairwiseState(nn.Module):
         row_count: torch.Tensor = mask_float.sum(dim=1).clamp(min=1.0)
         return row_sum / row_count
 
+    @staticmethod
+    def _masked_mean(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        mask_float: torch.Tensor = mask.to(dtype=values.dtype)
+        total_count: torch.Tensor = mask_float.sum().clamp(min=1.0)
+        return (values * mask_float).sum() / total_count
+
     def forward(
         self,
         *,
@@ -89,6 +99,10 @@ class SigmoidPairwiseState(nn.Module):
         neg_loss: torch.Tensor = (
             neg_loss_per_query * valid_query_mask_float
         ).sum() / valid_query_count
+        pos_score_mean: torch.Tensor = self._masked_mean(scores_fp32, pos_mask_bool)
+        neg_score_mean: torch.Tensor = self._masked_mean(scores_fp32, neg_mask_bool)
+        pos_margin_mean: torch.Tensor = self._masked_mean(margin, pos_mask_bool)
+        neg_margin_mean: torch.Tensor = self._masked_mean(margin, neg_mask_bool)
         loss: torch.Tensor = (
             float(self.cfg.pos_weight) * pos_loss
             + float(self.cfg.neg_weight) * neg_loss
@@ -99,4 +113,8 @@ class SigmoidPairwiseState(nn.Module):
             neg_loss=neg_loss,
             logit_scale=resolved_scale,
             bias=resolved_bias,
+            pos_score_mean=pos_score_mean,
+            neg_score_mean=neg_score_mean,
+            pos_margin_mean=pos_margin_mean,
+            neg_margin_mean=neg_margin_mean,
         )

@@ -484,6 +484,10 @@ class SPLADETrainingModule(L.LightningModule):
             metrics["sigmoid_neg_loss"] = loss_outputs.sigmoid_neg_loss
             metrics["sigmoid_logit_scale"] = loss_outputs.sigmoid_logit_scale
             metrics["sigmoid_bias"] = loss_outputs.sigmoid_bias
+            metrics["sigmoid_pos_score_mean"] = loss_outputs.sigmoid_pos_score_mean
+            metrics["sigmoid_neg_score_mean"] = loss_outputs.sigmoid_neg_score_mean
+            metrics["sigmoid_pos_margin_mean"] = loss_outputs.sigmoid_pos_margin_mean
+            metrics["sigmoid_neg_margin_mean"] = loss_outputs.sigmoid_neg_margin_mean
         if self.distill_cfg.enabled:
             metrics["distill_loss"] = distill_loss
             for (
@@ -762,6 +766,14 @@ class SPLADETrainingModule(L.LightningModule):
             ("val_doc_active_dims", "doc_active_dims"),
             ("val_q_sparsity_ratio", "q_sparsity_ratio"),
             ("val_doc_sparsity_ratio", "doc_sparsity_ratio"),
+            ("val_sigmoid_pos_loss", "sigmoid_pos_loss"),
+            ("val_sigmoid_neg_loss", "sigmoid_neg_loss"),
+            ("val_sigmoid_logit_scale", "sigmoid_logit_scale"),
+            ("val_sigmoid_bias", "sigmoid_bias"),
+            ("val_sigmoid_pos_score_mean", "sigmoid_pos_score_mean"),
+            ("val_sigmoid_neg_score_mean", "sigmoid_neg_score_mean"),
+            ("val_sigmoid_pos_margin_mean", "sigmoid_pos_margin_mean"),
+            ("val_sigmoid_neg_margin_mean", "sigmoid_neg_margin_mean"),
         )
         log_name: str
         metric_key: str

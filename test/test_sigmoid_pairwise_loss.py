@@ -98,6 +98,19 @@ class SigmoidPairwiseLossTest(unittest.TestCase):
         self.assertGreaterEqual(float(outputs.pos_loss.item()), 0.0)
         self.assertGreaterEqual(float(outputs.neg_loss.item()), 0.0)
 
+    def test_reports_score_and_margin_means(self) -> None:
+        state = _build_state(init_logit_scale=0.0, init_bias=-1.0, max_bias=0.0)
+        pos_mask = torch.tensor([[True, False, True]])
+        doc_mask = torch.tensor([[True, True, True]])
+        scores = torch.tensor([[2.0, 0.5, 4.0]], dtype=torch.float32)
+
+        outputs = state(scores=scores, pos_mask=pos_mask, doc_mask=doc_mask)
+
+        self.assertAlmostEqual(float(outputs.pos_score_mean.item()), 3.0, places=6)
+        self.assertAlmostEqual(float(outputs.neg_score_mean.item()), 0.5, places=6)
+        self.assertAlmostEqual(float(outputs.pos_margin_mean.item()), 2.0, places=6)
+        self.assertAlmostEqual(float(outputs.neg_margin_mean.item()), -0.5, places=6)
+
     def test_clamp_parameters_limits_logit_scale_and_bias(self) -> None:
         state = _build_state(max_logit_scale=5.0, max_bias=-5.0)
         with torch.no_grad():

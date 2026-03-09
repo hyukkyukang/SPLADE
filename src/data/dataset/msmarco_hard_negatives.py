@@ -13,7 +13,8 @@ from src.data.dataclass import MetaItem
 from src.data.dataset.base import BaseDataset
 from src.data.dataset.hard_negative_selector import (
     HardNegativeSelectionSettings,
-    select_hard_negative_doc_ids,
+    partition_hard_negative_doc_ids,
+    select_hard_negative_doc_ids_from_pools,
     to_doc_id_list,
 )
 from src.utils.logging import get_logger, is_rank_zero, log_if_rank_zero
@@ -43,6 +44,8 @@ _CACHE_WAIT_POLL_SECONDS: float = 0.5
 _PRECOMPUTED_QID_COLUMN: str = "__splade_hn_qid"
 _PRECOMPUTED_POS_IDS_COLUMN: str = "__splade_hn_pos_ids"
 _PRECOMPUTED_NEG_IDS_COLUMN: str = "__splade_hn_neg_ids"
+_PRECOMPUTED_PRIORITY_NEG_IDS_COLUMN: str = "__splade_hn_priority_neg_ids"
+_PRECOMPUTED_DEPRIORITIZED_NEG_IDS_COLUMN: str = "__splade_hn_deprioritized_neg_ids"
 
 logger = get_logger("MSMARCOHardNegativesDataset")
 
@@ -109,7 +112,7 @@ def _parse_settings(cfg: DictConfig) -> _HardNegativeDatasetSettings:
 
 
 class MSMARCOHardNegativesDataset(BaseDataset):
-    """MS MARCO hard negatives dataset with deterministic per-model sampling."""
+    """MS MARCO hard negatives dataset with per-epoch random hard-negative sampling."""
 
     def __init__(self, cfg: DictConfig) -> None:
         super().__init__(cfg)
@@ -151,19 +154,46 @@ class MSMARCOHardNegativesDataset(BaseDataset):
         *,
         positive_ids: list[str],
         target_count: int,
+        rng: Any | None = None,
     ) -> list[str]:
         resolved_target_count: int = max(int(target_count), 0)
         if resolved_target_count <= 0:
             return []
+        prioritized_doc_ids, deprioritized_doc_ids = self._resolve_negative_pools(
+            row.get("neg"),
+            positive_doc_ids=positive_ids,
+            row=row,
+        )
+        return select_hard_negative_doc_ids_from_pools(
+            prioritized_doc_ids=prioritized_doc_ids,
+            deprioritized_doc_ids=deprioritized_doc_ids,
+            target_count=resolved_target_count,
+            rng=rng,
+        )
+
+    def _resolve_negative_pools(
+        self,
+        neg_value: Any,
+        *,
+        positive_doc_ids: list[str],
+        row: dict[str, Any],
+    ) -> tuple[list[str], list[str]]:
+        precomputed_priority_ids: list[str] = to_doc_id_list(
+            row.get(_PRECOMPUTED_PRIORITY_NEG_IDS_COLUMN)
+        )
+        precomputed_deprioritized_ids: list[str] = to_doc_id_list(
+            row.get(_PRECOMPUTED_DEPRIORITIZED_NEG_IDS_COLUMN)
+        )
+        if precomputed_priority_ids or precomputed_deprioritized_ids:
+            return precomputed_priority_ids, precomputed_deprioritized_ids
         precomputed_negatives: list[str] = to_doc_id_list(
             row.get(_PRECOMPUTED_NEG_IDS_COLUMN)
         )
         if precomputed_negatives:
-            return precomputed_negatives[:resolved_target_count]
-        return select_hard_negative_doc_ids(
-            row.get("neg"),
-            positive_doc_ids=positive_ids,
-            target_count=resolved_target_count,
+            return precomputed_negatives, []
+        return partition_hard_negative_doc_ids(
+            neg_value,
+            positive_doc_ids=positive_doc_ids,
             settings=self._settings.selector,
         )
 
@@ -176,12 +206,14 @@ class MSMARCOHardNegativesDataset(BaseDataset):
         positive_ids: list[str] = self._extract_positive_ids(row)
         if not positive_ids:
             return False
-        selected: list[str] = self._select_negative_ids(
-            row,
-            positive_ids=positive_ids,
-            target_count=1,
+        prioritized_doc_ids: list[str]
+        deprioritized_doc_ids: list[str]
+        prioritized_doc_ids, deprioritized_doc_ids = self._resolve_negative_pools(
+            row.get("neg"),
+            positive_doc_ids=positive_ids,
+            row=row,
         )
-        return bool(selected)
+        return bool(prioritized_doc_ids or deprioritized_doc_ids)
 
     def _is_trainable_row(self, row: dict[str, Any]) -> bool:
         return self._has_positive_ids(row) and self._has_usable_hard_negative(row)
@@ -200,6 +232,7 @@ class MSMARCOHardNegativesDataset(BaseDataset):
             ),
             "required_negatives": int(self._required_negatives),
             "require_negatives": bool(self._settings.require_negatives),
+            "sampling_mode": "random_priority_backfill_v2",
             "selector": {
                 "model_priority": list(selector.model_priority),
                 "deprioritized_models": list(selector.deprioritized_models),
@@ -289,15 +322,18 @@ class MSMARCOHardNegativesDataset(BaseDataset):
     def _precompute_row_fields(self, row: dict[str, Any], index: int) -> dict[str, Any]:
         qid: str = self._resolve_qid(row, index)
         positive_ids: list[str] = self._require_positive_ids(row, qid=qid)
-        selected_negatives: list[str] = self._select_negative_ids(
-            row,
-            positive_ids=positive_ids,
-            target_count=self._required_negatives,
+        prioritized_doc_ids: list[str]
+        deprioritized_doc_ids: list[str]
+        prioritized_doc_ids, deprioritized_doc_ids = self._resolve_negative_pools(
+            row.get("neg"),
+            positive_doc_ids=positive_ids,
+            row=row,
         )
         return {
             _PRECOMPUTED_QID_COLUMN: qid,
             _PRECOMPUTED_POS_IDS_COLUMN: positive_ids,
-            _PRECOMPUTED_NEG_IDS_COLUMN: selected_negatives,
+            _PRECOMPUTED_PRIORITY_NEG_IDS_COLUMN: prioritized_doc_ids,
+            _PRECOMPUTED_DEPRIORITIZED_NEG_IDS_COLUMN: deprioritized_doc_ids,
         }
 
     def _materialize_precomputed_fields(
@@ -356,7 +392,6 @@ class MSMARCOHardNegativesDataset(BaseDataset):
         num_negatives: int,
         rng: Any,
     ) -> MetaItem:
-        _ = rng
         qid: str = self._resolve_qid(row, index)
         all_positive_ids: list[str] = self._require_positive_ids(row, qid=qid)
 
@@ -371,6 +406,7 @@ class MSMARCOHardNegativesDataset(BaseDataset):
             row,
             positive_ids=all_positive_ids,
             target_count=resolved_num_negatives,
+            rng=rng,
         )
         if (
             self._settings.require_negatives

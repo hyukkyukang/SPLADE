@@ -77,6 +77,10 @@ class _DummySigmoidLossService(_DummyLossService):
             sigmoid_neg_loss=scalar * 2.0,
             sigmoid_logit_scale=scalar * 3.0,
             sigmoid_bias=-scalar * 4.0,
+            sigmoid_pos_score_mean=scalar * 5.0,
+            sigmoid_neg_score_mean=scalar * 6.0,
+            sigmoid_pos_margin_mean=scalar * 7.0,
+            sigmoid_neg_margin_mean=scalar * 8.0,
         )
 
 
@@ -262,6 +266,10 @@ class TrainingMetricGatingTest(unittest.TestCase):
         self.assertIn("sigmoid_neg_loss", metrics)
         self.assertIn("sigmoid_logit_scale", metrics)
         self.assertIn("sigmoid_bias", metrics)
+        self.assertIn("sigmoid_pos_score_mean", metrics)
+        self.assertIn("sigmoid_neg_score_mean", metrics)
+        self.assertIn("sigmoid_pos_margin_mean", metrics)
+        self.assertIn("sigmoid_neg_margin_mean", metrics)
 
 
 if __name__ == "__main__":

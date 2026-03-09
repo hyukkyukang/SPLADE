@@ -32,7 +32,8 @@ corpus_id_column: passage_id
 corpus_text_column: passage
 
 hard_negative_selection:
-  # Consume dense retriever negatives first; BM25 is intentionally last.
+  # Sample per epoch from dense retriever negatives first; BM25 is only used
+  # as a deprioritized backfill pool when dense buckets are too short.
   model_priority:
     - msmarco-distilbert-base-tas-b
     - msmarco-distilbert-base-v3

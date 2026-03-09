@@ -464,6 +464,10 @@ class LossComputer(nn.Module):
         torch.Tensor,
         torch.Tensor,
         torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
     ]:
         pairwise_scores: torch.Tensor = self._compute_pairwise_scores(q_reps, doc_reps)
         zero_scalar: torch.Tensor = pairwise_scores.new_zeros(())
@@ -511,6 +515,10 @@ class LossComputer(nn.Module):
         sigmoid_neg_loss: torch.Tensor = zero_scalar
         sigmoid_logit_scale: torch.Tensor = zero_scalar
         sigmoid_bias: torch.Tensor = zero_scalar
+        sigmoid_pos_score_mean: torch.Tensor = zero_scalar
+        sigmoid_neg_score_mean: torch.Tensor = zero_scalar
+        sigmoid_pos_margin_mean: torch.Tensor = zero_scalar
+        sigmoid_neg_margin_mean: torch.Tensor = zero_scalar
         if self._sigmoid_state is not None and self.loss_type == "sigmoid_pairwise_hard":
             if sigmoid_outputs is None:
                 sigmoid_outputs = self._sigmoid_state(
@@ -522,6 +530,10 @@ class LossComputer(nn.Module):
             sigmoid_neg_loss = sigmoid_outputs.neg_loss
             sigmoid_logit_scale = sigmoid_outputs.logit_scale
             sigmoid_bias = sigmoid_outputs.bias
+            sigmoid_pos_score_mean = sigmoid_outputs.pos_score_mean
+            sigmoid_neg_score_mean = sigmoid_outputs.neg_score_mean
+            sigmoid_pos_margin_mean = sigmoid_outputs.pos_margin_mean
+            sigmoid_neg_margin_mean = sigmoid_outputs.neg_margin_mean
         if self.distill_enabled:
             if self._distill_mse_weight != 0.0:
                 distill_mse_loss = self._distill_loss_mse(
@@ -572,4 +584,8 @@ class LossComputer(nn.Module):
             sigmoid_neg_loss,
             sigmoid_logit_scale,
             sigmoid_bias,
+            sigmoid_pos_score_mean,
+            sigmoid_neg_score_mean,
+            sigmoid_pos_margin_mean,
+            sigmoid_neg_margin_mean,
         )
