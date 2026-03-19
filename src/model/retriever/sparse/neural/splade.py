@@ -9,6 +9,10 @@ from omegaconf import DictConfig
 from transformers import PreTrainedModel
 
 from src.utils.logging import suppress_output_if_not_rank_zero
+from src.utils.output_space import (
+    OutputSpaceSpec,
+    normalize_compact_head_alignment,
+)
 from src.utils.peft import (
     apply_peft_adapter,
     resolve_peft_settings,
@@ -17,24 +21,6 @@ from src.utils.peft import (
 from src.utils.transformers import build_masked_lm_model, resolve_model_name_or_path
 
 _COMPACT_HEAD_FILENAME: str = "splade_compact_head.pt"
-_TOKEN_ALIGNED_COMPACT_HEAD_VALUES: set[str] = {
-    "token",
-    "token_id",
-    "token_ids",
-    "term_token_id",
-    "term_token_ids",
-}
-_CLUSTERED_COMPACT_HEAD_VALUES: set[str] = {
-    "cluster",
-    "clusters",
-    "latent_cluster",
-    "latent_clusters",
-    "cluster_centroid",
-    "cluster_centroids",
-    "unstructured",
-}
-
-
 class _Log1pRelu(nn.Module):
     def forward(self, logits: torch.Tensor) -> torch.Tensor:
         return torch.log1p(torch.relu(logits))
@@ -65,20 +51,6 @@ def _resolve_activation_module(activation: str) -> nn.Module:
     if activation == "relu":
         return _Relu()
     raise ValueError(f"Unsupported sparse activation: {activation}")
-
-
-def _normalize_compact_head_alignment(value: Any | None) -> str | None:
-    """Normalize compact-head alignment metadata when present."""
-    if value is None:
-        return None
-    normalized: str = str(value).strip().lower().replace("-", "_")
-    if not normalized:
-        return None
-    if normalized in _TOKEN_ALIGNED_COMPACT_HEAD_VALUES:
-        return "token_ids"
-    if normalized in _CLUSTERED_COMPACT_HEAD_VALUES:
-        return "latent_cluster"
-    raise ValueError(f"Unsupported compact-head alignment: {value!r}")
 
 
 def _extract_hidden_module(model: PreTrainedModel) -> nn.Module:
@@ -117,6 +89,24 @@ def _supports_use_cache_forward(module: nn.Module) -> bool:
         return "use_cache" in inspect.signature(forward_fn).parameters
     except (TypeError, ValueError):
         return False
+
+
+def _resolve_module_dtype(
+    module: nn.Module,
+    *,
+    fallback: torch.dtype = torch.float32,
+) -> torch.dtype:
+    """Resolve module dtype without assuming a `.dtype` attribute exists."""
+    parameter: nn.Parameter
+    for parameter in module.parameters():
+        return parameter.dtype
+    buffer: torch.Tensor
+    for buffer in module.buffers():
+        return buffer.dtype
+    dtype_attr: Any = getattr(module, "dtype", None)
+    if isinstance(dtype_attr, torch.dtype):
+        return dtype_attr
+    return fallback
 
 
 def _resolve_compact_head_path(
@@ -191,6 +181,10 @@ class SpladeEncoder(nn.Module):
         self._output_vocab_size: int = int(self.mlm.config.vocab_size)
         self._compact_head_alignment: str = "token_ids"
         self._output_token_aligned: bool = True
+        self._output_space: OutputSpaceSpec = OutputSpaceSpec.from_alignment(
+            vocab_size=self._output_vocab_size,
+            compact_head_alignment="token_ids",
+        )
         self._mlm_forward_supports_use_cache: bool = _supports_use_cache_forward(
             self.mlm
         )
@@ -268,7 +262,7 @@ class SpladeEncoder(nn.Module):
                 dtype=torch.long,
             )
 
-        compact_head_alignment: str | None = _normalize_compact_head_alignment(
+        compact_head_alignment: str | None = normalize_compact_head_alignment(
             payload.get("alignment")
         )
         if compact_head_alignment is None:
@@ -294,8 +288,12 @@ class SpladeEncoder(nn.Module):
         if hidden_config is not None and hasattr(hidden_config, "use_cache"):
             hidden_config.use_cache = False
         self._output_vocab_size = out_features
-        self._compact_head_alignment = compact_head_alignment
-        self._output_token_aligned = compact_head_alignment == "token_ids"
+        self._output_space = OutputSpaceSpec.from_alignment(
+            vocab_size=out_features,
+            compact_head_alignment=compact_head_alignment,
+        )
+        self._compact_head_alignment = self._output_space.compact_head_alignment
+        self._output_token_aligned = self._output_space.output_token_aligned
         self._drop_unused_mlm_head_for_compact_path()
         self._freeze_unused_mlm_params_for_compact_path()
         if self._output_token_aligned:
@@ -442,25 +440,23 @@ class SpladeEncoder(nn.Module):
             return self._encode_logits_compact_no_cache
         return self._encode_logits_compact
 
+    def resolve_output_exclude_ids(
+        self, exclude_token_ids: torch.Tensor | None
+    ) -> torch.Tensor:
+        """Map tokenizer token IDs onto output-dimension IDs when supported."""
+        return self._output_space.resolve_exclude_token_ids(
+            exclude_token_ids,
+            token_id_to_output_index=self._token_id_to_output_index,
+        )
+
     def build_exclude_mask(self, exclude_ids: torch.Tensor) -> torch.Tensor:
         """Build an output-dimension mask from tokenizer token ids."""
-        if int(exclude_ids.numel()) == 0:
+        resolved_output_ids: torch.Tensor = self.resolve_output_exclude_ids(exclude_ids)
+        if int(resolved_output_ids.numel()) == 0:
             return torch.empty((0,), dtype=torch.bool)
-        if not self.output_token_aligned:
-            return torch.empty((0,), dtype=torch.bool)
-        compact_token_ids: torch.Tensor = self._compact_token_ids
-        if int(compact_token_ids.numel()) > 0:
-            return torch.isin(
-                compact_token_ids,
-                exclude_ids.to(device=compact_token_ids.device, dtype=torch.long),
-            )
         vocab_size: int = int(self._output_vocab_size)
         mask: torch.Tensor = torch.zeros(vocab_size, dtype=torch.bool)
-        valid_ids: torch.Tensor = exclude_ids[
-            (exclude_ids >= 0) & (exclude_ids < vocab_size)
-        ]
-        if int(valid_ids.numel()) > 0:
-            mask[valid_ids] = True
+        mask[resolved_output_ids] = True
         return mask
 
     @property
@@ -486,6 +482,14 @@ class SpladeEncoder(nn.Module):
     @property
     def token_id_to_output_index(self) -> torch.Tensor:
         return self._token_id_to_output_index
+
+    @property
+    def output_space(self) -> OutputSpaceSpec:
+        return self._output_space
+
+    @property
+    def dtype(self) -> torch.dtype:
+        return _resolve_module_dtype(self.mlm)
 
     def train(self, mode: bool = True) -> "SpladeEncoder":
         super().train(mode)
@@ -690,7 +694,7 @@ class SpladeModel(nn.Module):
         batch_size: int = int(input_ids.shape[0])
         vocab_size: int = int(self.encoder.vocab_size)
         device: torch.device = input_ids.device
-        dtype: torch.dtype = self.encoder.mlm.dtype
+        dtype: torch.dtype = self.encoder.dtype
 
         token_ids: torch.Tensor = input_ids.to(dtype=torch.long)
         # Mask out padding and special tokens before counting terms.

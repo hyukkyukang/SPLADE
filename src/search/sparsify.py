@@ -6,19 +6,57 @@ import torch
 from src.index.sparse import resolve_torch_dtype
 
 
+def _sanitize_exclude_output_ids_tensor(
+    exclude_output_ids: torch.Tensor | None,
+    *,
+    vocab_size: int,
+    device: torch.device,
+) -> torch.Tensor | None:
+    if exclude_output_ids is None or int(exclude_output_ids.numel()) == 0:
+        return None
+    exclude_ids: torch.Tensor = exclude_output_ids.to(
+        device=device, dtype=torch.long
+    ).flatten()
+    valid_ids: torch.Tensor = exclude_ids[
+        (exclude_ids >= 0) & (exclude_ids < int(vocab_size))
+    ]
+    if int(valid_ids.numel()) == 0:
+        return None
+    return torch.unique(valid_ids, sorted=True)
+
+
+def _sanitize_exclude_output_ids_array(
+    exclude_output_ids: list[int],
+    *,
+    vocab_size: int,
+) -> np.ndarray:
+    if not exclude_output_ids:
+        return np.zeros((0,), dtype=np.int64)
+    exclude_array: np.ndarray = np.asarray(exclude_output_ids, dtype=np.int64)
+    valid_mask: np.ndarray = (exclude_array >= 0) & (exclude_array < int(vocab_size))
+    if not bool(valid_mask.any()):
+        return np.zeros((0,), dtype=np.int64)
+    return np.unique(exclude_array[valid_mask])
+
+
 def sparsify_vector_gpu(
     vector: torch.Tensor,
     *,
-    exclude_token_ids: torch.Tensor | None,
+    exclude_output_ids: torch.Tensor | None,
     min_weight: float,
     top_k: int | None,
     value_dtype: np.dtype,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Sparsify a single dense vector on the current device."""
     local_vec: torch.Tensor = vector
-    if exclude_token_ids is not None and int(exclude_token_ids.numel()) > 0:
+    sanitized_exclude_ids: torch.Tensor | None = _sanitize_exclude_output_ids_tensor(
+        exclude_output_ids,
+        vocab_size=int(vector.shape[0]),
+        device=vector.device,
+    )
+    if sanitized_exclude_ids is not None:
         local_vec = local_vec.clone()
-        local_vec[exclude_token_ids] = 0.0
+        local_vec[sanitized_exclude_ids] = 0.0
 
     if min_weight > 0.0:
         mask: torch.Tensor = local_vec > min_weight
@@ -58,16 +96,21 @@ def sparsify_vector_gpu(
 def _sparsify_batch_gpu_csr_core_topk(
     vectors: torch.Tensor,
     *,
-    exclude_token_ids: torch.Tensor | None,
+    exclude_output_ids: torch.Tensor | None,
     threshold: float,
     top_k: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Sparsify a batch of dense vectors into CSR tensors on GPU (top-k path)."""
     batch_size: int = int(vectors.shape[0])
     masked: torch.Tensor = vectors
-    if exclude_token_ids is not None and int(exclude_token_ids.numel()) > 0:
+    sanitized_exclude_ids: torch.Tensor | None = _sanitize_exclude_output_ids_tensor(
+        exclude_output_ids,
+        vocab_size=int(vectors.shape[1]),
+        device=vectors.device,
+    )
+    if sanitized_exclude_ids is not None:
         masked = masked.clone()
-        masked.index_fill_(1, exclude_token_ids, float("-inf"))
+        masked.index_fill_(1, sanitized_exclude_ids, float("-inf"))
     topk_values: torch.Tensor
     topk_indices: torch.Tensor
     topk_values, topk_indices = torch.topk(
@@ -91,15 +134,20 @@ def _sparsify_batch_gpu_csr_core_topk(
 def _sparsify_batch_gpu_csr_core_threshold(
     vectors: torch.Tensor,
     *,
-    exclude_token_ids: torch.Tensor | None,
+    exclude_output_ids: torch.Tensor | None,
     threshold: float,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Sparsify a batch of dense vectors into CSR tensors on GPU (threshold path)."""
     batch_size: int = int(vectors.shape[0])
     vocab_size: int = int(vectors.shape[1])
     mask: torch.Tensor = vectors > threshold
-    if exclude_token_ids is not None and int(exclude_token_ids.numel()) > 0:
-        mask.index_fill_(1, exclude_token_ids, False)
+    sanitized_exclude_ids: torch.Tensor | None = _sanitize_exclude_output_ids_tensor(
+        exclude_output_ids,
+        vocab_size=vocab_size,
+        device=vectors.device,
+    )
+    if sanitized_exclude_ids is not None:
+        mask.index_fill_(1, sanitized_exclude_ids, False)
     row_idx: torch.Tensor
     col_idx: torch.Tensor
     row_idx, col_idx = torch.nonzero(mask, as_tuple=True)
@@ -122,7 +170,7 @@ def _sparsify_batch_gpu_csr_core_threshold(
 def sparsify_batch_gpu_csr(
     vectors: torch.Tensor,
     *,
-    exclude_token_ids: torch.Tensor | None,
+    exclude_output_ids: torch.Tensor | None,
     min_weight: float,
     top_k: int | None,
     value_dtype: np.dtype,
@@ -143,9 +191,11 @@ def sparsify_batch_gpu_csr(
 
     device: torch.device = vectors.device
     threshold: float = float(min_weight) if min_weight > 0.0 else 0.0
-    exclude_ids: torch.Tensor | None = exclude_token_ids
-    if exclude_ids is not None and int(exclude_ids.numel()) > 0:
-        exclude_ids = exclude_ids.to(device=device)
+    exclude_ids: torch.Tensor | None = _sanitize_exclude_output_ids_tensor(
+        exclude_output_ids,
+        vocab_size=vocab_size,
+        device=device,
+    )
 
     if top_k is not None:
         top_k_int: int = min(int(top_k), vocab_size)
@@ -159,7 +209,7 @@ def sparsify_batch_gpu_csr(
 
         indptr_gpu, flat_indices, flat_values = _sparsify_batch_gpu_csr_core_topk(
             vectors,
-            exclude_token_ids=exclude_ids,
+            exclude_output_ids=exclude_ids,
             threshold=threshold,
             top_k=top_k_int,
         )
@@ -167,7 +217,7 @@ def sparsify_batch_gpu_csr(
         indptr_gpu, flat_indices, flat_values = (
             _sparsify_batch_gpu_csr_core_threshold(
                 vectors,
-                exclude_token_ids=exclude_ids,
+                exclude_output_ids=exclude_ids,
                 threshold=threshold,
             )
         )
@@ -182,7 +232,7 @@ def sparsify_batch_gpu_csr(
 def sparsify_query_vector(
     vector: np.ndarray,
     *,
-    exclude_token_ids: list[int],
+    exclude_output_ids: list[int],
     min_weight: float,
     top_k: int | None,
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -196,8 +246,11 @@ def sparsify_query_vector(
         mask: np.ndarray = local_vec > float(min_weight)
     else:
         mask = local_vec > 0.0
-    if exclude_token_ids:
-        exclude_array: np.ndarray = np.asarray(exclude_token_ids, dtype=np.int64)
+    exclude_array: np.ndarray = _sanitize_exclude_output_ids_array(
+        exclude_output_ids,
+        vocab_size=int(vector.shape[0]),
+    )
+    if int(exclude_array.size) > 0:
         mask[exclude_array] = False
 
     indices: np.ndarray = np.nonzero(mask)[0].astype(np.int32, copy=False)

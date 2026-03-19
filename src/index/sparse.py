@@ -8,6 +8,7 @@ import numpy as np
 import torch
 
 from src.utils.logging import get_logger
+from src.utils.output_space import OutputSpaceSpec
 
 logger = get_logger("src.index.sparse")
 
@@ -75,7 +76,12 @@ class SparseShardWriter:
         *,
         top_k: int | None,
         min_weight: float,
-        exclude_token_ids: Sequence[int],
+        exclude_output_ids: Sequence[int],
+        source_exclude_token_ids: Sequence[int],
+        model_family: str,
+        compact_head_alignment: str | None = None,
+        output_token_aligned: bool | None = None,
+        output_space: OutputSpaceSpec | None = None,
         shard_max_docs: int,
         value_dtype: str,
     ) -> None:
@@ -84,9 +90,24 @@ class SparseShardWriter:
         self.rank: int = int(rank)
         self.top_k: int | None = None if top_k is None else int(top_k)
         self.min_weight: float = float(min_weight)
-        self.exclude_token_ids: list[int] = [
-            int(token_id) for token_id in exclude_token_ids
+        self.exclude_output_ids: list[int] = [
+            int(output_id) for output_id in exclude_output_ids
         ]
+        self.source_exclude_token_ids: list[int] = [
+            int(token_id) for token_id in source_exclude_token_ids
+        ]
+        self.model_family: str = str(model_family)
+        self.output_space: OutputSpaceSpec = (
+            output_space
+            if output_space is not None
+            else OutputSpaceSpec.from_alignment(
+                vocab_size=self.vocab_size,
+                compact_head_alignment=compact_head_alignment,
+                output_token_aligned=output_token_aligned,
+            )
+        )
+        self.compact_head_alignment: str = self.output_space.compact_head_alignment
+        self.output_token_aligned: bool = self.output_space.output_token_aligned
         self.shard_max_docs: int = max(1, int(shard_max_docs))
         self.value_dtype: np.dtype = resolve_numpy_dtype(value_dtype)
 
@@ -94,9 +115,9 @@ class SparseShardWriter:
         self._rank_dir.mkdir(parents=True, exist_ok=True)
 
         self._exclude_tensor: torch.Tensor | None = None
-        if self.exclude_token_ids:
+        if self.exclude_output_ids:
             self._exclude_tensor = torch.tensor(
-                self.exclude_token_ids, dtype=torch.long, device="cpu"
+                self.exclude_output_ids, dtype=torch.long, device="cpu"
             )
 
         self._manifest: list[dict[str, Any]] = []
@@ -290,12 +311,15 @@ class SparseShardWriter:
             "vocab_size": self.vocab_size,
             "top_k": self.top_k,
             "min_weight": self.min_weight,
-            "exclude_token_ids": self.exclude_token_ids,
+            "exclude_output_ids": self.exclude_output_ids,
+            "source_exclude_token_ids": self.source_exclude_token_ids,
             "value_dtype": str(self.value_dtype),
+            "model_family": self.model_family,
             "doc_count": self._total_docs,
             "nnz": self._total_nnz,
             "shards": self._manifest,
         }
+        manifest_payload.update(self.output_space.to_metadata_dict())
         with manifest_path.open("w", encoding="utf-8") as manifest_file:
             json.dump(manifest_payload, manifest_file, indent=2)
 
@@ -320,13 +344,21 @@ def load_shard_manifest(encode_path: Path) -> tuple[list[ShardInfo], dict[str, A
             manifest: dict[str, Any] = json.load(manifest_file)
 
         if not metadata:
+            output_space: OutputSpaceSpec = OutputSpaceSpec.from_metadata(manifest)
             metadata = {
                 "vocab_size": manifest.get("vocab_size"),
                 "top_k": manifest.get("top_k"),
                 "min_weight": manifest.get("min_weight"),
-                "exclude_token_ids": manifest.get("exclude_token_ids"),
+                "exclude_output_ids": manifest.get(
+                    "exclude_output_ids", manifest.get("exclude_token_ids")
+                ),
+                "source_exclude_token_ids": manifest.get(
+                    "source_exclude_token_ids", manifest.get("exclude_token_ids")
+                ),
                 "value_dtype": manifest.get("value_dtype"),
+                "model_family": manifest.get("model_family"),
             }
+            metadata.update(output_space.to_metadata_dict())
 
         shards: Iterable[dict[str, Any]] = manifest.get("shards", [])
         for shard in shards:

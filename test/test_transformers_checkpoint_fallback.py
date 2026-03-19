@@ -1,3 +1,4 @@
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -6,7 +7,11 @@ from unittest.mock import patch
 import torch
 from transformers import BertConfig, BertForMaskedLM
 
-from src.utils.transformers import build_masked_lm_model, build_tokenizer
+from src.utils.transformers import (
+    _resolve_checkpoint_path,
+    build_masked_lm_model,
+    build_tokenizer,
+)
 
 
 class _DummyTokenizer:
@@ -100,6 +105,38 @@ def _save_condenser_style_checkpoint(
 
 
 class TransformersCheckpointFallbackTest(unittest.TestCase):
+    def test_resolve_checkpoint_path_prefers_priority_file(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="checkpoint_priority_") as tmp:
+            model_dir = Path(tmp)
+            checkpoint_dir = model_dir / "checkpoints"
+            checkpoint_dir.mkdir(parents=True, exist_ok=True)
+            preferred = checkpoint_dir / "last.ckpt"
+            fallback = checkpoint_dir / "epoch=09.ckpt"
+            fallback.write_bytes(b"fallback")
+            preferred.write_bytes(b"preferred")
+            os.utime(fallback, (2_000_000_000, 2_000_000_000))
+            os.utime(preferred, (1_000_000_000, 1_000_000_000))
+
+            resolved = _resolve_checkpoint_path(str(model_dir))
+
+            self.assertEqual(resolved, preferred)
+
+    def test_resolve_checkpoint_path_uses_latest_mtime_without_priority(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="checkpoint_latest_") as tmp:
+            model_dir = Path(tmp)
+            checkpoint_dir = model_dir / "checkpoints"
+            checkpoint_dir.mkdir(parents=True, exist_ok=True)
+            older = checkpoint_dir / "z_old.ckpt"
+            newer = checkpoint_dir / "a_new.ckpt"
+            older.write_bytes(b"older")
+            newer.write_bytes(b"newer")
+            os.utime(older, (1_000_000_000, 1_000_000_000))
+            os.utime(newer, (2_000_000_000, 2_000_000_000))
+
+            resolved = _resolve_checkpoint_path(str(model_dir))
+
+            self.assertEqual(resolved, newer)
+
     def test_build_masked_lm_model_falls_back_to_condenser_checkpoint(self) -> None:
         source_model = _build_tiny_bert()
         with tempfile.TemporaryDirectory(prefix="trained_anna_base_hf_") as tmp:
@@ -163,6 +200,11 @@ class TransformersCheckpointFallbackTest(unittest.TestCase):
             with patch(
                 "src.utils.transformers.AutoTokenizer.from_pretrained",
                 side_effect=fake_from_pretrained,
+            ), patch(
+                "src.utils.transformers.torch.load",
+                side_effect=AssertionError(
+                    "build_tokenizer should not deserialize checkpoints"
+                ),
             ):
                 tokenizer = build_tokenizer(
                     str(trained_dir),

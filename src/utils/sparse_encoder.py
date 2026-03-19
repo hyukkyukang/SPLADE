@@ -258,11 +258,17 @@ class NativeSparseEncoderAdapter:
             text_list = [str(item) for item in sentences]
 
         if not text_list:
-            vocab_size: int = int(self.model.encoder.vocab_size)
-            empty: torch.Tensor = torch.empty(
-                (0, vocab_size), dtype=self.model.encoder.mlm.dtype, device=self.device
+            embeddings = _finalize_encoded_batch(
+                torch.empty(
+                    (0, int(self.model.encoder.vocab_size)),
+                    dtype=self.model.encoder.dtype,
+                    device=self.device,
+                ),
+                max_active_dims=max_active_dims,
+                convert_to_sparse_tensor=convert_to_sparse_tensor,
+                save_to_cpu=save_to_cpu,
             )
-            return empty
+            return embeddings
 
         batch_size_value: int = int(batch_size or self.batch_size)
         batches: Iterable[list[str]] = _batch_texts(
@@ -311,16 +317,16 @@ class NativeSparseEncoderAdapter:
                     attention_mask=attention_mask,
                     pooling_mask=pooling_mask,
                 )
-                outputs.append(batch_reps)
+                outputs.append(
+                    _finalize_encoded_batch(
+                        batch_reps,
+                        max_active_dims=max_active_dims,
+                        convert_to_sparse_tensor=convert_to_sparse_tensor,
+                        save_to_cpu=save_to_cpu,
+                    )
+                )
 
-        embeddings: torch.Tensor = torch.cat(outputs, dim=0)
-        if max_active_dims is not None:
-            embeddings = _prune_to_max_active_dims(embeddings, int(max_active_dims))
-        if convert_to_sparse_tensor:
-            embeddings = embeddings.to_sparse()
-        if save_to_cpu:
-            embeddings = embeddings.to(device=torch.device("cpu"))
-        return embeddings
+        return _concat_encoded_batches(outputs)
 
 
 DocOnlySparseEncoderAdapter = NativeSparseEncoderAdapter
@@ -355,6 +361,35 @@ def _prune_to_max_active_dims(
     pruned: torch.Tensor = torch.zeros_like(embeddings)
     pruned.scatter_(1, indices, values)
     return pruned
+
+
+def _finalize_encoded_batch(
+    embeddings: torch.Tensor,
+    *,
+    max_active_dims: int | None,
+    convert_to_sparse_tensor: bool,
+    save_to_cpu: bool,
+) -> torch.Tensor:
+    """Apply pruning/storage transforms per batch to bound peak memory."""
+    processed: torch.Tensor = embeddings
+    if max_active_dims is not None:
+        processed = _prune_to_max_active_dims(processed, int(max_active_dims))
+    if convert_to_sparse_tensor:
+        processed = processed.to_sparse().coalesce()
+    if save_to_cpu:
+        processed = processed.to(device=torch.device("cpu"))
+    return processed
+
+
+def _concat_encoded_batches(outputs: list[torch.Tensor]) -> torch.Tensor:
+    if not outputs:
+        raise ValueError("Expected at least one encoded batch to concatenate.")
+    if len(outputs) == 1:
+        return outputs[0]
+    embeddings: torch.Tensor = torch.cat(outputs, dim=0)
+    if embeddings.is_sparse:
+        return embeddings.coalesce()
+    return embeddings
 
 
 def _strip_prefix(value: str, prefixes: Iterable[str]) -> str | None:

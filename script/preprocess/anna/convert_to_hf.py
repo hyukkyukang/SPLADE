@@ -8,8 +8,11 @@ import torch
 from transformers.dynamic_module_utils import get_class_from_dynamic_module
 from transformers import AutoConfig, AutoModelForMaskedLM, AutoTokenizer
 
-from script.preprocess.anna.anna_tokenizer import AnnaTokenizer
-from script.preprocess.anna.conversion_utils import load_anna_masked_lm_model
+from src.preprocess.anna_conversion_utils import (
+    load_anna_masked_lm_model,
+    load_anna_tokenizer,
+)
+from src.tokenization.anna_tokenizer import AnnaTokenizer
 from src.utils.logging import get_logger, log_if_rank_zero
 from src.utils.script_setup import configure_script_environment
 
@@ -98,7 +101,7 @@ def _finalize_output_dir(tmp_dir: Path, output_dir: Path, *, overwrite: bool) ->
 
 def _repo_anna_tokenizer_path() -> Path:
     repo_root: Path = Path(__file__).resolve().parent.parent.parent.parent
-    path: Path = repo_root / "script" / "preprocess" / "anna" / "anna_tokenizer.py"
+    path: Path = repo_root / "src" / "tokenization" / "anna_tokenizer.py"
     if not path.is_file():
         raise FileNotFoundError(f"ANNA tokenizer module not found: {path}")
     return path
@@ -223,8 +226,6 @@ def _validate_tokenizer_equivalence(
     *,
     skip_if_no_tf: bool = True,
 ) -> None:
-    from script.preprocess.anna.conversion_utils import load_anna_tokenizer
-
     try:
         source_tokenizer = load_anna_tokenizer(str(input_dir), do_lower_case=True)
     except ModuleNotFoundError as e:

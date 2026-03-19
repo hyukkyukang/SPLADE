@@ -16,7 +16,7 @@ from src.prototype.embeddinggemma_lsr.artifacts import (
     resolve_term_stats_cache_path,
     write_json,
 )
-from src.prototype.embeddinggemma_lsr.cli import (
+from src.utils.cli_config import (
     apply_config_overrides,
     parser_default_values,
 )

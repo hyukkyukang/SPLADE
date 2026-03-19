@@ -81,10 +81,33 @@ class LensQueryFormattingTest(unittest.TestCase):
         expected = torch.tensor([[0, 0, 0, 1], [0, 1, 1, 0]], dtype=torch.long)
         self.assertTrue(torch.equal(pooling_mask, expected))
 
+    def test_build_query_pooling_mask_supports_1d_inputs(self) -> None:
+        input_ids = torch.tensor([10, 30, 11, 20, 21, 0], dtype=torch.long)
+        attention_mask = torch.tensor([1, 1, 1, 1, 1, 0], dtype=torch.long)
+
+        pooling_mask = build_query_pooling_mask(
+            input_ids,
+            attention_mask,
+            self.tokenizer,
+            self.model_cfg,
+        )
+
+        expected = torch.tensor([0, 0, 0, 1, 1, 0], dtype=torch.long)
+        self.assertTrue(torch.equal(pooling_mask, expected))
+
     def test_build_doc_pooling_mask_trims_last_active_tokens(self) -> None:
         attention_mask = torch.tensor([[1, 1, 1, 1, 0]], dtype=torch.long)
         pooling_mask = build_doc_pooling_mask(attention_mask, self.model_cfg)
         expected = torch.tensor([[1, 1, 0, 0, 0]], dtype=torch.long)
+        self.assertTrue(torch.equal(pooling_mask, expected))
+
+    def test_build_doc_pooling_mask_trims_all_when_trim_exceeds_active_length(self) -> None:
+        model_cfg = OmegaConf.create({"family": "lens", "doc_trim_last_tokens": 8})
+        attention_mask = torch.tensor([1, 0, 1, 1], dtype=torch.long)
+
+        pooling_mask = build_doc_pooling_mask(attention_mask, model_cfg)
+
+        expected = torch.tensor([0, 0, 0, 0], dtype=torch.long)
         self.assertTrue(torch.equal(pooling_mask, expected))
 
     def test_validate_lens_tokenizer_rejects_missing_special_tokens(self) -> None:

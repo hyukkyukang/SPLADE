@@ -107,6 +107,7 @@ def _build_training_cfg(**overrides: object):
             "torch_compile_mode": "default",
             "strategy": "ddp",
             "num_devices": 4,
+            "use_cpu": True,
             "static_graph": True,
             "find_unused_parameters": False,
             "torch_compile_large_vocab_threshold": 100000,
@@ -203,9 +204,12 @@ class CompilePolicyManagerTest(unittest.TestCase):
             torch_compile_mode="max-autotune",
             static_graph=True,
             torch_compile_ddp_safe_mode=True,
+            use_cpu=False,
         )
 
-        with patch("torch.compile", side_effect=lambda module, **kwargs: module) as compile_mock:
+        with patch("torch.cuda.device_count", return_value=4), patch(
+            "torch.compile", side_effect=lambda module, **kwargs: module
+        ) as compile_mock:
             manager.setup(cfg)
 
         self.assertTrue(manager.torch_compile_enabled)

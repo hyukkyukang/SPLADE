@@ -20,15 +20,21 @@ class _DummyCompilePolicy:
 
 class _DummyModel:
     def encode_queries(
-        self, input_ids: torch.Tensor, attention_mask: torch.Tensor
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        pooling_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        _ = attention_mask
+        _ = attention_mask, pooling_mask
         return input_ids.float()
 
     def encode_docs(
-        self, input_ids: torch.Tensor, attention_mask: torch.Tensor
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        pooling_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        _ = attention_mask
+        _ = attention_mask, pooling_mask
         return input_ids.float()
 
 

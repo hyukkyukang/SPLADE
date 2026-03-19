@@ -3,6 +3,10 @@ import unittest
 import torch
 from omegaconf import DictConfig, OmegaConf
 
+from import_stubs import install_fake_sentence_transformers
+
+install_fake_sentence_transformers()
+
 from src.model.pl_module.nanobeir_runner import NanoBEIREvaluationRunner
 from src.utils.logging import get_logger
 

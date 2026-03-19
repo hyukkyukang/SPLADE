@@ -187,37 +187,39 @@ def build_query_pooling_mask(
         input_ids = input_ids.unsqueeze(0)
         attention_mask = attention_mask.unsqueeze(0)
 
-    pooling_mask: torch.Tensor = attention_mask.clone()
+    active_mask: torch.Tensor = attention_mask.to(dtype=torch.bool)
+    query_matches: torch.Tensor = active_mask & (input_ids == query_token_id)
+    has_query_token: torch.Tensor = query_matches.any(dim=-1, keepdim=True)
+    sequence_positions: torch.Tensor = torch.arange(
+        input_ids.shape[1], device=input_ids.device
+    ).unsqueeze(0)
+    first_query_positions: torch.Tensor = torch.where(
+        query_matches,
+        sequence_positions,
+        input_ids.shape[1],
+    ).amin(dim=-1, keepdim=True)
+    after_query_mask: torch.Tensor = active_mask & (
+        sequence_positions > first_query_positions
+    )
     special_ids: list[int] = [int(token_id) for token_id in tokenizer.all_special_ids]
-    special_ids_tensor: torch.Tensor | None = None
-    if special_ids:
-        special_ids_tensor = torch.tensor(
-            special_ids,
-            dtype=torch.long,
-            device=input_ids.device,
-        )
-
-    row_idx: int
-    for row_idx in range(int(input_ids.shape[0])):
-        active_mask: torch.Tensor = attention_mask[row_idx].to(dtype=torch.bool)
-        query_positions: torch.Tensor = torch.nonzero(
-            active_mask & (input_ids[row_idx] == query_token_id),
-            as_tuple=False,
-        ).flatten()
-        if int(query_positions.numel()) > 0:
-            query_position: int = int(query_positions[0].item())
-            pooling_mask[row_idx, : query_position + 1] = 0
-            continue
-        if missing_query_token_mode == "keep":
-            if special_ids_tensor is not None and int(special_ids_tensor.numel()) > 0:
-                special_mask: torch.Tensor = torch.isin(
-                    input_ids[row_idx], special_ids_tensor
-                )
-                pooling_mask[row_idx] = pooling_mask[row_idx] * (
-                    ~special_mask
-                ).to(dtype=pooling_mask.dtype)
-            continue
-        pooling_mask[row_idx].zero_()
+    continuation_mask: torch.Tensor
+    if missing_query_token_mode == "keep":
+        continuation_mask = active_mask
+        if special_ids:
+            special_ids_tensor: torch.Tensor = torch.tensor(
+                special_ids,
+                dtype=torch.long,
+                device=input_ids.device,
+            )
+            special_mask: torch.Tensor = torch.isin(input_ids, special_ids_tensor)
+            continuation_mask = continuation_mask & (~special_mask)
+    else:
+        continuation_mask = torch.zeros_like(active_mask)
+    pooling_mask = torch.where(
+        has_query_token,
+        after_query_mask,
+        continuation_mask,
+    ).to(dtype=attention_mask.dtype)
 
     if original_ndim == 1:
         return pooling_mask.squeeze(0)
@@ -237,17 +239,13 @@ def build_doc_pooling_mask(
     if original_ndim == 1:
         pooling_mask = pooling_mask.unsqueeze(0)
 
-    row_idx: int
-    for row_idx in range(int(pooling_mask.shape[0])):
-        active_positions: torch.Tensor = torch.nonzero(
-            pooling_mask[row_idx].to(dtype=torch.bool),
-            as_tuple=False,
-        ).flatten()
-        if int(active_positions.numel()) == 0:
-            continue
-        row_trim_count: int = min(trim_count, int(active_positions.numel()))
-        trim_positions: torch.Tensor = active_positions[-row_trim_count:]
-        pooling_mask[row_idx, trim_positions] = 0
+    active_mask: torch.Tensor = pooling_mask.to(dtype=torch.bool)
+    reverse_active_rank: torch.Tensor = torch.cumsum(
+        active_mask.flip(dims=(-1,)).to(dtype=torch.long),
+        dim=-1,
+    ).flip(dims=(-1,))
+    trim_mask: torch.Tensor = active_mask & (reverse_active_rank <= trim_count)
+    pooling_mask = pooling_mask * (~trim_mask).to(dtype=pooling_mask.dtype)
 
     if original_ndim == 1:
         return pooling_mask.squeeze(0)

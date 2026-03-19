@@ -8,18 +8,26 @@ import numpy as np
 import torch
 from datasets import Dataset, IterableDataset, load_dataset
 from omegaconf import DictConfig
-from transformers import AutoTokenizer, PreTrainedTokenizerBase
+from transformers import PreTrainedTokenizerBase
 
 from config.path import ABS_CONFIG_DIR
+from src.data.lens_formatting import (
+    build_doc_pooling_mask,
+    build_query_pooling_mask,
+    format_query_text,
+    validate_lens_tokenizer,
+)
 from src.model.pl_module.utils import build_splade_model_with_checkpoint
 from src.search.sparsify import sparsify_query_vector
 from src.utils.logging import get_logger, log_if_rank_zero
 from src.utils.model_utils import apply_checkpoint_model_config
+from src.utils.output_space import OutputSpaceSpec, resolve_model_output_exclude_ids
 from src.utils.script_setup import (
     configure_script_environment,
     initialize_run,
     normalize_optional_str,
 )
+from src.utils.transformers import build_tokenizer
 
 logger: logging.Logger = get_logger("script.analyze_vocab_terms", __file__)
 
@@ -210,23 +218,30 @@ def _encode_texts(
     tokenizer: PreTrainedTokenizerBase,
     texts: list[str],
     *,
+    model_cfg: DictConfig,
     max_length: int,
     batch_size: int,
     device: torch.device,
     encode_fn: Any,
+    is_query: bool,
 ) -> torch.Tensor:
     if not texts:
-        vocab_size: int = int(model.encoder.mlm.config.vocab_size)
+        vocab_size: int = int(model.encoder.vocab_size)
         empty: torch.Tensor = torch.empty(
-            (0, vocab_size), dtype=model.encoder.mlm.dtype, device=device
+            (0, vocab_size), dtype=model.encoder.dtype, device=device
         )
         return empty
     outputs: list[torch.Tensor] = []
     model.eval()
     with torch.no_grad():
         for batch in _batch_texts(texts, batch_size):
+            batch_texts: list[str]
+            if is_query:
+                batch_texts = [format_query_text(text, model_cfg) for text in batch]
+            else:
+                batch_texts = list(batch)
             tokens: dict[str, torch.Tensor] = tokenizer(
-                batch,
+                batch_texts,
                 padding=True,
                 truncation=True,
                 max_length=int(max_length),
@@ -234,7 +249,23 @@ def _encode_texts(
             )
             input_ids: torch.Tensor = tokens["input_ids"].to(device)
             attention_mask: torch.Tensor = tokens["attention_mask"].to(device)
-            batch_reps: torch.Tensor = encode_fn(input_ids, attention_mask)
+            if is_query:
+                pooling_mask: torch.Tensor = build_query_pooling_mask(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    tokenizer=tokenizer,
+                    model_cfg=model_cfg,
+                ).to(device)
+            else:
+                pooling_mask = build_doc_pooling_mask(
+                    attention_mask=attention_mask,
+                    model_cfg=model_cfg,
+                ).to(device)
+            batch_reps: torch.Tensor = encode_fn(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                pooling_mask=pooling_mask,
+            )
             outputs.append(batch_reps)
     return torch.cat(outputs, dim=0)
 
@@ -245,7 +276,7 @@ def _resolve_device(use_cpu: bool) -> torch.device:
     return torch.device("cuda")
 
 
-def _resolve_exclude_token_ids(
+def _resolve_source_exclude_token_ids(
     cfg: DictConfig, tokenizer: PreTrainedTokenizerBase
 ) -> list[int]:
     configured_ids: Any | None = cfg.model.exclude_token_ids
@@ -257,14 +288,15 @@ def _resolve_exclude_token_ids(
 def _extract_terms(
     vector: np.ndarray,
     *,
-    tokenizer: PreTrainedTokenizerBase,
-    exclude_token_ids: list[int],
+    output_space: OutputSpaceSpec,
+    tokenizer: PreTrainedTokenizerBase | None,
+    exclude_output_ids: list[int],
     min_weight: float,
     top_k: int | None,
 ) -> list[dict[str, Any]]:
     indices, values = sparsify_query_vector(
         vector,
-        exclude_token_ids=exclude_token_ids,
+        exclude_output_ids=exclude_output_ids,
         min_weight=float(min_weight),
         top_k=top_k,
     )
@@ -273,19 +305,26 @@ def _extract_terms(
     order: np.ndarray = np.argsort(values)[::-1]
     indices = indices[order]
     values = values[order]
-    tokens: list[str] = tokenizer.convert_ids_to_tokens(indices.tolist())
+    token_labels: list[str | None]
+    if output_space.output_token_aligned and tokenizer is not None:
+        token_labels = list(tokenizer.convert_ids_to_tokens(indices.tolist()))
+    else:
+        token_labels = [None] * int(indices.size)
     terms: list[dict[str, Any]] = []
-    for rank, (token_id, token, value) in enumerate(
-        zip(indices, tokens, values), start=1
+    for rank, (output_id, token, value) in enumerate(
+        zip(indices, token_labels, values), start=1
     ):
-        terms.append(
-            {
-                "rank": int(rank),
-                "token_id": int(token_id),
-                "token": token,
-                "weight": float(value),
-            }
-        )
+        term_payload: dict[str, Any] = {
+            "rank": int(rank),
+            "output_id": int(output_id),
+            "weight": float(value),
+        }
+        if output_space.output_token_aligned:
+            term_payload["token_id"] = int(output_id)
+            term_payload["token"] = token
+        else:
+            term_payload["token"] = None
+        terms.append(term_payload)
     return terms
 
 
@@ -424,18 +463,13 @@ def main(cfg: DictConfig) -> None:
         logger=logger,
     )
     model.to(device)
-    tokenizer: PreTrainedTokenizerBase = AutoTokenizer.from_pretrained(
-        cfg.model.huggingface_name,
-        use_fast=bool(cfg.model.use_fast_tokenizer),
+    tokenizer: PreTrainedTokenizerBase = build_tokenizer(
+        str(cfg.model.huggingface_name),
+        use_fast_tokenizer=bool(cfg.model.use_fast_tokenizer),
         trust_remote_code=bool(cfg.model.trust_remote_code),
+        require_fast_tokenizer=bool(cfg.model.require_fast_tokenizer),
     )
-    if bool(cfg.model.require_fast_tokenizer) and not bool(tokenizer.is_fast):
-        raise ValueError(
-            "Fast tokenizer is required but a slow tokenizer was loaded: "
-            f"{cfg.model.huggingface_name}"
-        )
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token or tokenizer.cls_token
+    validate_lens_tokenizer(tokenizer, cfg.model)
 
     query_texts: list[str] = [item["query_text"] for item in samples]
     positive_texts: list[str] = [item["positive_text"] for item in samples]
@@ -446,22 +480,32 @@ def main(cfg: DictConfig) -> None:
         model,
         tokenizer,
         query_texts,
+        model_cfg=cfg.model,
         max_length=max_length,
         batch_size=batch_size,
         device=device,
         encode_fn=model.encode_queries,
+        is_query=True,
     )
     positive_reps: torch.Tensor = _encode_texts(
         model,
         tokenizer,
         positive_texts,
+        model_cfg=cfg.model,
         max_length=max_length,
         batch_size=batch_size,
         device=device,
         encode_fn=model.encode_docs,
+        is_query=False,
     )
 
-    exclude_token_ids: list[int] = _resolve_exclude_token_ids(cfg, tokenizer)
+    source_exclude_token_ids: list[int] = _resolve_source_exclude_token_ids(
+        cfg, tokenizer
+    )
+    exclude_output_ids: list[int] = resolve_model_output_exclude_ids(
+        model, source_exclude_token_ids
+    )
+    output_space: OutputSpaceSpec = model.encoder.output_space
     min_weight: float = float(analysis_cfg.min_weight)
     top_k_value: Any | None = analysis_cfg.top_k
     top_k: int | None = None if top_k_value is None else int(top_k_value)
@@ -481,15 +525,17 @@ def main(cfg: DictConfig) -> None:
     for idx, sample in enumerate(samples):
         query_terms = _extract_terms(
             query_reps_cpu[idx],
+            output_space=output_space,
             tokenizer=tokenizer,
-            exclude_token_ids=exclude_token_ids,
+            exclude_output_ids=exclude_output_ids,
             min_weight=min_weight,
             top_k=top_k,
         )
         positive_terms = _extract_terms(
             positive_reps_cpu[idx],
+            output_space=output_space,
             tokenizer=tokenizer,
-            exclude_token_ids=exclude_token_ids,
+            exclude_output_ids=exclude_output_ids,
             min_weight=min_weight,
             top_k=top_k,
         )
@@ -512,6 +558,10 @@ def main(cfg: DictConfig) -> None:
         "sampled_count": len(samples),
         "shuffle": shuffle,
         "seed": seed,
+        "compact_head_alignment": output_space.compact_head_alignment,
+        "output_token_aligned": output_space.output_token_aligned,
+        "source_exclude_token_ids": source_exclude_token_ids,
+        "exclude_output_ids": exclude_output_ids,
         "top_k": top_k,
         "min_weight": min_weight,
         "max_input_length": max_length,

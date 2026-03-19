@@ -40,6 +40,7 @@ def _normalize_local_path(path_value: str) -> Path | None:
         return None
     return candidate
 
+
 def _extract_tensor_state_dict(checkpoint: dict[str, Any]) -> dict[str, torch.Tensor]:
     raw_state_dict: Any = checkpoint.get("state_dict", checkpoint)
     if not isinstance(raw_state_dict, dict):
@@ -65,7 +66,7 @@ def _strip_model_prefix(key: str) -> str:
     return key
 
 
-def _resolve_checkpoint_path(model_name_or_path: str) -> Path | None:
+def resolve_checkpoint_path(model_name_or_path: str) -> Path | None:
     local_path: Path | None = _normalize_local_path(model_name_or_path)
     if local_path is None:
         return None
@@ -83,16 +84,34 @@ def _resolve_checkpoint_path(model_name_or_path: str) -> Path | None:
         if candidate.is_file():
             return candidate
 
+    def _select_latest_checkpoint(checkpoint_files: list[Path]) -> Path | None:
+        if not checkpoint_files:
+            return None
+        return max(
+            checkpoint_files,
+            key=lambda path: (
+                float(path.stat().st_mtime),
+                path.name,
+            ),
+        )
+
     checkpoint_dir: Path = local_path / "checkpoints"
     if checkpoint_dir.is_dir():
-        checkpoint_files: list[Path] = sorted(checkpoint_dir.glob("*.ckpt"))
-        if checkpoint_files:
-            return checkpoint_files[0]
+        checkpoint_files: list[Path] = list(checkpoint_dir.glob("*.ckpt"))
+        selected_checkpoint: Path | None = _select_latest_checkpoint(checkpoint_files)
+        if selected_checkpoint is not None:
+            return selected_checkpoint
 
-    root_checkpoint_files: list[Path] = sorted(local_path.glob("*.ckpt"))
-    if root_checkpoint_files:
-        return root_checkpoint_files[0]
+    root_checkpoint_files: list[Path] = list(local_path.glob("*.ckpt"))
+    selected_checkpoint = _select_latest_checkpoint(root_checkpoint_files)
+    if selected_checkpoint is not None:
+        return selected_checkpoint
     return None
+
+
+def _resolve_checkpoint_path(model_name_or_path: str) -> Path | None:
+    """Backward-compatible alias for older internal callers/tests."""
+    return resolve_checkpoint_path(model_name_or_path)
 
 
 def _as_dict(value: Any) -> dict[str, Any]:
@@ -116,13 +135,6 @@ def _extract_hparams(checkpoint: dict[str, Any]) -> dict[str, Any]:
 def _extract_model_hparams(checkpoint: dict[str, Any]) -> dict[str, Any]:
     hparams: dict[str, Any] = _extract_hparams(checkpoint)
     return _as_dict(hparams.get("model"))
-
-
-def _join_path(base: Path, suffix: str) -> Path:
-    candidate: Path = Path(suffix).expanduser()
-    if candidate.is_absolute():
-        return candidate
-    return base / candidate
 
 
 def _append_dir_candidate(
@@ -162,51 +174,23 @@ def _collect_local_fallback_dirs(model_name_or_path: str) -> list[Path]:
     seen: set[str] = set()
     if local_path.is_dir():
         _append_dir_candidate(candidates, seen, local_path)
+        if local_path.name.startswith("trained_"):
+            basename: str = local_path.name[8:]
+            _append_dir_candidate(candidates, seen, local_path.parent / basename)
+            _append_dir_candidate(
+                candidates, seen, local_path.parent / "data" / "model" / basename
+            )
+            _append_dir_candidate(
+                candidates, seen, Path.cwd() / "data" / "model" / basename
+            )
 
-    checkpoint_path: Path | None = _resolve_checkpoint_path(model_name_or_path)
+    checkpoint_path: Path | None = resolve_checkpoint_path(model_name_or_path)
     if checkpoint_path is None:
         return candidates
 
     run_dir: Path = _derive_run_directory(model_name_or_path, checkpoint_path)
     _append_dir_candidate(candidates, seen, run_dir)
     _append_dir_candidate(candidates, seen, run_dir / "checkpoints")
-
-    checkpoint: dict[str, Any] = torch.load(str(checkpoint_path), map_location="cpu")
-    hparams: dict[str, Any] = _extract_hparams(checkpoint)
-    model_hparams: dict[str, Any] = _extract_model_hparams(checkpoint)
-
-    tokenizer_path_value: str | None = _normalize_optional_str(
-        model_hparams.get("tokenizer_path")
-    )
-    root_dir_value: str | None = _normalize_optional_str(hparams.get("root_dir_path"))
-
-    if tokenizer_path_value is not None:
-        tokenizer_path: Path = Path(tokenizer_path_value).expanduser()
-        if tokenizer_path.is_absolute():
-            _append_dir_candidate(candidates, seen, tokenizer_path)
-        else:
-            _append_dir_candidate(candidates, seen, Path.cwd() / tokenizer_path)
-            _append_dir_candidate(candidates, seen, _join_path(run_dir, tokenizer_path_value))
-            _append_dir_candidate(
-                candidates, seen, _join_path(checkpoint_path.parent, tokenizer_path_value)
-            )
-            if root_dir_value is not None:
-                _append_dir_candidate(
-                    candidates,
-                    seen,
-                    _join_path(Path(root_dir_value).expanduser(), tokenizer_path_value),
-                )
-            tokenizer_basename: str = tokenizer_path.name
-            _append_dir_candidate(candidates, seen, run_dir.parent / tokenizer_basename)
-            _append_dir_candidate(
-                candidates, seen, run_dir.parent / "data" / "model" / tokenizer_basename
-            )
-            _append_dir_candidate(
-                candidates, seen, Path.cwd() / "data" / "model" / tokenizer_basename
-            )
-
-    if run_dir.name.startswith("trained_"):
-        _append_dir_candidate(candidates, seen, run_dir.parent / run_dir.name[8:])
     return candidates
 
 
@@ -417,7 +401,7 @@ def _maybe_load_condenser_checkpoint(
     dtype: torch.dtype | None,
     tie_word_embeddings: bool,
 ) -> PreTrainedModel | None:
-    checkpoint_path: Path | None = _resolve_checkpoint_path(model_name_or_path)
+    checkpoint_path: Path | None = resolve_checkpoint_path(model_name_or_path)
     if checkpoint_path is None:
         return None
 
@@ -511,5 +495,6 @@ def build_masked_lm_model(
 __all__: list[str] = [
     "build_masked_lm_model",
     "build_tokenizer",
+    "resolve_checkpoint_path",
     "resolve_model_name_or_path",
 ]

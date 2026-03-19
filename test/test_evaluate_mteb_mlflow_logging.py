@@ -4,6 +4,18 @@ from unittest.mock import Mock, patch
 
 from omegaconf import DictConfig, OmegaConf
 
+from import_stubs import (
+    install_fake_hydra,
+    install_fake_mlflow,
+    install_fake_pandas,
+    install_fake_pytorch_lightning_utilities,
+)
+
+install_fake_hydra()
+install_fake_mlflow()
+install_fake_pandas()
+install_fake_pytorch_lightning_utilities()
+
 from script.evaluate_mteb import _log_mlflow_run_datasets_and_model
 
 
@@ -12,6 +24,7 @@ def _build_cfg() -> DictConfig:
         {
             "model": {
                 "name": "splade_v2_pp",
+                "family": "splade",
                 "type": "splade",
                 "huggingface_name": "naver/splade-v3",
             },
@@ -100,6 +113,39 @@ class EvaluateMtebMlflowLoggingTest(unittest.TestCase):
         mlflow_client_instance.log_inputs.assert_not_called()
         mlflow_client_instance.create_logged_model.assert_not_called()
         mlflow_client_instance.log_outputs.assert_not_called()
+
+    def test_prefers_model_family_for_logged_model_type(self) -> None:
+        cfg: DictConfig = _build_cfg()
+        cfg.model.family = "lens"
+        cfg.model.type = "splade"
+        cfg.model.doc_only = False
+        cfg.model.peft = OmegaConf.create({"enabled": True})
+        fake_run = SimpleNamespace(
+            info=SimpleNamespace(experiment_id="42"),
+            inputs=SimpleNamespace(dataset_inputs=[]),
+            outputs=SimpleNamespace(model_outputs=[]),
+        )
+        mlflow_client_instance: Mock = Mock()
+        mlflow_client_instance.get_run.return_value = fake_run
+        mlflow_client_instance.create_logged_model.return_value = SimpleNamespace(
+            model_id="m-1234"
+        )
+
+        with patch(
+            "script.evaluate_mteb.MlflowClient", return_value=mlflow_client_instance
+        ):
+            _log_mlflow_run_datasets_and_model(
+                cfg=cfg,
+                run_id="unit-run-id",
+                tracking_uri="http://127.0.0.1:5000",
+                model_source="outputs/model_creation/lens/mistral_cluster4k",
+                model_source_kind="checkpoint",
+            )
+
+        create_kwargs = mlflow_client_instance.create_logged_model.call_args.kwargs
+        self.assertEqual(create_kwargs["model_type"], "lens")
+        self.assertEqual(create_kwargs["tags"]["model_family"], "lens")
+        self.assertEqual(create_kwargs["tags"]["model_peft_enabled"], "true")
 
 
 if __name__ == "__main__":

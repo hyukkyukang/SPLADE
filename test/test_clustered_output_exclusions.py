@@ -7,7 +7,7 @@ from unittest.mock import patch
 import torch
 from torch import nn
 
-from src.model.retriever.sparse.neural.splade import SpladeEncoder, SpladeModel
+from src.model.retriever.sparse.neural.splade import SpladeEncoder
 
 
 class _DummyHiddenOutput:
@@ -80,98 +80,29 @@ def _build_compact_payload(
     *,
     out_features: int,
     hidden_size: int,
-    alignment: str | None,
-    include_token_ids: bool,
+    alignment: str,
     token_ids: list[int] | None = None,
 ) -> dict[str, torch.Tensor | list[int] | str]:
     payload: dict[str, torch.Tensor | list[int] | str] = {
+        "alignment": alignment,
         "weight": torch.ones((out_features, hidden_size), dtype=torch.float32),
         "bias": torch.zeros((out_features,), dtype=torch.float32),
     }
-    if alignment is not None:
-        payload["alignment"] = alignment
-    if include_token_ids:
-        payload["token_ids"] = (
-            list(range(out_features)) if token_ids is None else list(token_ids)
-        )
+    if token_ids is not None:
+        payload["token_ids"] = list(token_ids)
     return payload
 
 
-class LensCompactHeadAlignmentTest(unittest.TestCase):
-    def test_legacy_token_aligned_compact_head_keeps_token_mapping(self) -> None:
-        dummy_model = _DummyCausalLM(vocab_size=32, hidden_size=8)
-        with tempfile.TemporaryDirectory(prefix="compact_head_legacy_") as tmp:
-            model_dir = Path(tmp)
-            torch.save(
-                _build_compact_payload(
-                    out_features=4,
-                    hidden_size=8,
-                    alignment=None,
-                    include_token_ids=True,
-                ),
-                model_dir / "splade_compact_head.pt",
-            )
-
-            with patch(
-                "src.model.retriever.sparse.neural.splade.build_masked_lm_model",
-                return_value=dummy_model,
-            ), patch(
-                "src.model.retriever.sparse.neural.splade.resolve_model_name_or_path",
-                return_value=str(model_dir),
-            ):
-                encoder = SpladeEncoder(
-                    model_name=str(model_dir),
-                    sparse_activation="log1p_relu",
-                    huggingface_model_class="AutoModelForCausalLM",
-                )
-
-        self.assertTrue(encoder.output_token_aligned)
-        self.assertEqual(encoder.compact_head_alignment, "token_ids")
-        self.assertEqual(tuple(encoder.token_id_to_output_index.tolist()), (0, 1, 2, 3))
-
-    def test_cluster_aligned_compact_head_skips_token_mapping(self) -> None:
-        dummy_model = _DummyCausalLM(vocab_size=32, hidden_size=8)
-        with tempfile.TemporaryDirectory(prefix="compact_head_cluster_") as tmp:
-            model_dir = Path(tmp)
-            torch.save(
-                _build_compact_payload(
-                    out_features=4,
-                    hidden_size=8,
-                    alignment="latent_cluster",
-                    include_token_ids=True,
-                ),
-                model_dir / "splade_compact_head.pt",
-            )
-
-            with patch(
-                "src.model.retriever.sparse.neural.splade.build_masked_lm_model",
-                return_value=dummy_model,
-            ), patch(
-                "src.model.retriever.sparse.neural.splade.resolve_model_name_or_path",
-                return_value=str(model_dir),
-            ):
-                encoder = SpladeEncoder(
-                    model_name=str(model_dir),
-                    sparse_activation="log1p_relu",
-                    huggingface_model_class="AutoModelForCausalLM",
-                )
-
-        self.assertFalse(encoder.output_token_aligned)
-        self.assertEqual(encoder.compact_head_alignment, "latent_cluster")
-        self.assertEqual(int(encoder.token_id_to_output_index.numel()), 0)
-        mask = encoder.build_exclude_mask(torch.tensor([0, 1], dtype=torch.long))
-        self.assertEqual(int(mask.numel()), 0)
-
-    def test_token_aligned_compact_head_maps_token_ids_to_output_ids(self) -> None:
+class ClusteredOutputExclusionsTest(unittest.TestCase):
+    def test_token_aligned_compact_head_filters_invalid_token_ids(self) -> None:
         dummy_model = _DummyCausalLM(vocab_size=64, hidden_size=8)
-        with tempfile.TemporaryDirectory(prefix="compact_head_token_map_") as tmp:
+        with tempfile.TemporaryDirectory(prefix="clustered_exclude_token_aligned_") as tmp:
             model_dir = Path(tmp)
             torch.save(
                 _build_compact_payload(
                     out_features=3,
                     hidden_size=8,
                     alignment="token_ids",
-                    include_token_ids=True,
                     token_ids=[10, 20, 30],
                 ),
                 model_dir / "splade_compact_head.pt",
@@ -191,22 +122,19 @@ class LensCompactHeadAlignmentTest(unittest.TestCase):
                 )
 
         resolved_output_ids = encoder.resolve_output_exclude_ids(
-            torch.tensor([20, 999, 10], dtype=torch.long)
+            torch.tensor([20, -1, 999, 15], dtype=torch.long)
         )
-        self.assertEqual(tuple(resolved_output_ids.tolist()), (0, 1))
-        mask = encoder.build_exclude_mask(torch.tensor([20], dtype=torch.long))
-        self.assertTrue(torch.equal(mask, torch.tensor([False, True, False])))
+        self.assertEqual(tuple(resolved_output_ids.tolist()), (1,))
 
-    def test_doc_only_rejects_cluster_aligned_compact_head(self) -> None:
-        dummy_model = _DummyCausalLM(vocab_size=32, hidden_size=8)
-        with tempfile.TemporaryDirectory(prefix="compact_head_doc_only_") as tmp:
+    def test_latent_cluster_head_returns_no_output_exclusions(self) -> None:
+        dummy_model = _DummyCausalLM(vocab_size=64, hidden_size=8)
+        with tempfile.TemporaryDirectory(prefix="clustered_exclude_latent_") as tmp:
             model_dir = Path(tmp)
             torch.save(
                 _build_compact_payload(
                     out_features=4,
                     hidden_size=8,
                     alignment="latent_cluster",
-                    include_token_ids=False,
                 ),
                 model_dir / "splade_compact_head.pt",
             )
@@ -218,16 +146,16 @@ class LensCompactHeadAlignmentTest(unittest.TestCase):
                 "src.model.retriever.sparse.neural.splade.resolve_model_name_or_path",
                 return_value=str(model_dir),
             ):
-                with self.assertRaisesRegex(ValueError, "doc_only requires token-aligned"):
-                    _ = SpladeModel(
-                        family="lens",
-                        model_name=str(model_dir),
-                        huggingface_model_class="AutoModelForCausalLM",
-                        query_pooling="max",
-                        doc_pooling="max",
-                        sparse_activation="log1p_relu",
-                        doc_only=True,
-                    )
+                encoder = SpladeEncoder(
+                    model_name=str(model_dir),
+                    sparse_activation="log1p_relu",
+                    huggingface_model_class="AutoModelForCausalLM",
+                )
+
+        resolved_output_ids = encoder.resolve_output_exclude_ids(
+            torch.tensor([0, 1, 2], dtype=torch.long)
+        )
+        self.assertEqual(int(resolved_output_ids.numel()), 0)
 
 
 if __name__ == "__main__":

@@ -5,16 +5,54 @@ from unittest.mock import Mock, patch
 
 from omegaconf import OmegaConf
 
+from import_stubs import (
+    install_fake_mlflow,
+    install_fake_pandas,
+    install_fake_pytorch_lightning_utilities,
+)
+
+install_fake_mlflow()
+install_fake_pandas()
+install_fake_pytorch_lightning_utilities()
+
 from src.utils.logging import get_logger
 from src.utils.mlflow_utils import (
+    add_mlflow_model_config_tags,
     configure_mlflow_tls,
     finish_mlflow_system_metrics_monitor,
+    resolve_mlflow_model_type,
     start_mlflow_system_metrics_monitor,
     warn_if_mlflow_gpu_metrics_unavailable,
 )
 
 
 class MlflowUtilsTest(unittest.TestCase):
+    def test_resolve_mlflow_model_type_prefers_family_then_legacy_type(self) -> None:
+        lens_cfg = OmegaConf.create({"family": "lens", "type": "splade"})
+        legacy_cfg = OmegaConf.create({"type": "splade"})
+        empty_cfg = OmegaConf.create({})
+
+        self.assertEqual(resolve_mlflow_model_type(lens_cfg), "lens")
+        self.assertEqual(resolve_mlflow_model_type(legacy_cfg), "splade")
+        self.assertEqual(resolve_mlflow_model_type(empty_cfg), "splade")
+
+    def test_add_mlflow_model_config_tags_adds_optional_fields(self) -> None:
+        model_cfg = OmegaConf.create(
+            {
+                "family": "lens",
+                "doc_only": False,
+                "peft": {"enabled": True},
+                "splade_compact_head_alignment": "latent_cluster",
+            }
+        )
+        tags = add_mlflow_model_config_tags({"run_id": "abc"}, model_cfg)
+
+        self.assertEqual(tags["run_id"], "abc")
+        self.assertEqual(tags["model_family"], "lens")
+        self.assertEqual(tags["model_doc_only"], "false")
+        self.assertEqual(tags["model_peft_enabled"], "true")
+        self.assertEqual(tags["compact_head_alignment"], "latent_cluster")
+
     def test_configure_mlflow_tls_sets_env(self) -> None:
         cfg = OmegaConf.create(
             {

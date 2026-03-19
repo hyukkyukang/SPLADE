@@ -1,9 +1,30 @@
 import json
+import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 
 import numpy as np
+
+
+def _install_fake_numba() -> None:
+    try:
+        import numba  # noqa: F401
+    except ImportError:
+        def _njit(func=None, *args, **kwargs):  # type: ignore[no-untyped-def]
+            if func is not None and callable(func):
+                return func
+
+            def decorator(inner):  # type: ignore[no-untyped-def]
+                return inner
+
+            return decorator
+
+        sys.modules["numba"] = types.SimpleNamespace(njit=_njit)
+
+
+_install_fake_numba()
 
 from src.index.sparse import ShardInfo, build_inverted_index_from_shards
 

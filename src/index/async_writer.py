@@ -9,6 +9,7 @@ import torch.multiprocessing as mp
 
 from src.index.sparse import SparseShardWriter
 from src.utils.logging import get_logger
+from src.utils.output_space import OutputSpaceSpec
 
 logger = get_logger("src.index.async_writer")
 
@@ -20,7 +21,10 @@ class SparseWriterConfig:
     rank: int
     top_k: int | None
     min_weight: float
-    exclude_token_ids: list[int]
+    exclude_output_ids: list[int]
+    source_exclude_token_ids: list[int]
+    model_family: str
+    output_space: OutputSpaceSpec
     shard_max_docs: int
     value_dtype: str
 
@@ -37,7 +41,10 @@ def _writer_worker_loop(
             rank=cfg.rank,
             top_k=cfg.top_k,
             min_weight=cfg.min_weight,
-            exclude_token_ids=cfg.exclude_token_ids,
+            exclude_output_ids=cfg.exclude_output_ids,
+            source_exclude_token_ids=cfg.source_exclude_token_ids,
+            model_family=cfg.model_family,
+            output_space=cfg.output_space,
             shard_max_docs=cfg.shard_max_docs,
             value_dtype=cfg.value_dtype,
         )

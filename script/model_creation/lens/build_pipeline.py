@@ -9,7 +9,7 @@ from typing import Any
 
 from omegaconf import OmegaConf
 
-from src.prototype.embeddinggemma_lsr.cli import (
+from src.utils.cli_config import (
     apply_config_overrides,
     parser_default_values,
 )

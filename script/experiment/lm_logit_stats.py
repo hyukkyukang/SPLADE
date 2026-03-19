@@ -13,7 +13,11 @@ import torch
 from datasets import Dataset, IterableDataset, load_dataset
 from transformers import AutoModelForMaskedLM, AutoTokenizer
 
-from src.utils.transformers import build_masked_lm_model, build_tokenizer
+from src.utils.transformers import (
+    build_masked_lm_model,
+    build_tokenizer,
+    resolve_checkpoint_path,
+)
 
 LOGGER: logging.Logger = logging.getLogger("scripts.experiment.logit_stats")
 
@@ -324,34 +328,7 @@ def _sample_logits(
 
 def _resolve_checkpoint_path(model_name: str) -> Path | None:
     """Resolve a checkpoint path from a model name/path when possible."""
-    model_path: Path = Path(model_name).expanduser()
-    if not model_path.exists():
-        return None
-    if model_path.is_file() and model_path.suffix == ".ckpt":
-        return model_path
-    if not model_path.is_dir():
-        return None
-
-    prioritized: tuple[str, ...] = ("best.ckpt", "last.ckpt", "mteb-best.ckpt")
-    candidate_name: str
-    for candidate_name in prioritized:
-        candidate_path: Path = model_path / "checkpoints" / candidate_name
-        if candidate_path.is_file():
-            return candidate_path
-    for candidate_name in prioritized:
-        candidate_path = model_path / candidate_name
-        if candidate_path.is_file():
-            return candidate_path
-
-    checkpoint_dir: Path = model_path / "checkpoints"
-    if checkpoint_dir.is_dir():
-        checkpoint_files: list[Path] = sorted(checkpoint_dir.glob("*.ckpt"))
-        if checkpoint_files:
-            return checkpoint_files[0]
-    checkpoint_files = sorted(model_path.glob("*.ckpt"))
-    if checkpoint_files:
-        return checkpoint_files[0]
-    return None
+    return resolve_checkpoint_path(model_name)
 
 
 def _load_checkpoint_payload(model_name: str) -> tuple[Path, dict[str, Any]] | None:

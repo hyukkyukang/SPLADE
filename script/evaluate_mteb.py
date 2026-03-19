@@ -16,10 +16,12 @@ from src.model.retriever.sparse.neural.splade import SpladeModel
 from src.utils import log_if_rank_zero
 from src.utils.logging import get_logger
 from src.utils.mlflow_utils import (
+    add_mlflow_model_config_tags,
     build_mlflow_dataset_input_from_metadata,
     has_logged_mlflow_dataset_inputs,
     has_logged_mlflow_model_outputs,
     log_mlflow_model_output,
+    resolve_mlflow_model_type,
     resolve_mlflow_tags,
     sanitize_mlflow_metric_name,
 )
@@ -226,11 +228,6 @@ def _log_mlflow_run_datasets_and_model(
         return
 
     model_cfg: DictConfig | None = cfg.get("model")
-    model_type: str = (
-        str(model_cfg.get("type", "splade"))
-        if isinstance(model_cfg, DictConfig)
-        else "splade"
-    )
     model_tags: dict[str, str] = {
         "benchmark": "NanoBEIR",
         "model_source": model_source,
@@ -241,6 +238,7 @@ def _log_mlflow_run_datasets_and_model(
         hf_model_name: str | None = normalize_optional_str(model_cfg.get("huggingface_name"))
         if hf_model_name is not None:
             model_tags["huggingface_name"] = hf_model_name
+        model_tags = add_mlflow_model_config_tags(model_tags, model_cfg)
 
     logged_model_name: str = _resolve_logged_model_name(
         cfg=cfg,
@@ -252,7 +250,11 @@ def _log_mlflow_run_datasets_and_model(
         run=run,
         run_id=run_id,
         logged_model_name=logged_model_name,
-        model_type=model_type,
+        model_type=(
+            resolve_mlflow_model_type(model_cfg)
+            if isinstance(model_cfg, DictConfig)
+            else "splade"
+        ),
         model_tags=model_tags,
         tracking_uri=tracking_uri,
         step=0,

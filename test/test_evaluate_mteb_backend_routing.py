@@ -4,6 +4,20 @@ from unittest.mock import ANY, Mock, patch
 import torch
 from omegaconf import DictConfig, OmegaConf
 
+from import_stubs import (
+    install_fake_hydra,
+    install_fake_mlflow,
+    install_fake_pandas,
+    install_fake_pytorch_lightning_utilities,
+    install_fake_sentence_transformers,
+)
+
+install_fake_hydra()
+install_fake_mlflow()
+install_fake_pandas()
+install_fake_pytorch_lightning_utilities()
+install_fake_sentence_transformers()
+
 from script.evaluate_mteb import _build_sparse_encoder
 
 

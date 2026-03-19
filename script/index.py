@@ -19,6 +19,7 @@ from src.index.sparse import (
 )
 from src.utils.logging import get_logger, log_if_rank_zero
 from src.utils.model_utils import resolve_tagged_output_dir
+from src.utils.output_space import OutputSpaceSpec
 from src.utils.script_setup import configure_script_environment
 
 logger: logging.Logger = get_logger(__name__, __file__)
@@ -90,6 +91,10 @@ def main(cfg: DictConfig) -> None:
 
     value_dtype_name: str = str(metadata.get("value_dtype") or cfg.encoding.value_dtype)
     value_dtype: np.dtype = resolve_numpy_dtype(value_dtype_name)
+    output_space: OutputSpaceSpec = OutputSpaceSpec.from_metadata(
+        metadata,
+        vocab_size=vocab_size,
+    )
     index_value_dtype: np.dtype = value_dtype
     if index_value_dtype == np.float16:
         log_if_rank_zero(
@@ -146,9 +151,11 @@ def main(cfg: DictConfig) -> None:
         "value_dtype": str(index_value_dtype),
         "encoded_value_dtype": value_dtype_name,
         "encode_dir": str(encode_path),
+        "model_family": metadata.get("model_family"),
         "top_k": metadata.get("top_k"),
         "min_weight": metadata.get("min_weight"),
-        "exclude_token_ids": metadata.get("exclude_token_ids"),
+        "exclude_output_ids": metadata.get("exclude_output_ids"),
+        "source_exclude_token_ids": metadata.get("source_exclude_token_ids"),
         "block_size": block_size_value,
         "has_block_max": True,
         "posting_list_len_mean": posting_list_len_mean,
@@ -157,6 +164,7 @@ def main(cfg: DictConfig) -> None:
         "block_max_dtype": str(block_max.dtype),
         "block_ptr_dtype": str(block_ptr.dtype),
     }
+    metadata_out.update(output_space.to_metadata_dict())
     with (index_path / "metadata.json").open("w", encoding="utf-8") as meta_file:
         json.dump(metadata_out, meta_file, indent=2)
 

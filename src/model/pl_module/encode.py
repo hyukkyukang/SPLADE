@@ -1,10 +1,8 @@
-from bisect import bisect_right
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
 import lightning as L
 import torch
-import torch.nn.functional as F
 from omegaconf import DictConfig, OmegaConf
 from transformers import PreTrainedTokenizerBase
 
@@ -28,7 +26,9 @@ from src.model.retriever.sparse.neural.splade import SpladeModel
 from src.utils import is_rank_zero, log_if_rank_zero, maybe_barrier
 from src.utils.logging import get_logger
 from src.utils.model_utils import resolve_tagged_output_dir
+from src.utils.output_space import OutputSpaceSpec
 from src.utils.transformers import build_tokenizer
+from src.utils.windowed_encoding import encode_and_aggregate_windows
 
 logger = get_logger("SPLADEEncodeModule")
 
@@ -64,7 +64,7 @@ class SPLADEEncodeModule(L.LightningModule):
         self._pad_token_id: int = int(pad_token_id)
         self._writer: SparseShardWriter | None = None
         self._async_writer: AsyncSparseWriter | None = None
-        self._exclude_token_ids_tensor: torch.Tensor | None = None
+        self._exclude_output_ids_tensor: torch.Tensor | None = None
         self._value_dtype = resolve_numpy_dtype(str(self.cfg.encoding.value_dtype))
         self._min_weight: float = float(self.cfg.encoding.sparse_min_weight)
         self._top_k: int | None = self.cfg.encoding.sparse_top_k
@@ -104,6 +104,18 @@ class SPLADEEncodeModule(L.LightningModule):
         if configured_ids is not None:
             return [int(token_id) for token_id in configured_ids]
         return [int(token_id) for token_id in self._tokenizer.all_special_ids]
+
+    def _resolve_exclude_output_ids(
+        self, raw_exclude_token_ids: Sequence[int]
+    ) -> list[int]:
+        if not raw_exclude_token_ids:
+            return []
+        output_space: OutputSpaceSpec = self.model.encoder.output_space
+        resolved_output_ids: torch.Tensor = output_space.resolve_exclude_token_ids(
+            list(raw_exclude_token_ids),
+            token_id_to_output_index=self.model.encoder.token_id_to_output_index,
+        )
+        return [int(output_id) for output_id in resolved_output_ids.tolist()]
 
     def _setup_torch_compile(self) -> dict[str, Any]:
         compile_enabled: bool = bool(self.cfg.encoding.get("torch_compile", False))
@@ -154,7 +166,7 @@ class SPLADEEncodeModule(L.LightningModule):
         if self._sparsify_core_topk is None and self._sparsify_core_threshold is None:
             return sparsify_batch_gpu_csr(
                 vectors,
-                exclude_token_ids=self._exclude_token_ids_tensor,
+                exclude_output_ids=self._exclude_output_ids_tensor,
                 min_weight=self._min_weight,
                 top_k=self._top_k,
                 value_dtype=self._value_dtype,
@@ -171,7 +183,7 @@ class SPLADEEncodeModule(L.LightningModule):
             )
             return indptr, indices, values
         threshold: float = float(self._min_weight) if self._min_weight > 0.0 else 0.0
-        exclude_ids: torch.Tensor | None = self._exclude_token_ids_tensor
+        exclude_ids: torch.Tensor | None = self._exclude_output_ids_tensor
         if exclude_ids is not None and int(exclude_ids.numel()) > 0:
             exclude_ids = exclude_ids.to(device=vectors.device)
         if self._top_k is not None:
@@ -186,7 +198,7 @@ class SPLADEEncodeModule(L.LightningModule):
             core_fn = self._sparsify_core_topk or _sparsify_batch_gpu_csr_core_topk
             indptr_gpu, flat_indices, flat_values = core_fn(
                 vectors,
-                exclude_token_ids=exclude_ids,
+                exclude_output_ids=exclude_ids,
                 threshold=threshold,
                 top_k=top_k_int,
             )
@@ -196,7 +208,7 @@ class SPLADEEncodeModule(L.LightningModule):
             )
             indptr_gpu, flat_indices, flat_values = core_fn(
                 vectors,
-                exclude_token_ids=exclude_ids,
+                exclude_output_ids=exclude_ids,
                 threshold=threshold,
             )
         torch_value_dtype: torch.dtype = resolve_torch_dtype(self._value_dtype)
@@ -205,43 +217,6 @@ class SPLADEEncodeModule(L.LightningModule):
         values = flat_values.to(dtype=torch_value_dtype, device="cpu")
         return indptr, indices, values
 
-    @staticmethod
-    def _resolve_doc_indptr_values(
-        doc_indptr: Sequence[int] | torch.Tensor,
-    ) -> list[int]:
-        if isinstance(doc_indptr, torch.Tensor):
-            return [int(value) for value in doc_indptr.tolist()]
-        return [int(value) for value in doc_indptr]
-
-    @staticmethod
-    def _resolve_chunk_doc_segments(
-        start_idx: int,
-        end_idx: int,
-        doc_indptr_values: Sequence[int],
-    ) -> tuple[list[int], list[int]]:
-        doc_indices: list[int] = []
-        doc_lengths: list[int] = []
-        num_docs: int = max(len(doc_indptr_values) - 1, 0)
-        doc_idx: int = max(bisect_right(doc_indptr_values, start_idx) - 1, 0)
-        cursor: int = start_idx
-        while cursor < end_idx and doc_idx < num_docs:
-            doc_end: int = int(doc_indptr_values[doc_idx + 1])
-            if doc_end <= cursor:
-                doc_idx += 1
-                continue
-            take: int = min(doc_end, end_idx) - cursor
-            if take > 0:
-                doc_indices.append(doc_idx)
-                doc_lengths.append(take)
-                cursor += take
-            doc_idx += 1
-        if cursor != end_idx:
-            raise RuntimeError(
-                "Failed to align window chunk with document boundaries during "
-                "streaming aggregation."
-            )
-        return doc_indices, doc_lengths
-
     def _encode_and_aggregate_window_batch(
         self,
         input_ids: torch.Tensor,
@@ -249,114 +224,27 @@ class SPLADEEncodeModule(L.LightningModule):
         pooling_mask: torch.Tensor | None,
         doc_indptr: Sequence[int] | torch.Tensor,
     ) -> torch.Tensor:
-        max_windows_per_forward: int | None = self._max_windows_per_forward
-        total_windows: int = int(input_ids.shape[0])
-        doc_indptr_values: list[int] = self._resolve_doc_indptr_values(doc_indptr)
-        num_docs: int = max(len(doc_indptr_values) - 1, 0)
-        vocab_size: int = int(self.model.encoder.vocab_size)
-        model_dtype: torch.dtype = next(self.model.parameters()).dtype
-        if num_docs == 0:
-            return torch.empty(
-                (0, vocab_size), dtype=model_dtype, device=input_ids.device
-            )
-        if total_windows == 0:
-            return torch.zeros(
-                (num_docs, vocab_size), dtype=model_dtype, device=input_ids.device
-            )
-
-        pooling_mode: str = str(self.model.doc_pooling).lower()
-        chunk_size: int = (
-            total_windows
-            if max_windows_per_forward is None or max_windows_per_forward <= 0
-            else int(max_windows_per_forward)
-        )
-        aggregated: torch.Tensor | None = None
-        doc_lengths: list[int] = [
-            int(doc_indptr_values[idx + 1]) - int(doc_indptr_values[idx])
-            for idx in range(num_docs)
-        ]
-
-        start_idx: int
-        for start_idx in range(0, total_windows, chunk_size):
-            end_idx: int = min(start_idx + chunk_size, total_windows)
-            real_count: int = end_idx - start_idx
-            chunk_input_ids: torch.Tensor = input_ids[start_idx:end_idx]
-            chunk_attention_mask: torch.Tensor = attention_mask[start_idx:end_idx]
-            chunk_pooling_mask: torch.Tensor | None = (
-                None if pooling_mask is None else pooling_mask[start_idx:end_idx]
-            )
-            if self._use_fixed_window_chunks and real_count < chunk_size:
-                pad_rows: int = chunk_size - real_count
-                chunk_input_ids = F.pad(
+        return encode_and_aggregate_windows(
+            input_ids,
+            attention_mask,
+            pooling_mask,
+            indptr=doc_indptr,
+            encode_fn=lambda chunk_input_ids, chunk_attention_mask, chunk_pooling_mask: (
+                self.model.encode_docs(
                     chunk_input_ids,
-                    (0, 0, 0, pad_rows),
-                    value=self._pad_token_id,
-                )
-                chunk_attention_mask = F.pad(
                     chunk_attention_mask,
-                    (0, 0, 0, pad_rows),
-                    value=0,
+                    pooling_mask=chunk_pooling_mask,
                 )
-                if chunk_pooling_mask is not None:
-                    chunk_pooling_mask = F.pad(
-                        chunk_pooling_mask,
-                        (0, 0, 0, pad_rows),
-                        value=0,
-                    )
-            if self._torch_compile_mark_step is not None:
-                self._torch_compile_mark_step()
-            chunk_representations: torch.Tensor = self.model.encode_docs(
-                chunk_input_ids,
-                chunk_attention_mask,
-                pooling_mask=chunk_pooling_mask,
-            )[:real_count]
-            if aggregated is None:
-                if pooling_mode == "sum":
-                    aggregated = chunk_representations.new_zeros((num_docs, vocab_size))
-                elif pooling_mode == "max":
-                    aggregated = chunk_representations.new_full(
-                        (num_docs, vocab_size), float("-inf")
-                    )
-                else:
-                    raise ValueError(
-                        "Unsupported document pooling for window aggregation: "
-                        f"{pooling_mode}"
-                    )
-            chunk_doc_indices, chunk_doc_lengths = self._resolve_chunk_doc_segments(
-                start_idx, end_idx, doc_indptr_values
-            )
-            lengths_tensor = torch.tensor(
-                chunk_doc_lengths, device=chunk_representations.device, dtype=torch.long
-            )
-            partial_representations = torch.segment_reduce(
-                chunk_representations,
-                reduce=pooling_mode,
-                lengths=lengths_tensor,
-            )
-            doc_indices_tensor = torch.tensor(
-                chunk_doc_indices, device=chunk_representations.device, dtype=torch.long
-            )
-            if pooling_mode == "sum":
-                aggregated.index_add_(0, doc_indices_tensor, partial_representations)
-            else:
-                current = aggregated.index_select(0, doc_indices_tensor)
-                aggregated.index_copy_(
-                    0,
-                    doc_indices_tensor,
-                    torch.maximum(current, partial_representations),
-                )
-
-        if aggregated is None:
-            return torch.zeros(
-                (num_docs, vocab_size), dtype=model_dtype, device=input_ids.device
-            )
-        if pooling_mode == "max":
-            empty_doc_indices: list[int] = [
-                doc_idx for doc_idx, count in enumerate(doc_lengths) if count <= 0
-            ]
-            if empty_doc_indices:
-                aggregated[empty_doc_indices] = 0
-        return aggregated
+            ),
+            pooling_mode=str(self.model.doc_pooling),
+            output_dim=int(self.model.encoder.vocab_size),
+            output_dtype=next(self.model.parameters()).dtype,
+            pad_token_id=self._pad_token_id,
+            chunk_size=self._max_windows_per_forward,
+            use_fixed_size_chunks=self._use_fixed_window_chunks,
+            mark_step=self._torch_compile_mark_step,
+            entity_name="document",
+        )
 
     # --- Public methods ---
     def on_predict_start(self) -> None:
@@ -375,14 +263,21 @@ class SPLADEEncodeModule(L.LightningModule):
             config_path.write_text(config_text, encoding="utf-8")
             log_if_rank_zero(logger, f"Saved encoding config to {config_path}.")
         vocab_size: int = int(self.model.encoder.vocab_size)
-        exclude_token_ids: list[int] = self._resolve_exclude_token_ids()
+        raw_exclude_token_ids: list[int] = self._resolve_exclude_token_ids()
+        exclude_output_ids: list[int] = self._resolve_exclude_output_ids(
+            raw_exclude_token_ids
+        )
+        output_space: OutputSpaceSpec = self.model.encoder.output_space
         writer_cfg = SparseWriterConfig(
             output_dir=encode_path,
             vocab_size=vocab_size,
             rank=int(self.trainer.global_rank),
             top_k=self.cfg.encoding.sparse_top_k,
             min_weight=float(self.cfg.encoding.sparse_min_weight),
-            exclude_token_ids=exclude_token_ids,
+            exclude_output_ids=exclude_output_ids,
+            source_exclude_token_ids=raw_exclude_token_ids,
+            model_family=str(self.model.family),
+            output_space=output_space,
             shard_max_docs=int(self.cfg.encoding.shard_max_docs),
             value_dtype=str(self.cfg.encoding.value_dtype),
         )
@@ -401,17 +296,20 @@ class SPLADEEncodeModule(L.LightningModule):
                 rank=writer_cfg.rank,
                 top_k=writer_cfg.top_k,
                 min_weight=writer_cfg.min_weight,
-                exclude_token_ids=writer_cfg.exclude_token_ids,
+                exclude_output_ids=writer_cfg.exclude_output_ids,
+                source_exclude_token_ids=writer_cfg.source_exclude_token_ids,
+                model_family=writer_cfg.model_family,
+                output_space=writer_cfg.output_space,
                 shard_max_docs=writer_cfg.shard_max_docs,
                 value_dtype=writer_cfg.value_dtype,
             )
             self._async_writer = None
-        if exclude_token_ids:
-            self._exclude_token_ids_tensor = torch.tensor(
-                exclude_token_ids, dtype=torch.long, device=self.device
+        if exclude_output_ids:
+            self._exclude_output_ids_tensor = torch.tensor(
+                exclude_output_ids, dtype=torch.long, device=self.device
             )
         else:
-            self._exclude_token_ids_tensor = None
+            self._exclude_output_ids_tensor = None
         self._min_weight = float(self.cfg.encoding.sparse_min_weight)
         self._top_k = self.cfg.encoding.sparse_top_k
         self.model.eval()

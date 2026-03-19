@@ -8,6 +8,18 @@ from unittest.mock import Mock, patch
 from lightning.pytorch.loggers import CSVLogger
 from omegaconf import DictConfig, OmegaConf
 
+from import_stubs import (
+    install_fake_hydra,
+    install_fake_mlflow,
+    install_fake_pandas,
+    install_fake_pytorch_lightning_utilities,
+)
+
+install_fake_hydra()
+install_fake_mlflow()
+install_fake_pandas()
+install_fake_pytorch_lightning_utilities()
+
 from script.train import (
     _build_lightning_loggers,
     _build_mlflow_tags,
@@ -58,6 +70,7 @@ def _build_cfg(
             "log_dir": log_dir,
             "model": {
                 "name": "splade_model_unit",
+                "family": "splade",
                 "type": "splade",
                 "huggingface_name": "distilbert-base-uncased",
             },
@@ -256,6 +269,16 @@ class TrainLoggerConfigTest(unittest.TestCase):
         self.assertEqual(
             mlflow_client_instance.create_logged_model.call_args.kwargs["name"],
             "DistilBERT-base-uncased",
+        )
+        self.assertEqual(
+            mlflow_client_instance.create_logged_model.call_args.kwargs["model_type"],
+            "splade",
+        )
+        self.assertEqual(
+            mlflow_client_instance.create_logged_model.call_args.kwargs["tags"][
+                "model_family"
+            ],
+            "splade",
         )
         mlflow_client_instance.log_outputs.assert_called_once()
         self.assertEqual(

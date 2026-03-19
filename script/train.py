@@ -17,7 +17,6 @@ from mlflow.tracking import MlflowClient
 from omegaconf import DictConfig, OmegaConf
 
 from config.path import ABS_CONFIG_DIR
-from src.data.pl_module import TrainDataModule
 from src.model.pl_module import SPLADETrainingModule
 from src.utils import log_if_rank_zero
 from src.utils.logging import (
@@ -27,6 +26,7 @@ from src.utils.logging import (
     suppress_urllib3_insecure_request_warning,
 )
 from src.utils.mlflow_utils import (
+    add_mlflow_model_config_tags,
     build_mlflow_dataset_input_from_metadata,
     configure_mlflow_tls,
     finish_mlflow_system_metrics_monitor,
@@ -34,6 +34,7 @@ from src.utils.mlflow_utils import (
     has_logged_mlflow_model_outputs,
     log_mlflow_model_output,
     resolve_mlflow_logged_model_name as resolve_mlflow_logged_model_name_impl,
+    resolve_mlflow_model_type as resolve_mlflow_model_type_impl,
     resolve_mlflow_tags,
     start_mlflow_system_metrics_monitor,
     warn_if_mlflow_gpu_metrics_unavailable,
@@ -245,6 +246,11 @@ def _resolve_mlflow_logged_model_name(model_cfg: DictConfig) -> str:
     return resolve_mlflow_logged_model_name_impl(model_cfg)
 
 
+def _resolve_mlflow_model_type(model_cfg: DictConfig) -> str:
+    """Resolve the MLflow model_type/model family from model config."""
+    return resolve_mlflow_model_type_impl(model_cfg)
+
+
 def _build_mlflow_tags(
     cfg: DictConfig, training_cfg: DictConfig, tag_value: str | None
 ) -> dict[str, str]:
@@ -337,7 +343,6 @@ def _log_mlflow_run_datasets_and_model(
     if not isinstance(model_cfg, DictConfig):
         raise TypeError("cfg.model must be set for MLflow model logging.")
 
-    model_type: str = str(model_cfg.get("type", "splade"))
     model_tags: dict[str, str] = {
         "training_name": str(training_cfg.name),
         "run_id": run_id,
@@ -345,6 +350,7 @@ def _log_mlflow_run_datasets_and_model(
     hf_model_name: str | None = normalize_optional_str(model_cfg.get("huggingface_name"))
     if hf_model_name is not None:
         model_tags["huggingface_name"] = hf_model_name
+    model_tags = add_mlflow_model_config_tags(model_tags, model_cfg)
 
     logged_model_name: str = _resolve_mlflow_logged_model_name(model_cfg)
     log_mlflow_model_output(
@@ -352,7 +358,7 @@ def _log_mlflow_run_datasets_and_model(
         run=run,
         run_id=run_id,
         logged_model_name=logged_model_name,
-        model_type=model_type,
+        model_type=_resolve_mlflow_model_type(model_cfg),
         model_tags=model_tags,
         tracking_uri=tracking_uri,
         step=0,
@@ -440,7 +446,9 @@ def main(cfg: DictConfig) -> None:
     _validate_expected_train_dataset(cfg)
 
     model: SPLADETrainingModule = SPLADETrainingModule(cfg=cfg)
-    data_module: TrainDataModule = TrainDataModule(cfg=cfg)
+    from src.data.pl_module import TrainDataModule
+
+    data_module = TrainDataModule(cfg=cfg)
 
     checkpoint_dir: str = _resolve_active_checkpoint_dir(
         cfg.log_dir, resume_checkpoint_path

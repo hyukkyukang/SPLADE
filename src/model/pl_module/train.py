@@ -10,12 +10,18 @@ from src.model.losses import LossComputer
 from src.model.pl_module.compile_policy import TrainingCompilePolicyManager
 from src.model.pl_module.loss_service import LossRegularizationService
 from src.model.pl_module.metrics_service import TrainingMetricsService
+from src.model.pl_module.training_runtime_services import (
+    BenchmarkRuntimeService,
+    CompileRuntimeService,
+    ValidationRuntimeService,
+)
 from src.model.pl_module.utils import validate_torch_compile_mode
 from src.model.pl_module.validation_service import ValidationMetricsAccumulator
 from src.model.retriever.sparse.neural.splade import SpladeModel
 from src.utils.logging import get_logger, log_if_rank_zero
 from src.utils.model_utils import build_splade_model, load_splade_checkpoint
 from src.utils.script_setup import normalize_optional_str
+from src.utils.windowed_encoding import encode_in_chunks
 
 if TYPE_CHECKING:
     from src.model.pl_module.nanobeir_runner import NanoBEIREvaluationRunner
@@ -24,6 +30,7 @@ logger = get_logger("SPLADETrainingModule")
 _TCallable = TypeVar("_TCallable", bound=Callable[..., Any])
 _VALIDATION_DOC_ENCODE_CHUNK_SIZE = 10
 _TRI_STATE_CONFIG_MODES = {"auto", "true", "false"}
+NanoBEIREvaluationRunner: type[Any] | None = None
 
 
 class _DisabledNanoBEIREvaluationRunner:
@@ -267,6 +274,11 @@ class SPLADETrainingModule(L.LightningModule):
                     validation_eager_loss,
                     **validation_policy.loss_compile_mode_kwargs,
                 )
+        self._compile_runtime = CompileRuntimeService(
+            module=self,
+            train_policy=self._train_compile_policy,
+            validation_policy=self._validation_compile_policy,
+        )
         self._activate_compile_policy(
             policy=self._train_compile_policy,
             use_compiled=self._train_compile_policy.compile_enabled_for_current_stage,
@@ -326,31 +338,10 @@ class SPLADETrainingModule(L.LightningModule):
         self.model = cast(SpladeModel, self._compile_policy.eager_model)
 
     def _resolve_stage_loss_computer(self, *, stage: str, use_compiled: bool) -> Any:
-        eager_loss_computer: LossComputer | None
-        compiled_loss_computer: Any | None
-        if stage == "train":
-            eager_loss_computer = self._eager_train_loss_computer
-            compiled_loss_computer = self._compiled_train_loss_computer
-        elif stage == "val":
-            eager_loss_computer = (
-                self._eager_train_loss_computer
-                if self._eager_validation_loss_computer is None
-                else self._eager_validation_loss_computer
-            )
-            compiled_loss_computer = (
-                self._compiled_train_loss_computer
-                if self._compiled_validation_loss_computer is None
-                else self._compiled_validation_loss_computer
-            )
-        else:
-            raise ValueError(f"Unsupported stage: {stage}")
-        if use_compiled and compiled_loss_computer is not None:
-            return compiled_loss_computer
-        if eager_loss_computer is None:
-            raise RuntimeError(
-                f"Eager loss computer is not initialized for stage={stage!r}."
-            )
-        return eager_loss_computer
+        return self._compile_runtime.resolve_stage_loss_computer(
+            stage=stage,
+            use_compiled=use_compiled,
+        )
 
     def _activate_compile_policy(
         self,
@@ -359,14 +350,11 @@ class SPLADETrainingModule(L.LightningModule):
         use_compiled: bool,
         stage: str,
     ) -> None:
-        policy.prepare_for_device(device=self.device, use_compiled=use_compiled)
-        policy.set_compile_state(use_compiled=use_compiled)
-        self._compile_policy = policy
-        self.loss_computer = self._resolve_stage_loss_computer(
+        self._compile_runtime.activate(
+            policy=policy,
+            use_compiled=use_compiled,
             stage=stage,
-            use_compiled=bool(self._compile_policy.compile_enabled_for_current_stage),
         )
-        self._sync_model_with_active_compile_policy()
 
     def _encode_docs_in_chunks(
         self,
@@ -377,34 +365,20 @@ class SPLADETrainingModule(L.LightningModule):
         chunk_size: int,
         use_compile: bool,
     ) -> torch.Tensor:
-        total_docs: int = int(flat_docs.shape[0])
-        if total_docs <= chunk_size:
-            if use_compile:
-                self._compile_policy.maybe_mark_step()
-            return self.model.encode_docs(
-                flat_docs,
-                flat_masks,
-                pooling_mask=flat_pooling_masks,
-            )
-
-        doc_rep_chunks: list[torch.Tensor] = []
-        start: int
-        for start in range(0, total_docs, chunk_size):
-            end: int = min(start + chunk_size, total_docs)
-            if use_compile:
-                self._compile_policy.maybe_mark_step()
-            doc_rep_chunks.append(
+        return encode_in_chunks(
+            flat_docs,
+            flat_masks,
+            flat_pooling_masks,
+            encode_fn=lambda chunk_docs, chunk_masks, chunk_pooling_masks: (
                 self.model.encode_docs(
-                    flat_docs[start:end],
-                    flat_masks[start:end],
-                    pooling_mask=(
-                        None
-                        if flat_pooling_masks is None
-                        else flat_pooling_masks[start:end]
-                    ),
+                    chunk_docs,
+                    chunk_masks,
+                    pooling_mask=chunk_pooling_masks,
                 )
-            )
-        return torch.cat(doc_rep_chunks, dim=0)
+            ),
+            chunk_size=chunk_size,
+            mark_step=self._compile_policy.maybe_mark_step if use_compile else None,
+        )
 
     def _setup_eval_metrics(self, cfg: DictConfig) -> None:
         self.val_metrics_cfg = cfg.training.validation_metrics
@@ -426,14 +400,32 @@ class SPLADETrainingModule(L.LightningModule):
                 ),
                 doc_only_enabled=bool(self._doc_only_flag),
             )
-            return
+        else:
+            global NanoBEIREvaluationRunner
+            runner_cls: type[Any] | None = NanoBEIREvaluationRunner
+            if runner_cls is None:
+                from src.model.pl_module.nanobeir_runner import (
+                    NanoBEIREvaluationRunner as _NanoBEIREvaluationRunner,
+                )
 
-        from src.model.pl_module.nanobeir_runner import NanoBEIREvaluationRunner
-
-        self._nanobeir_runner = NanoBEIREvaluationRunner(
-            cfg=cfg,
+                runner_cls = _NanoBEIREvaluationRunner
+                NanoBEIREvaluationRunner = _NanoBEIREvaluationRunner
+            self._nanobeir_runner = runner_cls(
+                cfg=cfg,
+                logger=logger,
+                doc_only_enabled=bool(self._doc_only_flag),
+            )
+        self._validation_runtime = ValidationRuntimeService(
+            module=self,
+            metrics_accumulator=self._validation_metrics,
             logger=logger,
-            doc_only_enabled=bool(self._doc_only_flag),
+        )
+        self._benchmark_runtime = BenchmarkRuntimeService(
+            module=self,
+            runner=self._nanobeir_runner,
+            logger=logger,
+            masked_lm_incompatibility_predicate=_is_masked_lm_incompatibility_error,
+            cuda_oom_predicate=_is_cuda_oom_error,
         )
 
     def _compute_rep_magnitude(
@@ -849,119 +841,11 @@ class SPLADETrainingModule(L.LightningModule):
         log_if_rank_zero(logger, summary_message)
 
     def on_validation_start(self) -> None:
-        if self._train_compile_policy.torch_compile_enabled:
-            if bool(self._train_compile_policy.disable_compile_for_validation):
-                self._activate_compile_policy(
-                    policy=self._train_compile_policy,
-                    use_compiled=False,
-                    stage="val",
-                )
-            else:
-                validation_policy: TrainingCompilePolicyManager = (
-                    self._validation_compile_policy or self._train_compile_policy
-                )
-                self._activate_compile_policy(
-                    policy=validation_policy,
-                    use_compiled=True,
-                    stage="val",
-                )
-        else:
-            self._activate_compile_policy(
-                policy=self._train_compile_policy,
-                use_compiled=False,
-                stage="val",
-            )
-        self._validation_metrics.on_validation_start(self.device)
+        self._compile_runtime.on_validation_start()
+        self._validation_runtime.on_validation_start()
 
     def on_validation_end(self) -> None:
-        if self._train_compile_policy.torch_compile_enabled:
-            self._activate_compile_policy(
-                policy=self._train_compile_policy,
-                use_compiled=True,
-                stage="train",
-            )
-        else:
-            self._activate_compile_policy(
-                policy=self._train_compile_policy,
-                use_compiled=False,
-                stage="train",
-            )
-
-    def _append_validation_metrics(
-        self,
-        pairwise_scores: torch.Tensor,
-        pos_mask: torch.Tensor,
-        doc_mask: torch.Tensor,
-    ) -> None:
-        self._validation_metrics.append_batch(
-            pairwise_scores=pairwise_scores,
-            pos_mask=pos_mask,
-            doc_mask=doc_mask,
-            world_size=int(self.trainer.world_size),
-            global_rank=int(self.trainer.global_rank),
-        )
-
-    def _log_validation_metric(
-        self,
-        *,
-        name: str,
-        value: torch.Tensor | None,
-        batch_size: int,
-    ) -> None:
-        if value is None:
-            return
-        self.log(
-            name,
-            value.detach(),
-            on_step=False,
-            on_epoch=True,
-            prog_bar=False,
-            sync_dist=True,
-            batch_size=batch_size,
-        )
-
-    def _resolve_nanobeir_device(self) -> torch.device:
-        return self._nanobeir_runner.resolve_device(self.device)
-
-    def _should_run_nanobeir_eval(self) -> bool:
-        return self._nanobeir_runner.should_run_eval(
-            sanity_checking=bool(self.trainer.sanity_checking)
-        )
-
-    def _nanobeir_barrier(self) -> None:
-        world_size: int = int(self.trainer.world_size)
-        if world_size <= 1:
-            return
-        self._nanobeir_runner.barrier(self.trainer.strategy)
-
-    def _reset_nanobeir_runtime_state(self) -> None:
-        self._nanobeir_runner.reset_runtime_state()
-
-    def _cleanup_after_nanobeir_failure(self) -> None:
-        self._nanobeir_runner.cleanup_after_failure()
-
-    def _offload_nanobeir_cache_to_cpu(self) -> None:
-        self._nanobeir_runner.offload_cache_to_cpu()
-
-    def _run_nanobeir_eval(self) -> None:
-        eval_model: torch.nn.Module = (
-            self._compile_policy.eager_model
-            if self._compile_policy.torch_compile_full_model
-            else self.model
-        )
-        self._nanobeir_runner.run_eval(
-            eval_model=eval_model,
-            training_device=self.device,
-            global_step=int(self.global_step),
-            log_dir=str(self.cfg.log_dir),
-            log_dict_fn=lambda logged_metrics: self.log_dict(
-                logged_metrics,
-                sync_dist=True,
-                prog_bar=False,
-                rank_zero_only=True,
-            ),
-            masked_lm_incompatibility_predicate=_is_masked_lm_incompatibility_error,
-        )
+        self._compile_runtime.on_validation_end()
 
     def forward(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         q: torch.Tensor = self.model.encode_queries(
@@ -979,21 +863,7 @@ class SPLADETrainingModule(L.LightningModule):
     def training_step(
         self, batch: dict[str, torch.Tensor], batch_idx: int
     ) -> torch.Tensor:
-        if self._compile_policy is not self._train_compile_policy:
-            self._activate_compile_policy(
-                policy=self._train_compile_policy,
-                use_compiled=True,
-                stage="train",
-            )
-        if (
-            self._compile_policy.torch_compile_enabled
-            and not self._compile_policy.compile_enabled_for_current_stage
-        ):
-            self._activate_compile_policy(
-                policy=self._compile_policy,
-                use_compiled=True,
-                stage="train",
-            )
+        self._compile_runtime.ensure_train_policy_active()
         metrics: dict[str, torch.Tensor] = self._training_step_shared(
             batch, stage="train"
         )
@@ -1019,111 +889,20 @@ class SPLADETrainingModule(L.LightningModule):
                 return_reps=True,
                 compute_validation_diagnostics=compute_validation_diagnostics,
             )
-            self._append_validation_metrics(
+            self._validation_runtime.append_batch(
                 rep_cache["pairwise_scores"],
                 rep_cache["pos_mask"],
                 rep_cache["doc_mask"],
             )
         batch_size: int = int(batch["query_input_ids"].shape[0])
-        val_loss: torch.Tensor = metrics["loss"].detach()
-        self.log(
-            "val_loss",
-            val_loss,
-            on_step=False,
-            on_epoch=True,
-            prog_bar=False,
-            sync_dist=True,
+        self._validation_runtime.log_step_metrics(
+            metrics=metrics,
             batch_size=batch_size,
         )
-        metric_names: tuple[tuple[str, str], ...] = (
-            ("val_q_rep_magnitude", "q_rep_magnitude"),
-            ("val_doc_rep_magnitude", "doc_rep_magnitude"),
-            ("val_q_active_dims", "q_active_dims"),
-            ("val_doc_active_dims", "doc_active_dims"),
-            ("val_q_sparsity_ratio", "q_sparsity_ratio"),
-            ("val_doc_sparsity_ratio", "doc_sparsity_ratio"),
-            ("val_sigmoid_pos_loss", "sigmoid_pos_loss"),
-            ("val_sigmoid_neg_loss", "sigmoid_neg_loss"),
-            ("val_sigmoid_logit_scale", "sigmoid_logit_scale"),
-            ("val_sigmoid_bias", "sigmoid_bias"),
-            ("val_sigmoid_pos_score_mean", "sigmoid_pos_score_mean"),
-            ("val_sigmoid_neg_score_mean", "sigmoid_neg_score_mean"),
-            ("val_sigmoid_pos_margin_mean", "sigmoid_pos_margin_mean"),
-            ("val_sigmoid_neg_margin_mean", "sigmoid_neg_margin_mean"),
-        )
-        log_name: str
-        metric_key: str
-        for log_name, metric_key in metric_names:
-            self._log_validation_metric(
-                name=log_name,
-                value=metrics.get(metric_key),
-                batch_size=batch_size,
-            )
 
     def on_validation_epoch_end(self) -> None:
-        should_run_nanobeir: bool = self._should_run_nanobeir_eval()
-        if self._validation_metrics.has_collection:
-            has_data: bool
-            filtered_metrics: dict[str, torch.Tensor]
-            has_data, filtered_metrics = self._validation_metrics.finalize_epoch(
-                world_size=self.trainer.world_size,
-                all_gather_fn=self.all_gather if self.trainer.world_size > 1 else None,
-            )
-            if not has_data:
-                log_if_rank_zero(
-                    logger,
-                    "No predictions accumulated during validation.",
-                    level="warning",
-                )
-            else:
-                if filtered_metrics:
-                    self.log_dict(
-                        filtered_metrics,
-                        sync_dist=True,
-                        prog_bar=False,
-                        rank_zero_only=True,
-                    )
-
-        if should_run_nanobeir:
-            if self.trainer.is_global_zero:
-                nanobeir_error: Exception | None = None
-                try:
-                    self._run_nanobeir_eval()
-                except Exception as exc:
-                    nanobeir_error = exc
-                    # If NanoBEIR OOMs on GPU, retry on CPU and keep future
-                    # NanoBEIR evals on CPU for this run.
-                    should_retry_on_cpu: bool = (
-                        _is_cuda_oom_error(exc)
-                        and not self._nanobeir_runner.doc_only_enabled
-                        and not bool(self._nanobeir_runner.use_cpu)
-                    )
-                    if should_retry_on_cpu:
-                        log_if_rank_zero(
-                            logger,
-                            "NanoBEIR hit CUDA OOM; retrying NanoBEIR on CPU for "
-                            "this and subsequent validations.",
-                            level="warning",
-                        )
-                        self._cleanup_after_nanobeir_failure()
-                        self._nanobeir_runner.use_cpu = True
-                        try:
-                            self._run_nanobeir_eval()
-                            nanobeir_error = None
-                        except Exception as cpu_exc:
-                            nanobeir_error = cpu_exc
-                            self._cleanup_after_nanobeir_failure()
-                    else:
-                        self._cleanup_after_nanobeir_failure()
-                    if nanobeir_error is not None:
-                        log_if_rank_zero(
-                            logger,
-                            f"NanoBEIR evaluation failed: {nanobeir_error}",
-                            level="warning",
-                        )
-                finally:
-                    self._offload_nanobeir_cache_to_cpu()
-            self._nanobeir_barrier()
+        self._validation_runtime.finalize_epoch()
+        self._benchmark_runtime.run_validation_epoch_end()
 
     def optimizer_step(
         self,

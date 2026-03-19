@@ -3,6 +3,10 @@ import unittest
 import numpy as np
 import torch
 
+from import_stubs import install_fake_numba
+
+install_fake_numba()
+
 from src.search.sparsify import sparsify_batch_gpu_csr
 
 
@@ -17,7 +21,7 @@ class SparsifyBatchGpuCsrTest(unittest.TestCase):
         )
         indptr, indices, values = sparsify_batch_gpu_csr(
             vectors,
-            exclude_token_ids=None,
+            exclude_output_ids=None,
             min_weight=0.15,
             top_k=2,
             value_dtype=np.float32,
@@ -41,7 +45,7 @@ class SparsifyBatchGpuCsrTest(unittest.TestCase):
         exclude_ids = torch.tensor([2], dtype=torch.long)
         indptr, indices, values = sparsify_batch_gpu_csr(
             vectors,
-            exclude_token_ids=exclude_ids,
+            exclude_output_ids=exclude_ids,
             min_weight=0.15,
             top_k=None,
             value_dtype=np.float32,
@@ -58,7 +62,7 @@ class SparsifyBatchGpuCsrTest(unittest.TestCase):
         vectors = torch.empty((0, 4), dtype=torch.float32)
         indptr, indices, values = sparsify_batch_gpu_csr(
             vectors,
-            exclude_token_ids=None,
+            exclude_output_ids=None,
             min_weight=0.0,
             top_k=2,
             value_dtype=np.float32,
@@ -71,7 +75,7 @@ class SparsifyBatchGpuCsrTest(unittest.TestCase):
         vectors = torch.zeros((2, 3), dtype=torch.float32)
         indptr, indices, values = sparsify_batch_gpu_csr(
             vectors,
-            exclude_token_ids=None,
+            exclude_output_ids=None,
             min_weight=0.0,
             top_k=None,
             value_dtype=np.float32,

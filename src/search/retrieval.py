@@ -1,6 +1,5 @@
 """Retrieval orchestration for index-based search."""
 
-from bisect import bisect_right
 import logging
 import os
 import threading
@@ -10,7 +9,6 @@ from typing import Any, Callable, Sequence
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 from omegaconf import DictConfig
 
 from src.metric.retrieval import resolve_k_list
@@ -23,6 +21,8 @@ from src.search.scoring import (
 )
 from src.search.sparsify import sparsify_batch_gpu_csr, sparsify_query_vector
 from src.utils.model_utils import resolve_tagged_output_dir
+from src.utils.output_space import resolve_model_output_exclude_ids
+from src.utils.windowed_encoding import encode_and_aggregate_windows
 
 
 _PROCESS_INDEX: InvertedIndex | None = None
@@ -153,7 +153,9 @@ class IndexedRetrievalHelper:
         self._doc_count: int = 0
         self._block_size: int = 0
         self._query_exclude_token_ids: list[int] = []
-        self._query_exclude_token_ids_tensor: torch.Tensor | None = None
+        self._query_exclude_output_ids: list[int] = []
+        self._query_exclude_output_ids_tensor: torch.Tensor | None = None
+        self._query_exclude_output_ids_resolved: bool = True
         self._query_min_weight: float = 0.0
         self._query_top_k: int | None = None
 
@@ -186,13 +188,32 @@ class IndexedRetrievalHelper:
             self._query_min_weight,
             self._query_top_k,
         ) = resolve_query_sparsify_config(self.cfg)
-        if self._query_exclude_token_ids:
-            self._query_exclude_token_ids_tensor = torch.tensor(
-                self._query_exclude_token_ids, dtype=torch.long
+        self._query_exclude_output_ids = []
+        self._query_exclude_output_ids_tensor = None
+        self._query_exclude_output_ids_resolved = not bool(self._query_exclude_token_ids)
+        self._start_executor()
+
+    def _resolve_query_exclude_output_ids(self, model: Any) -> None:
+        if self._query_exclude_output_ids_resolved:
+            return
+        raw_exclude_token_ids: list[int] = list(self._query_exclude_token_ids)
+        if not raw_exclude_token_ids:
+            self._query_exclude_output_ids = []
+            self._query_exclude_output_ids_tensor = None
+            self._query_exclude_output_ids_resolved = True
+            return
+
+        self._query_exclude_output_ids = resolve_model_output_exclude_ids(
+            model,
+            raw_exclude_token_ids,
+        )
+        if self._query_exclude_output_ids:
+            self._query_exclude_output_ids_tensor = torch.tensor(
+                self._query_exclude_output_ids, dtype=torch.long
             )
         else:
-            self._query_exclude_token_ids_tensor = None
-        self._start_executor()
+            self._query_exclude_output_ids_tensor = None
+        self._query_exclude_output_ids_resolved = True
 
     def shutdown(self) -> None:
         """Release any per-test resources such as thread pools."""
@@ -210,6 +231,7 @@ class IndexedRetrievalHelper:
         query_pooling_mask: torch.Tensor | None = None,
         query_indptr: Sequence[int] | torch.Tensor | None = None,
     ) -> torch.Tensor:
+        self._resolve_query_exclude_output_ids(model)
         if query_indptr is None:
             if mark_step is not None:
                 mark_step()
@@ -272,42 +294,6 @@ class IndexedRetrievalHelper:
         return results
 
     @staticmethod
-    def _resolve_window_indptr_values(
-        query_indptr: Sequence[int] | torch.Tensor,
-    ) -> list[int]:
-        if isinstance(query_indptr, torch.Tensor):
-            return [int(value) for value in query_indptr.tolist()]
-        return [int(value) for value in query_indptr]
-
-    @staticmethod
-    def _resolve_chunk_query_segments(
-        start_idx: int,
-        end_idx: int,
-        query_indptr_values: Sequence[int],
-    ) -> tuple[list[int], list[int]]:
-        query_indices: list[int] = []
-        query_lengths: list[int] = []
-        num_queries: int = max(len(query_indptr_values) - 1, 0)
-        query_idx: int = max(bisect_right(query_indptr_values, start_idx) - 1, 0)
-        cursor: int = start_idx
-        while cursor < end_idx and query_idx < num_queries:
-            query_end: int = int(query_indptr_values[query_idx + 1])
-            if query_end <= cursor:
-                query_idx += 1
-                continue
-            take: int = min(query_end, end_idx) - cursor
-            if take > 0:
-                query_indices.append(query_idx)
-                query_lengths.append(take)
-                cursor += take
-            query_idx += 1
-        if cursor != end_idx:
-            raise RuntimeError(
-                "Failed to align query window chunk with query boundaries."
-            )
-        return query_indices, query_lengths
-
-    @staticmethod
     def _resolve_pad_token_id(model: Any) -> int:
         mlm: Any | None = getattr(getattr(model, "encoder", None), "mlm", None)
         config: Any | None = None if mlm is None else getattr(mlm, "config", None)
@@ -326,120 +312,27 @@ class IndexedRetrievalHelper:
         query_indptr: Sequence[int] | torch.Tensor,
         mark_step: Callable[[], None] | None,
     ) -> torch.Tensor:
-        total_windows: int = int(input_ids.shape[0])
-        query_indptr_values: list[int] = self._resolve_window_indptr_values(query_indptr)
-        num_queries: int = max(len(query_indptr_values) - 1, 0)
-        vocab_size: int = int(model.encoder.vocab_size)
-        model_dtype: torch.dtype = next(model.parameters()).dtype
-        if num_queries == 0:
-            return torch.empty(
-                (0, vocab_size), dtype=model_dtype, device=input_ids.device
-            )
-        if total_windows == 0:
-            return torch.zeros(
-                (num_queries, vocab_size), dtype=model_dtype, device=input_ids.device
-            )
-
-        pooling_mode: str = str(model.query_pooling).lower()
-        chunk_size: int = (
-            total_windows
-            if self._max_windows_per_forward is None or self._max_windows_per_forward <= 0
-            else int(self._max_windows_per_forward)
-        )
-        pad_token_id: int = self._resolve_pad_token_id(model)
-        aggregated: torch.Tensor | None = None
-        query_lengths: list[int] = [
-            int(query_indptr_values[idx + 1]) - int(query_indptr_values[idx])
-            for idx in range(num_queries)
-        ]
-
-        start_idx: int
-        for start_idx in range(0, total_windows, chunk_size):
-            end_idx: int = min(start_idx + chunk_size, total_windows)
-            real_count: int = end_idx - start_idx
-            chunk_input_ids: torch.Tensor = input_ids[start_idx:end_idx]
-            chunk_attention_mask: torch.Tensor = attention_mask[start_idx:end_idx]
-            chunk_pooling_mask: torch.Tensor | None = (
-                None if pooling_mask is None else pooling_mask[start_idx:end_idx]
-            )
-            if self._use_fixed_window_chunks and real_count < chunk_size:
-                pad_rows: int = chunk_size - real_count
-                chunk_input_ids = F.pad(
+        return encode_and_aggregate_windows(
+            input_ids,
+            attention_mask,
+            pooling_mask,
+            indptr=query_indptr,
+            encode_fn=lambda chunk_input_ids, chunk_attention_mask, chunk_pooling_mask: (
+                model.encode_queries(
                     chunk_input_ids,
-                    (0, 0, 0, pad_rows),
-                    value=pad_token_id,
-                )
-                chunk_attention_mask = F.pad(
                     chunk_attention_mask,
-                    (0, 0, 0, pad_rows),
-                    value=0,
+                    pooling_mask=chunk_pooling_mask,
                 )
-                if chunk_pooling_mask is not None:
-                    chunk_pooling_mask = F.pad(
-                        chunk_pooling_mask,
-                        (0, 0, 0, pad_rows),
-                        value=0,
-                    )
-            if mark_step is not None:
-                mark_step()
-            chunk_representations: torch.Tensor = model.encode_queries(
-                chunk_input_ids,
-                chunk_attention_mask,
-                pooling_mask=chunk_pooling_mask,
-            )[:real_count]
-            if aggregated is None:
-                if pooling_mode == "sum":
-                    aggregated = chunk_representations.new_zeros((num_queries, vocab_size))
-                elif pooling_mode == "max":
-                    aggregated = chunk_representations.new_full(
-                        (num_queries, vocab_size), float("-inf")
-                    )
-                else:
-                    raise ValueError(
-                        "Unsupported query pooling for window aggregation: "
-                        f"{pooling_mode}"
-                    )
-            chunk_query_indices, chunk_query_lengths = self._resolve_chunk_query_segments(
-                start_idx, end_idx, query_indptr_values
-            )
-            lengths_tensor = torch.tensor(
-                chunk_query_lengths,
-                device=chunk_representations.device,
-                dtype=torch.long,
-            )
-            partial_representations = torch.segment_reduce(
-                chunk_representations,
-                reduce=pooling_mode,
-                lengths=lengths_tensor,
-            )
-            query_indices_tensor = torch.tensor(
-                chunk_query_indices,
-                device=chunk_representations.device,
-                dtype=torch.long,
-            )
-            if pooling_mode == "sum":
-                aggregated.index_add_(0, query_indices_tensor, partial_representations)
-            else:
-                current = aggregated.index_select(0, query_indices_tensor)
-                aggregated.index_copy_(
-                    0,
-                    query_indices_tensor,
-                    torch.maximum(current, partial_representations),
-                )
-
-        if aggregated is None:
-            return torch.zeros(
-                (num_queries, vocab_size), dtype=model_dtype, device=input_ids.device
-            )
-        if pooling_mode == "max":
-            empty_query_indices: list[int] = [
-                query_idx
-                for query_idx, count in enumerate(query_lengths)
-                if count <= 0
-            ]
-            if empty_query_indices:
-                aggregated[empty_query_indices] = 0
-        return aggregated
+            ),
+            pooling_mode=str(model.query_pooling),
+            output_dim=int(model.encoder.vocab_size),
+            output_dtype=next(model.parameters()).dtype,
+            pad_token_id=self._resolve_pad_token_id(model),
+            chunk_size=self._max_windows_per_forward,
+            use_fixed_size_chunks=self._use_fixed_window_chunks,
+            mark_step=mark_step,
+            entity_name="query",
+        )
 
     def _load_index(self) -> InvertedIndex:
         index_dir_value: str | None = self.cfg.encoding.index_dir
@@ -533,10 +426,15 @@ class IndexedRetrievalHelper:
     def _sparsify_queries(
         self, query_reps: torch.Tensor
     ) -> tuple[list[np.ndarray], list[np.ndarray]]:
+        if self._query_exclude_token_ids and not self._query_exclude_output_ids_resolved:
+            raise RuntimeError(
+                "Query output exclusions are unresolved. Call encode_queries() with "
+                "the active model before score_queries()."
+            )
         if self._gpu_sparsify and not self._use_cpu and query_reps.is_cuda:
             indptr, indices, values = sparsify_batch_gpu_csr(
                 query_reps,
-                exclude_token_ids=self._query_exclude_token_ids_tensor,
+                exclude_output_ids=self._query_exclude_output_ids_tensor,
                 min_weight=self._query_min_weight,
                 top_k=self._query_top_k,
                 value_dtype=np.float32,
@@ -557,7 +455,7 @@ class IndexedRetrievalHelper:
         for query_vector in query_reps_cpu:
             q_indices, q_values = sparsify_query_vector(
                 query_vector,
-                exclude_token_ids=self._query_exclude_token_ids,
+                exclude_output_ids=self._query_exclude_output_ids,
                 min_weight=self._query_min_weight,
                 top_k=self._query_top_k,
             )

@@ -11,8 +11,6 @@ from mlflow.tracking import MlflowClient
 from omegaconf import DictConfig
 
 from config.path import ABS_CONFIG_DIR
-from src.data.pl_module import RetrievalDataModule
-from src.model.pl_module import RetrievalEvalLightningModule
 from src.utils import log_if_rank_zero
 from src.utils.evaluation_mode import enforce_retrieval_evaluation_isolation
 from src.utils.logging import (
@@ -21,12 +19,14 @@ from src.utils.logging import (
     suppress_urllib3_insecure_request_warning,
 )
 from src.utils.mlflow_utils import (
+    add_mlflow_model_config_tags,
     build_mlflow_dataset_input_from_metadata,
     configure_mlflow_tls,
     has_logged_mlflow_dataset_inputs,
     has_logged_mlflow_model_outputs,
     log_mlflow_model_output,
     resolve_mlflow_logged_model_name,
+    resolve_mlflow_model_type,
     resolve_mlflow_tags,
     sanitize_mlflow_metric_name,
 )
@@ -243,6 +243,7 @@ def _build_mlflow_params(
             return
         params[key] = value if isinstance(value, (bool, int, float, str)) else str(value)
 
+    _set_if_present("model.family", normalize_optional_str(cfg.model.get("family")))
     _set_if_present("model.type", normalize_optional_str(cfg.model.get("type")))
     _set_if_present(
         "model.huggingface_name", normalize_optional_str(cfg.model.get("huggingface_name"))
@@ -346,7 +347,6 @@ def _log_mlflow_run_datasets_and_model(
     if not isinstance(model_cfg, DictConfig):
         raise TypeError("cfg.model must be set for MLflow model logging.")
 
-    model_type: str = str(model_cfg.get("type", "splade"))
     model_tags: dict[str, str] = {
         "evaluation_type": str(cfg.evaluation.type),
         "evaluation_mode": "retrieval_index_based",
@@ -358,6 +358,7 @@ def _log_mlflow_run_datasets_and_model(
     hf_model_name: str | None = normalize_optional_str(model_cfg.get("huggingface_name"))
     if hf_model_name is not None:
         model_tags["huggingface_name"] = hf_model_name
+    model_tags = add_mlflow_model_config_tags(model_tags, model_cfg)
 
     logged_model_name: str = resolve_mlflow_logged_model_name(model_cfg)
     log_mlflow_model_output(
@@ -365,7 +366,7 @@ def _log_mlflow_run_datasets_and_model(
         run=run,
         run_id=run_id,
         logged_model_name=logged_model_name,
-        model_type=model_type,
+        model_type=resolve_mlflow_model_type(model_cfg),
         model_tags=model_tags,
         tracking_uri=tracking_uri,
         step=0,
@@ -481,6 +482,9 @@ def main(cfg: DictConfig) -> None:
 
     index_path: Path = _resolve_index_path(cfg)
     log_if_rank_zero(logger, f"Using retrieval index: {index_path}")
+
+    from src.data.pl_module import RetrievalDataModule
+    from src.model.pl_module import RetrievalEvalLightningModule
 
     eval_module: RetrievalEvalLightningModule = RetrievalEvalLightningModule(cfg=cfg)
     data_module: RetrievalDataModule = RetrievalDataModule(cfg=cfg)

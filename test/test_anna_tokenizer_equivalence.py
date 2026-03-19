@@ -9,7 +9,7 @@ from pathlib import Path
 
 from transformers import AutoTokenizer
 
-from script.preprocess.anna.anna_tokenizer import AnnaTokenizer
+from src.tokenization.anna_tokenizer import AnnaTokenizer
 from src.utils.transformers import build_tokenizer
 
 _EDGE_TEXTS: tuple[str, ...] = (
@@ -92,7 +92,7 @@ def _minimal_hf_anna_dir(vocab_path: Path) -> Path:
         json.dumps(special_tokens_map, indent=2),
         encoding="utf-8",
     )
-    source_tokenizer_module = Path("script/preprocess/anna/anna_tokenizer.py")
+    source_tokenizer_module = Path("src/tokenization/anna_tokenizer.py")
     if not source_tokenizer_module.is_file():
         raise FileNotFoundError(f"Missing ANNA tokenizer module: {source_tokenizer_module}")
     (hf_dir / "anna_tokenizer.py").write_text(

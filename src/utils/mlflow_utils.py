@@ -15,6 +15,7 @@ from omegaconf import OmegaConf
 
 from src.utils.logging import log_if_rank_zero
 from src.utils.normalize import normalize_optional_bool, normalize_optional_str
+from src.utils.output_space import normalize_compact_head_alignment
 
 
 def resolve_mlflow_tags(raw_tags: Any, *, field_name: str = "mlflow.tags") -> dict[str, str]:
@@ -151,6 +152,45 @@ def resolve_mlflow_logged_model_name(model_cfg: Any) -> str:
         "cfg.model.huggingface_name or cfg.model.name must be a non-empty string "
         "for MLflow model logging."
     )
+
+
+def resolve_mlflow_model_type(model_cfg: Any) -> str:
+    """Resolve the MLflow model_type/model family from model config."""
+    family: str | None = normalize_optional_str(model_cfg.get("family"))
+    if family is not None:
+        return family.lower()
+    legacy_type: str | None = normalize_optional_str(model_cfg.get("type"))
+    if legacy_type is not None:
+        return legacy_type.lower()
+    return "splade"
+
+
+def add_mlflow_model_config_tags(
+    model_tags: dict[str, str], model_cfg: Any
+) -> dict[str, str]:
+    """Augment model-output tags with stable config-derived model metadata."""
+    tags: dict[str, str] = dict(model_tags)
+    tags["model_family"] = resolve_mlflow_model_type(model_cfg)
+
+    if "doc_only" in model_cfg:
+        tags["model_doc_only"] = "true" if bool(model_cfg.get("doc_only")) else "false"
+
+    peft_cfg: Any = model_cfg.get("peft")
+    if peft_cfg is not None:
+        peft_enabled: bool | None = normalize_optional_bool(peft_cfg.get("enabled"))
+        if peft_enabled is not None:
+            tags["model_peft_enabled"] = "true" if peft_enabled else "false"
+
+    compact_head_alignment: str | None = normalize_compact_head_alignment(
+        model_cfg.get("compact_head_alignment")
+    )
+    if compact_head_alignment is None:
+        compact_head_alignment = normalize_compact_head_alignment(
+            model_cfg.get("splade_compact_head_alignment")
+        )
+    if compact_head_alignment is not None:
+        tags["compact_head_alignment"] = compact_head_alignment
+    return tags
 
 
 def log_mlflow_model_output(

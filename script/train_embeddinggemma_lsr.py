@@ -12,7 +12,7 @@ from torch import nn
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
-from src.prototype.embeddinggemma_lsr.cli import (
+from src.utils.cli_config import (
     apply_config_overrides,
     parser_default_values,
     resolve_torch_device,
