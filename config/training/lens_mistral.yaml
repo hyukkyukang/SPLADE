@@ -1,0 +1,30 @@
+# @package training
+defaults:
+  - _base
+
+name: lens_mistral
+
+lr: 1e-4
+temperature: 0.02
+
+batch_size: 2
+eval_batch_size: 2
+validation_doc_encode_chunk_size: 8
+grad_accumulation: 16
+num_workers: 2
+prefetch_factor: 2
+
+precision: bf16-mixed
+torch_compile: false
+torch_compile_loss: false
+fuse_query_doc_encoding_when_possible: false
+static_graph: false
+find_unused_parameters: false
+
+regularization:
+  query_weight: 0.0
+  doc_weight: 0.0
+  type: l1
+  paper_faithful: true
+  weight: null
+  schedule_steps: 0

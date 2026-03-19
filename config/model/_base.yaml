@@ -1,4 +1,5 @@
 name: splade
+family: splade
 huggingface_name: distilbert-base-uncased
 huggingface_model_class: AutoModelForMaskedLM
 trust_remote_code: false
@@ -11,6 +12,7 @@ attn_implementation: sdpa
 tie_word_embeddings: true
 is_quantized: false
 freeze_backbone: false
+bidirectional: false
 
 # encoding options
 query_pooling: max
@@ -18,6 +20,26 @@ doc_pooling: max
 sparse_activation: log1p_relu
 normalize: false
 doc_only: false
+benchmark_adapter: auto
+instruction_text: null
+instruction_template: "{instruction_token}{instruction}\n{query_token}{query}"
+instruction_token: "<instruct>"
+query_token: "<query>"
+response_token: "<response>"
+query_mask_mode: auto
+doc_trim_last_tokens: null
+peft:
+  enabled: false
+  method: lora
+  task_type: auto
+  r: 16
+  alpha: 32
+  dropout: 0.0
+  bias: none
+  target_modules: null
+  modules_to_save: null
+  fan_in_fan_out: false
+  inference_mode: false
 
 # retrieval index
 exclude_token_ids: []

@@ -5,12 +5,34 @@ from typing import Any, Callable, Optional, cast
 import torch
 from torch import nn
 from torch.nn import functional as F
+from omegaconf import DictConfig
 from transformers import PreTrainedModel
 
 from src.utils.logging import suppress_output_if_not_rank_zero
+from src.utils.peft import (
+    apply_peft_adapter,
+    resolve_peft_settings,
+    unwrap_peft_model,
+)
 from src.utils.transformers import build_masked_lm_model, resolve_model_name_or_path
 
 _COMPACT_HEAD_FILENAME: str = "splade_compact_head.pt"
+_TOKEN_ALIGNED_COMPACT_HEAD_VALUES: set[str] = {
+    "token",
+    "token_id",
+    "token_ids",
+    "term_token_id",
+    "term_token_ids",
+}
+_CLUSTERED_COMPACT_HEAD_VALUES: set[str] = {
+    "cluster",
+    "clusters",
+    "latent_cluster",
+    "latent_clusters",
+    "cluster_centroid",
+    "cluster_centroids",
+    "unstructured",
+}
 
 
 class _Log1pRelu(nn.Module):
@@ -45,8 +67,30 @@ def _resolve_activation_module(activation: str) -> nn.Module:
     raise ValueError(f"Unsupported sparse activation: {activation}")
 
 
+def _normalize_compact_head_alignment(value: Any | None) -> str | None:
+    """Normalize compact-head alignment metadata when present."""
+    if value is None:
+        return None
+    normalized: str = str(value).strip().lower().replace("-", "_")
+    if not normalized:
+        return None
+    if normalized in _TOKEN_ALIGNED_COMPACT_HEAD_VALUES:
+        return "token_ids"
+    if normalized in _CLUSTERED_COMPACT_HEAD_VALUES:
+        return "latent_cluster"
+    raise ValueError(f"Unsupported compact-head alignment: {value!r}")
+
+
 def _extract_hidden_module(model: PreTrainedModel) -> nn.Module:
     """Resolve the base transformer module that returns last_hidden_state."""
+    unwrapped_model: nn.Module = unwrap_peft_model(model)
+    if unwrapped_model is not model:
+        if isinstance(unwrapped_model, PreTrainedModel):
+            return _extract_hidden_module(unwrapped_model)
+        if hasattr(unwrapped_model, "model"):
+            module: Any = getattr(unwrapped_model, "model")
+            if isinstance(module, nn.Module):
+                return _extract_hidden_module(cast(PreTrainedModel, module))
     if hasattr(model, "model"):
         module: Any = getattr(model, "model")
         if isinstance(module, nn.Module):
@@ -106,6 +150,7 @@ class SpladeEncoder(nn.Module):
         attn_implementation: Optional[str] = None,
         dtype: Optional[torch.dtype] = None,
         tie_word_embeddings: bool = False,
+        peft_cfg: DictConfig | None = None,
         freeze_backbone: bool = False,
     ) -> None:
         super().__init__()
@@ -124,11 +169,28 @@ class SpladeEncoder(nn.Module):
                 model_class_name=huggingface_model_class,
                 **kwargs,
             )
+        resolved_peft_settings = resolve_peft_settings(
+            peft_cfg,
+            model_type=getattr(self.mlm.config, "model_type", None),
+            huggingface_model_class=huggingface_model_class,
+        )
+        self._peft_trainable_parameter_names: frozenset[str] = frozenset()
+        self._peft_enabled: bool = False
+        self._peft_method: str | None = None
+        if resolved_peft_settings.enabled:
+            self.mlm, self._peft_trainable_parameter_names = apply_peft_adapter(
+                self.mlm,
+                settings=resolved_peft_settings,
+            )
+            self._peft_enabled = True
+            self._peft_method = resolved_peft_settings.method
         self.sparse_activation: str = sparse_activation
         self.activation: nn.Module = _resolve_activation_module(sparse_activation)
         self._neg_inf: torch.Tensor
         self.register_buffer("_neg_inf", torch.tensor(float("-inf")), persistent=False)
         self._output_vocab_size: int = int(self.mlm.config.vocab_size)
+        self._compact_head_alignment: str = "token_ids"
+        self._output_token_aligned: bool = True
         self._mlm_forward_supports_use_cache: bool = _supports_use_cache_forward(
             self.mlm
         )
@@ -150,7 +212,7 @@ class SpladeEncoder(nn.Module):
         self._encode_logits: Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
         self._setup_compact_head(model_name=model_name, dtype=dtype)
         self._encode_logits = self._resolve_encode_logits()
-        self.freeze_backbone: bool = bool(freeze_backbone)
+        self.freeze_backbone: bool = bool(freeze_backbone) and not self._peft_enabled
         if self.freeze_backbone:
             self._freeze_backbone_params()
 
@@ -206,6 +268,23 @@ class SpladeEncoder(nn.Module):
                 dtype=torch.long,
             )
 
+        compact_head_alignment: str | None = _normalize_compact_head_alignment(
+            payload.get("alignment")
+        )
+        if compact_head_alignment is None:
+            compact_head_alignment = (
+                "token_ids"
+                if int(token_ids.numel()) == out_features
+                else "latent_cluster"
+            )
+        if (
+            compact_head_alignment == "token_ids"
+            and int(token_ids.numel()) != out_features
+        ):
+            raise ValueError(
+                "Token-aligned compact heads must include one token id per output row."
+            )
+
         self.compact_head = compact_head
         self._hidden_model = _extract_hidden_module(self.mlm)
         self._hidden_forward_supports_use_cache = _supports_use_cache_forward(
@@ -215,9 +294,11 @@ class SpladeEncoder(nn.Module):
         if hidden_config is not None and hasattr(hidden_config, "use_cache"):
             hidden_config.use_cache = False
         self._output_vocab_size = out_features
+        self._compact_head_alignment = compact_head_alignment
+        self._output_token_aligned = compact_head_alignment == "token_ids"
         self._drop_unused_mlm_head_for_compact_path()
         self._freeze_unused_mlm_params_for_compact_path()
-        if int(token_ids.numel()) == out_features:
+        if self._output_token_aligned:
             self._compact_token_ids = token_ids
             max_token_id: int = int(token_ids.max().item()) if out_features > 0 else -1
             if max_token_id >= 0:
@@ -365,6 +446,8 @@ class SpladeEncoder(nn.Module):
         """Build an output-dimension mask from tokenizer token ids."""
         if int(exclude_ids.numel()) == 0:
             return torch.empty((0,), dtype=torch.bool)
+        if not self.output_token_aligned:
+            return torch.empty((0,), dtype=torch.bool)
         compact_token_ids: torch.Tensor = self._compact_token_ids
         if int(compact_token_ids.numel()) > 0:
             return torch.isin(
@@ -385,6 +468,22 @@ class SpladeEncoder(nn.Module):
         return int(self._output_vocab_size)
 
     @property
+    def peft_enabled(self) -> bool:
+        return bool(self._peft_enabled)
+
+    @property
+    def peft_method(self) -> str | None:
+        return self._peft_method
+
+    @property
+    def compact_head_alignment(self) -> str:
+        return self._compact_head_alignment
+
+    @property
+    def output_token_aligned(self) -> bool:
+        return bool(self._output_token_aligned)
+
+    @property
     def token_id_to_output_index(self) -> torch.Tensor:
         return self._token_id_to_output_index
 
@@ -398,11 +497,11 @@ class SpladeEncoder(nn.Module):
     def _pool_sparse(
         self,
         token_scores: torch.Tensor,
-        attention_mask: torch.Tensor,
+        pooling_mask: torch.Tensor,
         pooling_mode: torch.Tensor,
     ) -> torch.Tensor:
         # Expand mask for token-wise pooling.
-        mask: torch.Tensor = attention_mask.unsqueeze(-1).to(token_scores.dtype)
+        mask: torch.Tensor = pooling_mask.unsqueeze(-1).to(token_scores.dtype)
         pooled_sum: torch.Tensor = (token_scores * mask).sum(dim=1)
         neg_inf: torch.Tensor = self._neg_inf.to(
             dtype=token_scores.dtype, device=token_scores.device
@@ -421,11 +520,15 @@ class SpladeEncoder(nn.Module):
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
         pooling_mode: torch.Tensor,
+        pooling_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         logits: torch.Tensor = self._encode_logits(input_ids, attention_mask)
         token_scores: torch.Tensor = self.activation(logits)
+        resolved_pooling_mask: torch.Tensor = (
+            attention_mask if pooling_mask is None else pooling_mask
+        )
         embeddings: torch.Tensor = self._pool_sparse(
-            token_scores, attention_mask, pooling_mode
+            token_scores, resolved_pooling_mask, pooling_mode
         )
         return embeddings
 
@@ -437,12 +540,16 @@ class _SpladeEncoderWrapper(nn.Module):
         self.register_buffer("_pooling_mode", pooling_mode, persistent=False)
 
     def forward(
-        self, input_ids: torch.Tensor, attention_mask: torch.Tensor
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        pooling_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return self.encoder(
             input_ids=input_ids,
             attention_mask=attention_mask,
             pooling_mode=self._pooling_mode,
+            pooling_mask=pooling_mask,
         )
 
 
@@ -450,6 +557,7 @@ class SpladeModel(nn.Module):
     # --- Special methods ---
     def __init__(
         self,
+        family: str,
         model_name: str,
         huggingface_model_class: str,
         query_pooling: str,
@@ -460,9 +568,11 @@ class SpladeModel(nn.Module):
         normalize: bool = False,
         doc_only: bool = False,
         tie_word_embeddings: bool = False,
+        peft_cfg: DictConfig | None = None,
         freeze_backbone: bool = False,
     ) -> None:
         super().__init__()
+        self.family: str = str(family).lower()
         # Build encoder shared by query and document pooling.
         self.encoder: SpladeEncoder = SpladeEncoder(
             model_name=model_name,
@@ -471,6 +581,7 @@ class SpladeModel(nn.Module):
             attn_implementation=attn_implementation,
             dtype=dtype,
             tie_word_embeddings=tie_word_embeddings,
+            peft_cfg=peft_cfg,
             freeze_backbone=freeze_backbone,
         )
         self.query_pooling: str = query_pooling
@@ -499,11 +610,17 @@ class SpladeModel(nn.Module):
         self._doc_encoder_fn: Callable[..., torch.Tensor] = self._doc_encoder_wrapper
         self.normalize: bool = normalize
         self.doc_only: bool = bool(doc_only)
+        self.peft_enabled: bool = bool(self.encoder.peft_enabled)
+        if self.doc_only and not self.encoder.output_token_aligned:
+            raise ValueError(
+                "model.doc_only requires token-aligned output dimensions; "
+                "clustered compact heads are not supported."
+            )
         exclude_token_ids: torch.Tensor = self._build_query_exclude_token_ids()
         self.register_buffer(
             "_query_exclude_token_ids", exclude_token_ids, persistent=False
         )
-        self._query_encode_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = (
+        self._query_encode_fn: Callable[..., torch.Tensor] = (
             self._encode_query_terms if self.doc_only else self._encode_query_mlm
         )
 
@@ -564,7 +681,10 @@ class SpladeModel(nn.Module):
         return torch.tensor(unique_ids, dtype=torch.long)
 
     def _encode_query_terms(
-        self, input_ids: torch.Tensor, attention_mask: torch.Tensor
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        pooling_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Encode queries as a bag-of-words over input tokens."""
         batch_size: int = int(input_ids.shape[0])
@@ -574,7 +694,10 @@ class SpladeModel(nn.Module):
 
         token_ids: torch.Tensor = input_ids.to(dtype=torch.long)
         # Mask out padding and special tokens before counting terms.
-        token_mask: torch.Tensor = attention_mask.to(dtype=torch.bool)
+        resolved_pooling_mask: torch.Tensor = (
+            attention_mask if pooling_mask is None else pooling_mask
+        )
+        token_mask: torch.Tensor = resolved_pooling_mask.to(dtype=torch.bool)
         exclude_ids: torch.Tensor = self._query_exclude_token_ids
         if int(exclude_ids.numel()) > 0:
             token_mask = token_mask & ~torch.isin(token_ids, exclude_ids)
@@ -599,28 +722,45 @@ class SpladeModel(nn.Module):
         return bow
 
     def _encode_query_mlm(
-        self, input_ids: torch.Tensor, attention_mask: torch.Tensor
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        pooling_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Encode queries using the MLM-based SPLADE encoder."""
         embeddings: torch.Tensor = self._query_encoder_fn(
-            input_ids=input_ids, attention_mask=attention_mask
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            pooling_mask=pooling_mask,
         )
         return embeddings
 
     # --- Public methods ---
     def encode_queries(
-        self, input_ids: torch.Tensor, attention_mask: torch.Tensor
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        pooling_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        embeddings: torch.Tensor = self._query_encode_fn(input_ids, attention_mask)
+        embeddings: torch.Tensor = self._query_encode_fn(
+            input_ids,
+            attention_mask,
+            pooling_mask,
+        )
         if self.normalize:
             embeddings = F.normalize(embeddings, p=2, dim=-1)
         return embeddings
 
     def encode_docs(
-        self, input_ids: torch.Tensor, attention_mask: torch.Tensor
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        pooling_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         embeddings: torch.Tensor = self._doc_encoder_fn(
-            input_ids=input_ids, attention_mask=attention_mask
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            pooling_mask=pooling_mask,
         )
         if self.normalize:
             embeddings = F.normalize(embeddings, p=2, dim=-1)
@@ -632,7 +772,17 @@ class SpladeModel(nn.Module):
         query_attention_mask: torch.Tensor,
         doc_input_ids: torch.Tensor,
         doc_attention_mask: torch.Tensor,
+        query_pooling_mask: torch.Tensor | None = None,
+        doc_pooling_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        q: torch.Tensor = self.encode_queries(query_input_ids, query_attention_mask)
-        d: torch.Tensor = self.encode_docs(doc_input_ids, doc_attention_mask)
+        q: torch.Tensor = self.encode_queries(
+            query_input_ids,
+            query_attention_mask,
+            pooling_mask=query_pooling_mask,
+        )
+        d: torch.Tensor = self.encode_docs(
+            doc_input_ids,
+            doc_attention_mask,
+            pooling_mask=doc_pooling_mask,
+        )
         return q, d

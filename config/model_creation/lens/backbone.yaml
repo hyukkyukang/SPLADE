@@ -1,0 +1,11 @@
+base_model: mistralai/Mistral-7B-v0.1
+output_dir: outputs/model_creation/lens/hf_backbone
+
+instruction_token: <instruct>
+query_token: <query>
+response_token: <response>
+
+trust_remote_code: false
+local_files_only: false
+dtype: float16
+device: auto

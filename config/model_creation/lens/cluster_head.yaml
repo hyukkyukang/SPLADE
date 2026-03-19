@@ -1,0 +1,19 @@
+model_dir: outputs/model_creation/lens/hf_backbone
+output_dir: outputs/model_creation/lens/hf_backbone
+
+cluster_count: 4000
+backend: auto
+niter: 25
+nredo: 1
+seed: 0
+normalize_rows: false
+exclude_special_tokens: true
+save_assignments: true
+assignments_filename: lens_cluster_assignments.npy
+source_token_ids_filename: lens_cluster_source_token_ids.npy
+metadata_filename: lens_cluster_metadata.json
+
+trust_remote_code: false
+local_files_only: false
+dtype: float16
+verbose: true

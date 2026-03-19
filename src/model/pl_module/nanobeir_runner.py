@@ -11,11 +11,11 @@ from sentence_transformers.sparse_encoder.evaluation import SparseNanoBEIREvalua
 
 from src.utils.logging import log_if_rank_zero
 from src.utils.sparse_encoder import (
-    DocOnlySparseEncoderAdapter,
+    NativeSparseEncoderAdapter,
     SparseEncoderCache,
-    build_doc_only_sparse_encoder_adapter,
+    build_native_sparse_encoder_adapter,
     build_sparse_encoder_cache,
-    resolve_nanobeir_compatibility,
+    resolve_nanobeir_backend,
     update_sparse_encoder_cache,
 )
 
@@ -45,23 +45,26 @@ class NanoBEIREvaluationRunner:
         self._val_counter: int = 0
         self._cache: SparseEncoderCache | None = None
         self._cache_device: torch.device | None = None
-        self._doc_only_encoder: DocOnlySparseEncoderAdapter | None = None
-        self._doc_only_device: torch.device | None = None
+        self._native_encoder: NativeSparseEncoderAdapter | None = None
+        self._native_device: torch.device | None = None
         self._evaluator: SparseNanoBEIREvaluator | None = None
         self._evaluator_datasets: list[str] = []
         self._evaluator_batch_size: int = int(self.batch_size)
         self._force_adapter_fallback: bool = False
 
-        if self.enabled and not self.doc_only_enabled:
-            compatible: bool
+        if self.enabled:
+            backend_name: str
             reason: str | None
-            compatible, reason = resolve_nanobeir_compatibility(self.cfg)
-            if not compatible:
-                self._force_adapter_fallback = True
+            backend_name, reason = resolve_nanobeir_backend(
+                self.cfg,
+                doc_only_enabled=self.doc_only_enabled,
+            )
+            self._force_adapter_fallback = backend_name == "native"
+            if self._force_adapter_fallback and reason is not None:
                 log_if_rank_zero(
                     self.logger,
-                    "NanoBEIR SparseEncoder path disabled; using direct SPLADE "
-                    f"adapter path instead. Reason: {reason}",
+                    "NanoBEIR SentenceTransformers path disabled; using the "
+                    f"native sparse adapter instead. Reason: {reason}",
                     level="warning",
                 )
 
@@ -103,8 +106,8 @@ class NanoBEIREvaluationRunner:
     def reset_runtime_state(self) -> None:
         self._cache = None
         self._cache_device = None
-        self._doc_only_encoder = None
-        self._doc_only_device = None
+        self._native_encoder = None
+        self._native_device = None
         self._evaluator = None
         self._evaluator_datasets = []
 
@@ -140,12 +143,12 @@ class NanoBEIREvaluationRunner:
             torch.cuda.ipc_collect()
 
     def _resolve_device(self, training_device: torch.device) -> torch.device:
-        if self.doc_only_enabled or self._force_adapter_fallback:
+        if self._force_adapter_fallback:
             if self.use_cpu:
                 log_if_rank_zero(
                     self.logger,
-                    "NanoBEIR use_cpu ignored for direct SPLADE adapter path; "
-                    "using training device.",
+                    "NanoBEIR use_cpu ignored for the native sparse adapter path; "
+                    "using the training device.",
                     level="warning",
                 )
             return training_device
@@ -169,23 +172,21 @@ class NanoBEIREvaluationRunner:
         masked_lm_incompatibility_predicate: Callable[[Exception], bool],
     ) -> None:
         device: torch.device = self._resolve_device(training_device)
-        sparse_encoder: SparseEncoder | DocOnlySparseEncoderAdapter
-        use_adapter_path: bool = bool(
-            self.doc_only_enabled or self._force_adapter_fallback
-        )
+        sparse_encoder: SparseEncoder | NativeSparseEncoderAdapter
+        use_adapter_path: bool = bool(self._force_adapter_fallback)
         if use_adapter_path:
-            doc_cache: DocOnlySparseEncoderAdapter | None = self._doc_only_encoder
-            doc_cache_device: torch.device | None = self._doc_only_device
-            if doc_cache is None or doc_cache_device != device:
-                doc_cache = build_doc_only_sparse_encoder_adapter(
+            native_cache: NativeSparseEncoderAdapter | None = self._native_encoder
+            native_cache_device: torch.device | None = self._native_device
+            if native_cache is None or native_cache_device != device:
+                native_cache = build_native_sparse_encoder_adapter(
                     cfg=self.cfg,
                     model=eval_model,
                     device=device,
                     batch_size=self.batch_size,
                 )
-                self._doc_only_encoder = doc_cache
-                self._doc_only_device = device
-            sparse_encoder = doc_cache
+                self._native_encoder = native_cache
+                self._native_device = device
+            sparse_encoder = native_cache
         else:
             cache: SparseEncoderCache | None = self._cache
             cache_device: torch.device | None = self._cache_device
@@ -210,20 +211,20 @@ class NanoBEIREvaluationRunner:
                 log_if_rank_zero(
                     self.logger,
                     "NanoBEIR SparseEncoder MLM path is incompatible with this "
-                    "backbone type; falling back to the direct SPLADE adapter "
+                    "backbone type; falling back to the native sparse adapter "
                     f"path for subsequent validations. Root cause: {exc}",
                     level="warning",
                 )
                 adapter_device: torch.device = training_device
-                doc_cache = build_doc_only_sparse_encoder_adapter(
+                native_cache = build_native_sparse_encoder_adapter(
                     cfg=self.cfg,
                     model=eval_model,
                     device=adapter_device,
                     batch_size=self.batch_size,
                 )
-                self._doc_only_encoder = doc_cache
-                self._doc_only_device = adapter_device
-                sparse_encoder = doc_cache
+                self._native_encoder = native_cache
+                self._native_device = adapter_device
+                sparse_encoder = native_cache
 
         evaluator: SparseNanoBEIREvaluator
         if (

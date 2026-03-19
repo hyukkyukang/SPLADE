@@ -207,16 +207,22 @@ class IndexedRetrievalHelper:
         query_input_ids: torch.Tensor,
         query_attention_mask: torch.Tensor,
         mark_step: Callable[[], None] | None,
+        query_pooling_mask: torch.Tensor | None = None,
         query_indptr: Sequence[int] | torch.Tensor | None = None,
     ) -> torch.Tensor:
         if query_indptr is None:
             if mark_step is not None:
                 mark_step()
-            return model.encode_queries(query_input_ids, query_attention_mask)
+            return model.encode_queries(
+                query_input_ids,
+                query_attention_mask,
+                pooling_mask=query_pooling_mask,
+            )
         return self._encode_and_aggregate_query_windows(
             model=model,
             input_ids=query_input_ids,
             attention_mask=query_attention_mask,
+            pooling_mask=query_pooling_mask,
             query_indptr=query_indptr,
             mark_step=mark_step,
         )
@@ -316,6 +322,7 @@ class IndexedRetrievalHelper:
         model: Any,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
+        pooling_mask: torch.Tensor | None,
         query_indptr: Sequence[int] | torch.Tensor,
         mark_step: Callable[[], None] | None,
     ) -> torch.Tensor:
@@ -352,6 +359,9 @@ class IndexedRetrievalHelper:
             real_count: int = end_idx - start_idx
             chunk_input_ids: torch.Tensor = input_ids[start_idx:end_idx]
             chunk_attention_mask: torch.Tensor = attention_mask[start_idx:end_idx]
+            chunk_pooling_mask: torch.Tensor | None = (
+                None if pooling_mask is None else pooling_mask[start_idx:end_idx]
+            )
             if self._use_fixed_window_chunks and real_count < chunk_size:
                 pad_rows: int = chunk_size - real_count
                 chunk_input_ids = F.pad(
@@ -364,11 +374,18 @@ class IndexedRetrievalHelper:
                     (0, 0, 0, pad_rows),
                     value=0,
                 )
+                if chunk_pooling_mask is not None:
+                    chunk_pooling_mask = F.pad(
+                        chunk_pooling_mask,
+                        (0, 0, 0, pad_rows),
+                        value=0,
+                    )
             if mark_step is not None:
                 mark_step()
             chunk_representations: torch.Tensor = model.encode_queries(
                 chunk_input_ids,
                 chunk_attention_mask,
+                pooling_mask=chunk_pooling_mask,
             )[:real_count]
             if aggregated is None:
                 if pooling_mode == "sum":

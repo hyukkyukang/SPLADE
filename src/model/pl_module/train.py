@@ -1,6 +1,6 @@
 import inspect
 import math
-from typing import Any, Callable, TypeVar, cast
+from typing import Any, Callable, TYPE_CHECKING, TypeVar, cast
 
 import lightning as L
 import torch
@@ -10,7 +10,6 @@ from src.model.losses import LossComputer
 from src.model.pl_module.compile_policy import TrainingCompilePolicyManager
 from src.model.pl_module.loss_service import LossRegularizationService
 from src.model.pl_module.metrics_service import TrainingMetricsService
-from src.model.pl_module.nanobeir_runner import NanoBEIREvaluationRunner
 from src.model.pl_module.utils import validate_torch_compile_mode
 from src.model.pl_module.validation_service import ValidationMetricsAccumulator
 from src.model.retriever.sparse.neural.splade import SpladeModel
@@ -18,10 +17,63 @@ from src.utils.logging import get_logger, log_if_rank_zero
 from src.utils.model_utils import build_splade_model, load_splade_checkpoint
 from src.utils.script_setup import normalize_optional_str
 
+if TYPE_CHECKING:
+    from src.model.pl_module.nanobeir_runner import NanoBEIREvaluationRunner
+
 logger = get_logger("SPLADETrainingModule")
 _TCallable = TypeVar("_TCallable", bound=Callable[..., Any])
 _VALIDATION_DOC_ENCODE_CHUNK_SIZE = 10
 _TRI_STATE_CONFIG_MODES = {"auto", "true", "false"}
+
+
+class _DisabledNanoBEIREvaluationRunner:
+    """No-op NanoBEIR runner used when benchmark evaluation is disabled."""
+
+    def __init__(self, *, use_cpu: bool, doc_only_enabled: bool) -> None:
+        self.enabled: bool = False
+        self.use_cpu: bool = bool(use_cpu)
+        self.doc_only_enabled: bool = bool(doc_only_enabled)
+
+    def should_run_eval(self, *, sanity_checking: bool) -> bool:
+        _ = sanity_checking
+        return False
+
+    def barrier(self, strategy: Any) -> None:
+        _ = strategy
+
+    def reset_runtime_state(self) -> None:
+        return
+
+    def cleanup_after_failure(self) -> None:
+        return
+
+    def offload_cache_to_cpu(self) -> None:
+        return
+
+    def resolve_device(self, training_device: torch.device) -> torch.device:
+        if self.use_cpu:
+            return torch.device("cpu")
+        return training_device
+
+    def run_eval(
+        self,
+        *,
+        eval_model: torch.nn.Module,
+        training_device: torch.device,
+        global_step: int,
+        log_dir: str,
+        log_dict_fn: Callable[[dict[str, float]], None],
+        masked_lm_incompatibility_predicate: Callable[[Exception], bool],
+    ) -> None:
+        _ = (
+            eval_model,
+            training_device,
+            global_step,
+            log_dir,
+            log_dict_fn,
+            masked_lm_incompatibility_predicate,
+        )
+        return
 
 
 def _dynamo_disable(fn: _TCallable) -> _TCallable:
@@ -320,6 +372,7 @@ class SPLADETrainingModule(L.LightningModule):
         self,
         flat_docs: torch.Tensor,
         flat_masks: torch.Tensor,
+        flat_pooling_masks: torch.Tensor | None,
         *,
         chunk_size: int,
         use_compile: bool,
@@ -328,7 +381,11 @@ class SPLADETrainingModule(L.LightningModule):
         if total_docs <= chunk_size:
             if use_compile:
                 self._compile_policy.maybe_mark_step()
-            return self.model.encode_docs(flat_docs, flat_masks)
+            return self.model.encode_docs(
+                flat_docs,
+                flat_masks,
+                pooling_mask=flat_pooling_masks,
+            )
 
         doc_rep_chunks: list[torch.Tensor] = []
         start: int
@@ -337,7 +394,15 @@ class SPLADETrainingModule(L.LightningModule):
             if use_compile:
                 self._compile_policy.maybe_mark_step()
             doc_rep_chunks.append(
-                self.model.encode_docs(flat_docs[start:end], flat_masks[start:end])
+                self.model.encode_docs(
+                    flat_docs[start:end],
+                    flat_masks[start:end],
+                    pooling_mask=(
+                        None
+                        if flat_pooling_masks is None
+                        else flat_pooling_masks[start:end]
+                    ),
+                )
             )
         return torch.cat(doc_rep_chunks, dim=0)
 
@@ -348,6 +413,23 @@ class SPLADETrainingModule(L.LightningModule):
             metrics_cfg=self.val_metrics_cfg,
         )
         self.val_metrics_enabled = self._validation_metrics.enabled
+        nanobeir_cfg: DictConfig | None = (
+            cfg.nanobeir if "nanobeir" in cfg else None
+        )
+        nanobeir_enabled: bool = bool(
+            nanobeir_cfg is not None and nanobeir_cfg.get("enabled", False)
+        )
+        if not nanobeir_enabled:
+            self._nanobeir_runner = _DisabledNanoBEIREvaluationRunner(
+                use_cpu=bool(
+                    False if nanobeir_cfg is None else nanobeir_cfg.get("use_cpu", False)
+                ),
+                doc_only_enabled=bool(self._doc_only_flag),
+            )
+            return
+
+        from src.model.pl_module.nanobeir_runner import NanoBEIREvaluationRunner
+
         self._nanobeir_runner = NanoBEIREvaluationRunner(
             cfg=cfg,
             logger=logger,
@@ -425,6 +507,13 @@ class SPLADETrainingModule(L.LightningModule):
         bsz, doc_count, seq_len = doc_input_ids.shape
         flat_docs: torch.Tensor = doc_input_ids.view(bsz * doc_count, seq_len)
         flat_masks: torch.Tensor = doc_attention_mask.view(bsz * doc_count, seq_len)
+        query_pooling_mask: torch.Tensor | None = batch.get("query_pooling_mask")
+        doc_pooling_mask: torch.Tensor | None = batch.get("doc_pooling_mask")
+        flat_doc_pooling_masks: torch.Tensor | None = (
+            None
+            if doc_pooling_mask is None
+            else doc_pooling_mask.view(bsz * doc_count, seq_len)
+        )
 
         q_reps: torch.Tensor
         flat_doc_reps: torch.Tensor
@@ -451,7 +540,9 @@ class SPLADETrainingModule(L.LightningModule):
                 if use_compile:
                     self._compile_policy.maybe_mark_step()
                 q_reps = self.model.encode_queries(
-                    batch["query_input_ids"], batch["query_attention_mask"]
+                    batch["query_input_ids"],
+                    batch["query_attention_mask"],
+                    pooling_mask=query_pooling_mask,
                 )
             with torch.autograd.profiler.record_function(
                 "splade.encode_docs_chunked"
@@ -459,6 +550,7 @@ class SPLADETrainingModule(L.LightningModule):
                 flat_doc_reps = self._encode_docs_in_chunks(
                     flat_docs,
                     flat_masks,
+                    flat_doc_pooling_masks,
                     chunk_size=self._validation_doc_encode_chunk_size,
                     use_compile=use_compile,
                 )
@@ -476,6 +568,8 @@ class SPLADETrainingModule(L.LightningModule):
                     batch["query_attention_mask"],
                     flat_docs,
                     flat_masks,
+                    query_pooling_mask=query_pooling_mask,
+                    doc_pooling_mask=flat_doc_pooling_masks,
                 )
         elif use_fused_query_doc_encoding:
             with torch.autograd.profiler.record_function(
@@ -488,18 +582,26 @@ class SPLADETrainingModule(L.LightningModule):
                     query_attention_mask=batch["query_attention_mask"],
                     doc_input_ids=flat_docs,
                     doc_attention_mask=flat_masks,
+                    query_pooling_mask=query_pooling_mask,
+                    doc_pooling_mask=flat_doc_pooling_masks,
                 )
         else:
             with torch.autograd.profiler.record_function("splade.encode_queries"):
                 if use_compile:
                     self._compile_policy.maybe_mark_step()
                 q_reps = self.model.encode_queries(
-                    batch["query_input_ids"], batch["query_attention_mask"]
+                    batch["query_input_ids"],
+                    batch["query_attention_mask"],
+                    pooling_mask=query_pooling_mask,
                 )
             with torch.autograd.profiler.record_function("splade.encode_docs"):
                 if use_compile:
                     self._compile_policy.maybe_mark_step()
-                flat_doc_reps = self.model.encode_docs(flat_docs, flat_masks)
+                flat_doc_reps = self.model.encode_docs(
+                    flat_docs,
+                    flat_masks,
+                    pooling_mask=flat_doc_pooling_masks,
+                )
 
         doc_reps: torch.Tensor = flat_doc_reps.view(bsz, doc_count, -1)
 
@@ -863,10 +965,14 @@ class SPLADETrainingModule(L.LightningModule):
 
     def forward(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         q: torch.Tensor = self.model.encode_queries(
-            batch["query_input_ids"], batch["query_attention_mask"]
+            batch["query_input_ids"],
+            batch["query_attention_mask"],
+            pooling_mask=batch.get("query_pooling_mask"),
         )
         d: torch.Tensor = self.model.encode_docs(
-            batch["doc_input_ids"], batch["doc_attention_mask"]
+            batch["doc_input_ids"],
+            batch["doc_attention_mask"],
+            pooling_mask=batch.get("doc_pooling_mask"),
         )
         return {"q": q, "d": d}
 

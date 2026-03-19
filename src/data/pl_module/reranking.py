@@ -27,6 +27,7 @@ class RerankingDataModule(L.LightningDataModule):
             self._dataset = RerankingPDModule(
                 cfg=self.cfg.dataset,
                 tokenizer=self.tokenizer,
+                model_cfg=self.cfg.model,
                 seed=int(self.cfg.seed),
                 load_teacher_scores=False,
                 require_teacher_scores=False,

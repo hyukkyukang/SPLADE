@@ -22,11 +22,13 @@ class PDModule(PyTorchDataset):
         cfg: DictConfig,
         tokenizer: PreTrainedTokenizerBase,
         *,
+        model_cfg: DictConfig | None = None,
         seed: int,
         load_teacher_scores: bool | None = None,
         require_teacher_scores: bool | None = None,
     ) -> None:
         self.cfg: DictConfig = cfg
+        self.model_cfg: DictConfig | None = model_cfg
         self.name: str = str(self.cfg.name)
         self.tokenizer: PreTrainedTokenizerBase = tokenizer
         self.seed: int = int(seed)

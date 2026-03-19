@@ -9,10 +9,10 @@ import mlflow
 import torch
 from mlflow.tracking import MlflowClient
 from omegaconf import DictConfig
-from sentence_transformers import SparseEncoder
 from sentence_transformers.sparse_encoder.evaluation import SparseNanoBEIREvaluator
 
 from config.path import ABS_CONFIG_DIR
+from src.model.retriever.sparse.neural.splade import SpladeModel
 from src.utils import log_if_rank_zero
 from src.utils.logging import get_logger
 from src.utils.mlflow_utils import (
@@ -23,6 +23,11 @@ from src.utils.mlflow_utils import (
     resolve_mlflow_tags,
     sanitize_mlflow_metric_name,
 )
+from src.utils.model_utils import (
+    apply_checkpoint_model_config,
+    build_splade_model,
+    load_splade_checkpoint,
+)
 from src.utils.script_setup import (
     configure_default_entrypoint_environment,
     initialize_run,
@@ -30,8 +35,10 @@ from src.utils.script_setup import (
     resolve_model_source,
 )
 from src.utils.sparse_encoder import (
+    build_native_sparse_encoder_adapter,
     build_sparse_encoder_from_checkpoint,
     build_sparse_encoder_from_huggingface,
+    resolve_nanobeir_backend,
 )
 
 logger: logging.Logger = get_logger(__name__, __file__)
@@ -67,7 +74,41 @@ def _build_sparse_encoder(
     *,
     device: torch.device,
     model_source_kind: str,
-) -> SparseEncoder:
+) -> Any:
+    benchmark_backend: str
+    reason: str | None
+    benchmark_backend, reason = resolve_nanobeir_backend(cfg)
+    if benchmark_backend == "native":
+        if reason is not None:
+            log_if_rank_zero(
+                logger,
+                "Using native sparse benchmark adapter. "
+                f"SentenceTransformers MLM path disabled: {reason}",
+                level="warning",
+            )
+        use_cpu_for_model_build: bool = device.type == "cpu"
+        model: SpladeModel = build_splade_model(
+            cfg,
+            use_cpu=use_cpu_for_model_build,
+        )
+        if model_source_kind == "checkpoint":
+            checkpoint_path: str | None = normalize_optional_str(
+                cfg.testing.checkpoint_path
+            )
+            if checkpoint_path is None:
+                raise ValueError(
+                    "testing.checkpoint_path must be set for checkpoint evaluation."
+                )
+            load_splade_checkpoint(model, checkpoint_path, logger=logger)
+        model.to(device)
+        model.eval()
+        return build_native_sparse_encoder_adapter(
+            cfg=cfg,
+            model=model,
+            device=device,
+            batch_size=int(cfg.nanobeir.batch_size),
+        )
+
     if model_source_kind == "huggingface":
         return build_sparse_encoder_from_huggingface(cfg=cfg, device=device)
     checkpoint_path: str | None = normalize_optional_str(cfg.testing.checkpoint_path)
@@ -298,6 +339,24 @@ def _log_to_mlflow(
 def run(cfg: DictConfig) -> None:
     initialize_run(cfg, logger=logger, suppress_lightning_tips=True)
     cfg = resolve_model_source(cfg, logger=logger, set_nanobeir_flag=True)
+    hf_model_path: str | None = normalize_optional_str(cfg.testing.hf_model_path)
+    checkpoint_exclude_keys: tuple[str, ...] = (
+        "encode_path",
+        "index_path",
+        "encode_dir",
+        "index_dir",
+        "sparse_top_k",
+        "sparse_min_weight",
+        "max_input_length",
+    )
+    if hf_model_path is not None:
+        checkpoint_exclude_keys = ("huggingface_name",) + checkpoint_exclude_keys
+    cfg = apply_checkpoint_model_config(
+        cfg,
+        checkpoint_path=cfg.testing.checkpoint_path,
+        logger=logger,
+        exclude_keys=checkpoint_exclude_keys,
+    )
 
     device: torch.device = _resolve_eval_device(bool(cfg.testing.use_cpu))
     model_source: str
@@ -309,12 +368,14 @@ def run(cfg: DictConfig) -> None:
     )
     log_if_rank_zero(logger, f"Using evaluation device: {device}")
 
-    sparse_encoder: SparseEncoder = _build_sparse_encoder(
+    sparse_encoder: Any = _build_sparse_encoder(
         cfg,
         device=device,
         model_source_kind=model_source_kind,
     )
-    sparse_encoder.eval()
+    eval_fn: Any = getattr(sparse_encoder, "eval", None)
+    if callable(eval_fn):
+        eval_fn()
 
     dataset_names: list[str] = [str(name) for name in cfg.nanobeir.datasets]
     evaluator: SparseNanoBEIREvaluator = SparseNanoBEIREvaluator(

@@ -28,6 +28,7 @@ class EncodeDataModule(L.LightningDataModule):
                 cfg=self.cfg.dataset,
                 encoding_cfg=self.cfg.encoding,
                 tokenizer=self.tokenizer,
+                model_cfg=self.cfg.model,
                 seed=int(self.cfg.seed),
             )
         return self._dataset

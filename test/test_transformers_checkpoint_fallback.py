@@ -189,6 +189,22 @@ class TransformersCheckpointFallbackTest(unittest.TestCase):
         mocked_causal_loader.assert_called_once()
         mocked_masked_loader.assert_not_called()
 
+    def test_build_masked_lm_model_supports_bidirectional_mistral_loader(self) -> None:
+        dummy_model = _build_tiny_bert()
+        with patch(
+            "src.utils.transformers.MistralBiForCausalLM.from_pretrained",
+            return_value=dummy_model,
+        ) as mocked_bi_loader, patch(
+            "src.utils.transformers.AutoModelForMaskedLM.from_pretrained"
+        ) as mocked_masked_loader:
+            loaded_model = build_masked_lm_model(
+                "outputs/model_creation/lens/mistral_cluster4k",
+                model_class_name="MistralBiForCausalLM",
+            )
+        self.assertIs(loaded_model, dummy_model)
+        mocked_bi_loader.assert_called_once()
+        mocked_masked_loader.assert_not_called()
+
     def test_build_masked_lm_model_rejects_unknown_model_class(self) -> None:
         with self.assertRaisesRegex(ValueError, "Unsupported huggingface_model_class"):
             _ = build_masked_lm_model(

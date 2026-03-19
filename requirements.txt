@@ -9,14 +9,17 @@ psutil
 python-dotenv
 hydra-core
 hydra-colorlog
+peft
 # Keep datasets/pyarrow on versions with cp314 wheels.
 datasets>=2.14.4
 pyarrow>=23.0.0
 tqdm
 numpy
 scipy
+scikit-learn
 numba
 faiss-cpu
+packaging
 setuptools
 maturin
 h5py

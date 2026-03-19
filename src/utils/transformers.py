@@ -11,6 +11,9 @@ from transformers import (
     PreTrainedModel,
     PreTrainedTokenizerBase,
 )
+from src.model.retriever.sparse.neural.bidirectional_mistral import (
+    MistralBiForCausalLM,
+)
 from src.utils.normalize import normalize_optional_str as _normalize_optional_str
 
 _CHECKPOINT_PRIORITY_FILES: tuple[str, ...] = (
@@ -27,6 +30,7 @@ _DEFAULT_HF_MODEL_CLASS_NAME: str = "AutoModelForMaskedLM"
 _HF_MODEL_CLASSES: dict[str, Any] = {
     "AutoModelForMaskedLM": AutoModelForMaskedLM,
     "AutoModelForCausalLM": AutoModelForCausalLM,
+    "MistralBiForCausalLM": MistralBiForCausalLM,
 }
 
 

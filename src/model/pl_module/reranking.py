@@ -110,8 +110,10 @@ class RerankingLightningModule(L.LightningModule):
         _ = batch_idx
         query_input_ids: torch.Tensor = batch["query_input_ids"]
         query_attention_mask: torch.Tensor = batch["query_attention_mask"]
+        query_pooling_mask: torch.Tensor | None = batch.get("query_pooling_mask")
         doc_input_ids: torch.Tensor = batch["doc_input_ids"]
         doc_attention_mask: torch.Tensor = batch["doc_attention_mask"]
+        doc_pooling_mask: torch.Tensor | None = batch.get("doc_pooling_mask")
         doc_mask: torch.Tensor = batch["doc_mask"].to(dtype=torch.bool)
         pos_mask: torch.Tensor = batch["pos_mask"].to(dtype=torch.bool)
 
@@ -122,6 +124,9 @@ class RerankingLightningModule(L.LightningModule):
         # Flatten docs so the encoder runs on a 2D tensor.
         flat_docs: torch.Tensor = doc_input_ids.view(bsz * doc_count, seq_len)
         flat_masks: torch.Tensor = doc_attention_mask.view(bsz * doc_count, seq_len)
+        flat_pooling_masks: torch.Tensor | None = (
+            None if doc_pooling_mask is None else doc_pooling_mask.view(bsz * doc_count, seq_len)
+        )
         if self._torch_compile_full_model:
             if self._torch_compile_mark_step is not None:
                 self._torch_compile_mark_step()
@@ -130,14 +135,24 @@ class RerankingLightningModule(L.LightningModule):
                 query_attention_mask,
                 flat_docs,
                 flat_masks,
+                query_pooling_mask=query_pooling_mask,
+                doc_pooling_mask=flat_pooling_masks,
             )
         else:
             if self._torch_compile_mark_step is not None:
                 self._torch_compile_mark_step()
-            q_reps = self.model.encode_queries(query_input_ids, query_attention_mask)
+            q_reps = self.model.encode_queries(
+                query_input_ids,
+                query_attention_mask,
+                pooling_mask=query_pooling_mask,
+            )
             if self._torch_compile_mark_step is not None:
                 self._torch_compile_mark_step()
-            flat_doc_reps = self.model.encode_docs(flat_docs, flat_masks)
+            flat_doc_reps = self.model.encode_docs(
+                flat_docs,
+                flat_masks,
+                pooling_mask=flat_pooling_masks,
+            )
         doc_reps: torch.Tensor = flat_doc_reps.view(bsz, doc_count, -1)
 
         scores: torch.Tensor = self._compute_pairwise_scores(q_reps, doc_reps)

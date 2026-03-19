@@ -2,8 +2,14 @@ from dataclasses import dataclass
 from typing import Iterable
 
 import torch
+from omegaconf import DictConfig
 from transformers import PreTrainedTokenizerBase
 
+from src.data.lens_formatting import (
+    build_doc_pooling_mask,
+    build_query_pooling_mask,
+    format_query_text,
+)
 from src.data.dataclass import MetaItem
 from src.data.dataset import BaseDataset
 
@@ -19,8 +25,10 @@ class RerankInputs:
     doc_texts: list[str]
     query_input_ids: torch.Tensor
     query_attention_mask: torch.Tensor
+    query_pooling_mask: torch.Tensor
     doc_input_ids: torch.Tensor
     doc_attention_mask: torch.Tensor
+    doc_pooling_mask: torch.Tensor
     doc_mask: torch.Tensor
     pos_mask: torch.Tensor
     teacher_scores: torch.Tensor
@@ -150,11 +158,13 @@ def build_rerank_inputs(
     tokenizer: PreTrainedTokenizerBase,
     meta_item: MetaItem,
     *,
+    model_cfg: DictConfig | None,
     max_query_length: int,
     max_doc_length: int,
     max_padding: bool,
 ) -> RerankInputs:
-    query_text: str = dataset.resolve_query_text(meta_item)
+    raw_query_text: str = dataset.resolve_query_text(meta_item)
+    query_text: str = format_query_text(raw_query_text, model_cfg)
     pos_ids: list[str] = meta_item.pos_ids
     neg_ids: list[str] = meta_item.neg_ids
     pos_texts: list[str] = dataset.resolve_doc_texts(pos_ids, meta_item.pos_texts)
@@ -172,6 +182,12 @@ def build_rerank_inputs(
         max_length=max_query_length,
         max_padding=max_padding,
     )
+    query_pooling_mask: torch.Tensor = build_query_pooling_mask(
+        query_input_ids,
+        query_attention_mask,
+        tokenizer,
+        model_cfg,
+    )
     doc_input_ids: torch.Tensor
     doc_attention_mask: torch.Tensor
     doc_input_ids, doc_attention_mask = tokenize_docs(
@@ -179,6 +195,10 @@ def build_rerank_inputs(
         doc_texts,
         max_length=max_doc_length,
         max_padding=max_padding,
+    )
+    doc_pooling_mask: torch.Tensor = build_doc_pooling_mask(
+        doc_attention_mask,
+        model_cfg,
     )
 
     doc_mask: torch.Tensor
@@ -196,8 +216,10 @@ def build_rerank_inputs(
         doc_texts=doc_texts,
         query_input_ids=query_input_ids,
         query_attention_mask=query_attention_mask,
+        query_pooling_mask=query_pooling_mask,
         doc_input_ids=doc_input_ids,
         doc_attention_mask=doc_attention_mask,
+        doc_pooling_mask=doc_pooling_mask,
         doc_mask=doc_mask,
         pos_mask=pos_mask,
         teacher_scores=teacher_scores,

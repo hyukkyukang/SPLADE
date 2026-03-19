@@ -29,9 +29,11 @@ def build_splade_model(cfg: DictConfig, *, use_cpu: bool) -> SpladeModel:
     dtype: torch.dtype | None = resolve_model_dtype(cfg.model.dtype, use_cpu)
     # Detect SPLADE-doc mode via explicit flag or config name suffix.
     name_value: str = str(cfg.model.name).lower()
+    family_value: str = str(cfg.model.get("family", "splade")).lower()
     doc_only_flag: bool = bool(cfg.model.doc_only)
     doc_only: bool = doc_only_flag or name_value.endswith(("_doc", "-doc"))
     return SpladeModel(
+        family=family_value,
         model_name=cfg.model.huggingface_name,
         huggingface_model_class=str(cfg.model.huggingface_model_class),
         query_pooling=cfg.model.query_pooling,
@@ -42,6 +44,7 @@ def build_splade_model(cfg: DictConfig, *, use_cpu: bool) -> SpladeModel:
         normalize=cfg.model.normalize,
         doc_only=doc_only,
         tie_word_embeddings=cfg.model.tie_word_embeddings,
+        peft_cfg=cfg.model.get("peft"),
         freeze_backbone=bool(cfg.model.get("freeze_backbone", False)),
     )
 
@@ -312,6 +315,7 @@ def apply_checkpoint_model_config(
 
     summary_keys: tuple[str, ...] = (
         "name",
+        "family",
         "huggingface_name",
         "dtype",
         "doc_only",

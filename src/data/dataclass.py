@@ -83,9 +83,11 @@ class RerankingDataItem:
     # Shape: (seq_len,)
     query_input_ids: torch.Tensor
     query_attention_mask: torch.Tensor
+    query_pooling_mask: torch.Tensor
     # Shape: (num_docs, seq_len)
     doc_input_ids: torch.Tensor
     doc_attention_mask: torch.Tensor
+    doc_pooling_mask: torch.Tensor
     # Shape: (num_docs,)
     doc_mask: torch.Tensor
     pos_mask: torch.Tensor
@@ -103,6 +105,7 @@ class RetrievalDataItem:
     # Shape: (num_windows, seq_len)
     query_input_ids: torch.Tensor
     query_attention_mask: torch.Tensor
+    query_pooling_mask: torch.Tensor
 
 
 @dataclass(frozen=True)
@@ -114,6 +117,7 @@ class EncodingDataItem:
     # Shape: (num_windows, seq_len)
     doc_input_ids: torch.Tensor
     doc_attention_mask: torch.Tensor
+    doc_pooling_mask: torch.Tensor
 
 
 @dataclass(frozen=True)

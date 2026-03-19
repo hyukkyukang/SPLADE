@@ -98,12 +98,16 @@ class RetrievalEvalLightningModule(L.LightningModule):
         query_attention_mask: torch.Tensor = batch["query_attention_mask"].to(
             self.device
         )
+        query_pooling_mask: torch.Tensor | None = batch.get("query_pooling_mask")
+        if query_pooling_mask is not None:
+            query_pooling_mask = query_pooling_mask.to(self.device)
         query_indptr: torch.Tensor = batch["query_indptr"]
         query_reps: torch.Tensor = self._retrieval_helper.encode_queries(
             self.model,
             query_input_ids,
             query_attention_mask,
             self._torch_compile_mark_step,
+            query_pooling_mask=query_pooling_mask,
             query_indptr=query_indptr,
         )
         scored_results = self._retrieval_helper.score_queries(

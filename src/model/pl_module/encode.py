@@ -246,6 +246,7 @@ class SPLADEEncodeModule(L.LightningModule):
         self,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
+        pooling_mask: torch.Tensor | None,
         doc_indptr: Sequence[int] | torch.Tensor,
     ) -> torch.Tensor:
         max_windows_per_forward: int | None = self._max_windows_per_forward
@@ -281,6 +282,9 @@ class SPLADEEncodeModule(L.LightningModule):
             real_count: int = end_idx - start_idx
             chunk_input_ids: torch.Tensor = input_ids[start_idx:end_idx]
             chunk_attention_mask: torch.Tensor = attention_mask[start_idx:end_idx]
+            chunk_pooling_mask: torch.Tensor | None = (
+                None if pooling_mask is None else pooling_mask[start_idx:end_idx]
+            )
             if self._use_fixed_window_chunks and real_count < chunk_size:
                 pad_rows: int = chunk_size - real_count
                 chunk_input_ids = F.pad(
@@ -293,11 +297,18 @@ class SPLADEEncodeModule(L.LightningModule):
                     (0, 0, 0, pad_rows),
                     value=0,
                 )
+                if chunk_pooling_mask is not None:
+                    chunk_pooling_mask = F.pad(
+                        chunk_pooling_mask,
+                        (0, 0, 0, pad_rows),
+                        value=0,
+                    )
             if self._torch_compile_mark_step is not None:
                 self._torch_compile_mark_step()
             chunk_representations: torch.Tensor = self.model.encode_docs(
                 chunk_input_ids,
                 chunk_attention_mask,
+                pooling_mask=chunk_pooling_mask,
             )[:real_count]
             if aggregated is None:
                 if pooling_mode == "sum":
@@ -424,6 +435,7 @@ class SPLADEEncodeModule(L.LightningModule):
         doc_ids: list[str] = list(batch["doc_ids"])
         doc_input_ids: torch.Tensor = batch["doc_input_ids"]
         doc_attention_mask: torch.Tensor = batch["doc_attention_mask"]
+        doc_pooling_mask: torch.Tensor | None = batch.get("doc_pooling_mask")
         doc_indptr: torch.Tensor = batch["doc_indptr"]
         if doc_input_ids.ndim != 2 or doc_attention_mask.ndim != 2:
             raise ValueError("Encoding batches must have shape (windows, seq_len).")
@@ -435,9 +447,15 @@ class SPLADEEncodeModule(L.LightningModule):
         flattened_attention_mask: torch.Tensor = doc_attention_mask.to(
             self.device, non_blocking=True
         )
+        flattened_pooling_mask: torch.Tensor | None = None
+        if doc_pooling_mask is not None:
+            flattened_pooling_mask = doc_pooling_mask.to(
+                self.device, non_blocking=True
+            )
         doc_reps: torch.Tensor = self._encode_and_aggregate_window_batch(
             flattened_input_ids,
             flattened_attention_mask,
+            flattened_pooling_mask,
             doc_indptr,
         )
         indptr, indices, values = self._sparsify_batch(doc_reps)

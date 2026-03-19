@@ -83,6 +83,7 @@ class TrainDataModule(L.LightningDataModule):
         return TrainingPDModule(
             cfg=cfg,
             tokenizer=self.tokenizer,
+            model_cfg=self.cfg.model,
             seed=int(self.cfg.seed),
             load_teacher_scores=resolved_load,
             require_teacher_scores=resolved_require,

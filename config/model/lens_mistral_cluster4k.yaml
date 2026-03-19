@@ -1,0 +1,46 @@
+# @package model
+defaults:
+  - _base
+
+name: lens_mistral_cluster4k
+family: lens
+# Expected artifact dir from the LENS model-creation pipeline.
+huggingface_name: outputs/model_creation/lens/mistral_cluster4k
+huggingface_model_class: MistralBiForCausalLM
+trust_remote_code: false
+use_fast_tokenizer: true
+require_fast_tokenizer: true
+
+dtype: bfloat16
+attn_implementation: sdpa
+tie_word_embeddings: false
+freeze_backbone: false
+bidirectional: true
+
+query_pooling: max
+doc_pooling: max
+sparse_activation: log1p_relu
+normalize: false
+benchmark_adapter: native
+instruction_text: "Represent this query for retrieving relevant documents."
+doc_trim_last_tokens: 2
+
+peft:
+  enabled: true
+  method: lora
+  task_type: auto
+  r: 32
+  alpha: 64
+  dropout: 0.1
+  bias: none
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - down_proj
+    - up_proj
+  modules_to_save: null
+  fan_in_fan_out: false
+  inference_mode: false

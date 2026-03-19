@@ -29,6 +29,31 @@ class ModelUtilsCheckpointNormalizationTest(unittest.TestCase):
         self.assertEqual(normalized["encoder.mlm.weight"], 9)
         self.assertEqual(normalized["_query_encoder_wrapper.encoder.mlm.weight"], 9)
 
+    def test_normalizes_peft_lora_keys_under_compiled_encoder_wrappers(self) -> None:
+        normalized = _normalize_checkpoint_state_dict(
+            {
+                (
+                    "model._query_encoder_fn._encoder_fn._orig_mod.mlm.base_model."
+                    "model.model.layers.0.self_attn.q_proj.lora_A.default.weight"
+                ): 3,
+            }
+        )
+
+        canonical_key = (
+            "encoder.mlm.base_model.model.model.layers.0.self_attn.q_proj."
+            "lora_A.default.weight"
+        )
+        self.assertEqual(normalized[canonical_key], 3)
+        self.assertEqual(
+            normalized[
+                (
+                    "_query_encoder_wrapper.encoder.mlm.base_model.model.model."
+                    "layers.0.self_attn.q_proj.lora_A.default.weight"
+                )
+            ],
+            3,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

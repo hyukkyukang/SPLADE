@@ -26,11 +26,17 @@ class _SharedCompiledEncoderAdapter(torch.nn.Module):
         self._encoder_fn: Callable[..., torch.Tensor] = encoder_fn
         self.register_buffer("_pooling_mode", pooling_mode, persistent=False)
 
-    def forward(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        pooling_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         return self._encoder_fn(
             input_ids=input_ids,
             attention_mask=attention_mask,
             pooling_mode=self._pooling_mode,
+            pooling_mask=pooling_mask,
         )
 
 
@@ -141,6 +147,9 @@ class TrainingCompilePolicyManager:
         encoder_obj: Any = getattr(self.model, "encoder", None)
         freeze_backbone: bool = bool(getattr(encoder_obj, "freeze_backbone", False))
         doc_only_enabled: bool = bool(getattr(self.model, "doc_only", False))
+        peft_enabled: bool = bool(getattr(self.model, "peft_enabled", False)) or bool(
+            getattr(encoder_obj, "peft_enabled", False)
+        )
         try:
             vocab_size: int = int(getattr(encoder_obj, "vocab_size", 0))
         except Exception:
@@ -334,6 +343,14 @@ class TrainingCompilePolicyManager:
                 "compile.",
                 level="warning",
             )
+        if compile_full_model and peft_enabled:
+            compile_full_model = False
+            log_if_rank_zero(
+                self.logger,
+                "Falling back to wrapper-only torch.compile because PEFT-wrapped "
+                "models are not enabled for the full-model compile path.",
+                level="warning",
+            )
         if compile_full_model:
             if not runtime_settings.full_model_compile_safe:
                 compile_full_model = False
@@ -469,6 +486,8 @@ class TrainingCompilePolicyManager:
         query_attention_mask: torch.Tensor,
         doc_input_ids: torch.Tensor,
         doc_attention_mask: torch.Tensor,
+        query_pooling_mask: torch.Tensor | None = None,
+        doc_pooling_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if not self.can_fuse_query_doc_encoding():
             raise RuntimeError(
@@ -482,6 +501,15 @@ class TrainingCompilePolicyManager:
         )
         combined_attention_mask: torch.Tensor = torch.cat(
             (query_attention_mask, doc_attention_mask), dim=0
+        )
+        resolved_query_pooling_mask: torch.Tensor = (
+            query_attention_mask if query_pooling_mask is None else query_pooling_mask
+        )
+        resolved_doc_pooling_mask: torch.Tensor = (
+            doc_attention_mask if doc_pooling_mask is None else doc_pooling_mask
+        )
+        combined_pooling_mask: torch.Tensor = torch.cat(
+            (resolved_query_pooling_mask, resolved_doc_pooling_mask), dim=0
         )
         pooling_mode: torch.Tensor = cast(torch.Tensor, model._query_pooling_mode)
         encoder_fn: Callable[..., torch.Tensor]
@@ -498,6 +526,7 @@ class TrainingCompilePolicyManager:
             input_ids=combined_input_ids,
             attention_mask=combined_attention_mask,
             pooling_mode=pooling_mode,
+            pooling_mask=combined_pooling_mask,
         )
         query_reps: torch.Tensor = combined_reps[:query_batch_size]
         doc_reps: torch.Tensor = combined_reps[query_batch_size:]

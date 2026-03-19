@@ -85,7 +85,7 @@ class UniversalCollator:
 
     def _pad_query(
         self, batch: Sequence[RerankingDataItem | RetrievalDataItem]
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if self.max_padding:
             max_query_length: int = self._require_fixed_query_length()
             batch_size: int = len(batch)
@@ -95,6 +95,9 @@ class UniversalCollator:
                 dtype=torch.long,
             )
             query_attention_mask: torch.Tensor = torch.zeros(
+                (batch_size, max_query_length), dtype=torch.long
+            )
+            query_pooling_mask: torch.Tensor = torch.zeros(
                 (batch_size, max_query_length), dtype=torch.long
             )
             for batch_idx, item in enumerate(batch):
@@ -109,7 +112,10 @@ class UniversalCollator:
                 query_attention_mask[batch_idx, :query_len] = item.query_attention_mask[
                     :query_len
                 ]
-            return query_input_ids, query_attention_mask
+                query_pooling_mask[batch_idx, :query_len] = item.query_pooling_mask[
+                    :query_len
+                ]
+            return query_input_ids, query_attention_mask, query_pooling_mask
 
         query_input_ids = pad_sequence(
             [item.query_input_ids for item in batch],
@@ -121,11 +127,23 @@ class UniversalCollator:
             batch_first=True,
             padding_value=0,
         )
-        return query_input_ids, query_attention_mask
+        query_pooling_mask = pad_sequence(
+            [item.query_pooling_mask for item in batch],
+            batch_first=True,
+            padding_value=0,
+        )
+        return query_input_ids, query_attention_mask, query_pooling_mask
 
     def _pad_docs(
         self, batch: Sequence[RerankingDataItem]
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+    ]:
         if self.max_padding:
             max_doc_length, max_docs = self._require_fixed_doc_sizes()
             batch_size: int = len(batch)
@@ -135,6 +153,9 @@ class UniversalCollator:
                 dtype=torch.long,
             )
             doc_attention_mask: torch.Tensor = torch.zeros(
+                (batch_size, max_docs, max_doc_length), dtype=torch.long
+            )
+            doc_pooling_mask: torch.Tensor = torch.zeros(
                 (batch_size, max_docs, max_doc_length), dtype=torch.long
             )
             doc_mask: torch.Tensor = torch.zeros(
@@ -158,10 +179,20 @@ class UniversalCollator:
                 doc_attention_mask[batch_idx, :doc_count, :doc_len] = (
                     item.doc_attention_mask[:doc_count, :doc_len]
                 )
+                doc_pooling_mask[batch_idx, :doc_count, :doc_len] = (
+                    item.doc_pooling_mask[:doc_count, :doc_len]
+                )
                 doc_mask[batch_idx, :doc_count] = item.doc_mask[:doc_count]
                 pos_mask[batch_idx, :doc_count] = item.pos_mask[:doc_count]
                 teacher_scores[batch_idx, :doc_count] = item.teacher_scores[:doc_count]
-            return doc_input_ids, doc_attention_mask, doc_mask, pos_mask, teacher_scores
+            return (
+                doc_input_ids,
+                doc_attention_mask,
+                doc_pooling_mask,
+                doc_mask,
+                pos_mask,
+                teacher_scores,
+            )
 
         max_docs: int = max(int(item.doc_input_ids.shape[0]) for item in batch)
         max_doc_len: int = max(int(item.doc_input_ids.shape[1]) for item in batch)
@@ -171,6 +202,9 @@ class UniversalCollator:
             dtype=torch.long,
         )
         doc_attention_mask = torch.zeros(
+            (len(batch), max_docs, max_doc_len), dtype=torch.long
+        )
+        doc_pooling_mask = torch.zeros(
             (len(batch), max_docs, max_doc_len), dtype=torch.long
         )
         doc_mask = torch.zeros((len(batch), max_docs), dtype=torch.bool)
@@ -188,21 +222,33 @@ class UniversalCollator:
             doc_attention_mask[batch_idx, :doc_count, :doc_len] = (
                 item.doc_attention_mask
             )
+            doc_pooling_mask[batch_idx, :doc_count, :doc_len] = item.doc_pooling_mask
             doc_mask[batch_idx, :doc_count] = item.doc_mask
             pos_mask[batch_idx, :doc_count] = item.pos_mask
             teacher_scores[batch_idx, :doc_count] = item.teacher_scores
 
-        return doc_input_ids, doc_attention_mask, doc_mask, pos_mask, teacher_scores
+        return (
+            doc_input_ids,
+            doc_attention_mask,
+            doc_pooling_mask,
+            doc_mask,
+            pos_mask,
+            teacher_scores,
+        )
 
     def _collate_reranking(
         self, batch: Sequence[RerankingDataItem]
     ) -> dict[str, torch.Tensor]:
         query_input_ids: torch.Tensor
         query_attention_mask: torch.Tensor
-        query_input_ids, query_attention_mask = self._pad_query(batch)
+        query_pooling_mask: torch.Tensor
+        query_input_ids, query_attention_mask, query_pooling_mask = self._pad_query(
+            batch
+        )
         (
             doc_input_ids,
             doc_attention_mask,
+            doc_pooling_mask,
             doc_mask,
             pos_mask,
             teacher_scores,
@@ -216,8 +262,10 @@ class UniversalCollator:
         return {
             "query_input_ids": query_input_ids,
             "query_attention_mask": query_attention_mask,
+            "query_pooling_mask": query_pooling_mask,
             "doc_input_ids": doc_input_ids,
             "doc_attention_mask": doc_attention_mask,
+            "doc_pooling_mask": doc_pooling_mask,
             "doc_mask": doc_mask,
             "pos_mask": pos_mask,
             "teacher_scores": teacher_scores,
@@ -249,14 +297,19 @@ class UniversalCollator:
         query_attention_mask: torch.Tensor = torch.zeros(
             (total_windows, resolved_max_query_length), dtype=torch.long
         )
+        query_pooling_mask: torch.Tensor = torch.zeros(
+            (total_windows, resolved_max_query_length), dtype=torch.long
+        )
         query_indptr: torch.Tensor = torch.zeros(batch_size + 1, dtype=torch.int64)
         window_offset: int = 0
         for batch_idx, item in enumerate(batch):
             item_input_ids = item.query_input_ids
             item_attention_mask: torch.Tensor = item.query_attention_mask
+            item_pooling_mask: torch.Tensor = item.query_pooling_mask
             if item_input_ids.ndim == 1:
                 item_input_ids = item_input_ids.unsqueeze(0)
                 item_attention_mask = item_attention_mask.unsqueeze(0)
+                item_pooling_mask = item_pooling_mask.unsqueeze(0)
             window_count: int = int(item_input_ids.shape[0])
             query_indptr[batch_idx + 1] = query_indptr[batch_idx] + window_count
             if window_count == 0:
@@ -271,6 +324,9 @@ class UniversalCollator:
             query_attention_mask[
                 window_offset:next_offset, :query_len
             ] = item_attention_mask[:window_count, :query_len]
+            query_pooling_mask[
+                window_offset:next_offset, :query_len
+            ] = item_pooling_mask[:window_count, :query_len]
             window_offset = next_offset
         qids: list[str] = [item.qid for item in batch]
         query_texts: list[str] = [item.query_text for item in batch]
@@ -280,6 +336,7 @@ class UniversalCollator:
         return {
             "query_input_ids": query_input_ids,
             "query_attention_mask": query_attention_mask,
+            "query_pooling_mask": query_pooling_mask,
             "query_indptr": query_indptr,
             "qid": qids,
             "query_text": query_texts,
@@ -347,6 +404,9 @@ class UniversalCollator:
         doc_attention_mask = torch.zeros(
             (total_windows, resolved_max_doc_length), dtype=torch.long
         )
+        doc_pooling_mask = torch.zeros(
+            (total_windows, resolved_max_doc_length), dtype=torch.long
+        )
         doc_indptr: torch.Tensor = torch.zeros(batch_size + 1, dtype=torch.int64)
         window_offset: int = 0
         for batch_idx, item in enumerate(batch):
@@ -364,10 +424,14 @@ class UniversalCollator:
             doc_attention_mask[window_offset:next_offset, :doc_len] = (
                 item.doc_attention_mask[:window_count, :doc_len]
             )
+            doc_pooling_mask[window_offset:next_offset, :doc_len] = (
+                item.doc_pooling_mask[:window_count, :doc_len]
+            )
             window_offset = next_offset
         return {
             "doc_ids": doc_ids,
             "doc_input_ids": doc_input_ids,
             "doc_attention_mask": doc_attention_mask,
+            "doc_pooling_mask": doc_pooling_mask,
             "doc_indptr": doc_indptr,
         }

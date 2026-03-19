@@ -3,17 +3,32 @@ from typing import Any, Iterable, Sequence
 
 import numpy as np
 import torch
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from sentence_transformers import SparseEncoder
 from sentence_transformers.models import Normalize
 from sentence_transformers.sparse_encoder.models import MLMTransformer, SpladePooling
 from transformers import PreTrainedTokenizerBase
 
+from src.data.lens_formatting import (
+    build_doc_pooling_mask,
+    build_query_pooling_mask,
+    format_query_text,
+    resolve_instruction_text,
+    validate_lens_tokenizer,
+)
 from src.utils.logging import get_logger
+from src.utils.lens_instructions import resolve_benchmark_instruction
 from src.utils.model_utils import resolve_model_dtype
+from src.utils.normalize import normalize_optional_str
+from src.utils.peft import is_peft_enabled
 from src.utils.transformers import build_tokenizer, resolve_model_name_or_path
 
 logger = get_logger("src.utils.sparse_encoder")
+_VALID_BENCHMARK_ADAPTERS: set[str] = {
+    "auto",
+    "native",
+    "sentence_transformers",
+}
 
 
 @dataclass
@@ -37,14 +52,41 @@ class _ModelCardDataStub:
         _ = evaluator, metrics, epoch, step
 
 
-class DocOnlySparseEncoderAdapter:
-    """Adapter to evaluate SPLADE-doc models with NanoBEIR evaluators."""
+def _clone_model_cfg_with_instruction(
+    model_cfg: DictConfig, instruction_text: str
+) -> DictConfig:
+    copied_cfg: DictConfig = OmegaConf.create(
+        OmegaConf.to_container(model_cfg, resolve=False)
+    )
+    copied_cfg.instruction_text = instruction_text
+    return copied_cfg
+
+
+def _resolve_query_model_cfg(
+    model_cfg: DictConfig,
+    *,
+    prompt_name: str | None,
+    prompt: str | None,
+) -> DictConfig:
+    instruction_text: str = resolve_benchmark_instruction(
+        model_cfg,
+        prompt_name=prompt_name,
+        prompt=prompt,
+    )
+    if instruction_text == resolve_instruction_text(model_cfg):
+        return model_cfg
+    return _clone_model_cfg_with_instruction(model_cfg, instruction_text)
+
+
+class NativeSparseEncoderAdapter:
+    """Adapter to evaluate in-memory sparse models without MLMTransformer."""
 
     def __init__(
         self,
         model: torch.nn.Module,
         tokenizer: PreTrainedTokenizerBase,
         *,
+        model_cfg: DictConfig,
         device: torch.device,
         batch_size: int,
         max_query_length: int,
@@ -52,6 +94,7 @@ class DocOnlySparseEncoderAdapter:
     ) -> None:
         self.model: torch.nn.Module = model
         self.tokenizer: PreTrainedTokenizerBase = tokenizer
+        self.model_cfg: DictConfig = model_cfg
         self.device: torch.device = device
         self.batch_size: int = int(batch_size)
         self.max_query_length: int = int(max_query_length)
@@ -87,10 +130,12 @@ class DocOnlySparseEncoderAdapter:
         max_active_dims: int | None = None,
         **kwargs: Any,
     ) -> torch.Tensor:
-        _ = prompt_name, prompt, kwargs
+        _ = kwargs
         if is_query:
             return self.encode_query(
                 sentences,
+                prompt_name=prompt_name,
+                prompt=prompt,
                 batch_size=batch_size,
                 show_progress_bar=show_progress_bar,
                 convert_to_sparse_tensor=convert_to_sparse_tensor,
@@ -99,6 +144,8 @@ class DocOnlySparseEncoderAdapter:
             )
         return self.encode_document(
             sentences,
+            prompt_name=prompt_name,
+            prompt=prompt,
             batch_size=batch_size,
             show_progress_bar=show_progress_bar,
             convert_to_sparse_tensor=convert_to_sparse_tensor,
@@ -128,6 +175,9 @@ class DocOnlySparseEncoderAdapter:
             convert_to_sparse_tensor=convert_to_sparse_tensor,
             save_to_cpu=save_to_cpu,
             max_active_dims=max_active_dims,
+            is_query=True,
+            prompt_name=prompt_name,
+            prompt=prompt,
             encode_fn=self.model.encode_queries,
         )
 
@@ -153,7 +203,35 @@ class DocOnlySparseEncoderAdapter:
             convert_to_sparse_tensor=convert_to_sparse_tensor,
             save_to_cpu=save_to_cpu,
             max_active_dims=max_active_dims,
+            is_query=False,
+            prompt_name=prompt_name,
+            prompt=prompt,
             encode_fn=self.model.encode_docs,
+        )
+
+    def encode_corpus(
+        self,
+        sentences: str | Sequence[str] | np.ndarray,
+        *,
+        prompt_name: str | None = None,
+        prompt: str | None = None,
+        batch_size: int | None = None,
+        show_progress_bar: bool = False,
+        convert_to_sparse_tensor: bool = True,
+        save_to_cpu: bool = True,
+        max_active_dims: int | None = None,
+        **kwargs: Any,
+    ) -> torch.Tensor:
+        return self.encode_document(
+            sentences,
+            prompt_name=prompt_name,
+            prompt=prompt,
+            batch_size=batch_size,
+            show_progress_bar=show_progress_bar,
+            convert_to_sparse_tensor=convert_to_sparse_tensor,
+            save_to_cpu=save_to_cpu,
+            max_active_dims=max_active_dims,
+            **kwargs,
         )
 
     def _encode_texts(
@@ -166,6 +244,9 @@ class DocOnlySparseEncoderAdapter:
         convert_to_sparse_tensor: bool,
         save_to_cpu: bool,
         max_active_dims: int | None,
+        is_query: bool,
+        prompt_name: str | None,
+        prompt: str | None,
         encode_fn: Any,
     ) -> torch.Tensor:
         text_list: list[str]
@@ -188,11 +269,23 @@ class DocOnlySparseEncoderAdapter:
             text_list, batch_size_value, show_progress_bar
         )
         outputs: list[torch.Tensor] = []
+        query_model_cfg: DictConfig | None = None
+        if is_query:
+            query_model_cfg = _resolve_query_model_cfg(
+                self.model_cfg,
+                prompt_name=prompt_name,
+                prompt=prompt,
+            )
         self.model.eval()
         with torch.no_grad():
             for batch in batches:
+                batch_texts: list[str] = batch
+                if is_query:
+                    batch_texts = [
+                        format_query_text(text, query_model_cfg) for text in batch
+                    ]
                 tokens: dict[str, torch.Tensor] = self.tokenizer(
-                    batch,
+                    batch_texts,
                     padding=True,
                     truncation=True,
                     max_length=int(max_length),
@@ -200,7 +293,24 @@ class DocOnlySparseEncoderAdapter:
                 )
                 input_ids: torch.Tensor = tokens["input_ids"].to(self.device)
                 attention_mask: torch.Tensor = tokens["attention_mask"].to(self.device)
-                batch_reps: torch.Tensor = encode_fn(input_ids, attention_mask)
+                pooling_mask: torch.Tensor
+                if is_query:
+                    pooling_mask = build_query_pooling_mask(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        tokenizer=self.tokenizer,
+                        model_cfg=query_model_cfg,
+                    ).to(self.device)
+                else:
+                    pooling_mask = build_doc_pooling_mask(
+                        attention_mask=attention_mask,
+                        model_cfg=self.model_cfg,
+                    ).to(self.device)
+                batch_reps: torch.Tensor = encode_fn(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    pooling_mask=pooling_mask,
+                )
                 outputs.append(batch_reps)
 
         embeddings: torch.Tensor = torch.cat(outputs, dim=0)
@@ -211,6 +321,9 @@ class DocOnlySparseEncoderAdapter:
         if save_to_cpu:
             embeddings = embeddings.to(device=torch.device("cpu"))
         return embeddings
+
+
+DocOnlySparseEncoderAdapter = NativeSparseEncoderAdapter
 
 
 def _batch_texts(
@@ -271,6 +384,77 @@ def resolve_nanobeir_compatibility(cfg: DictConfig) -> tuple[bool, str | None]:
     return True, None
 
 
+def resolve_benchmark_adapter(
+    model_cfg: DictConfig | None,
+) -> str:
+    raw_value: str = normalize_optional_str(
+        model_cfg.get("benchmark_adapter") if model_cfg is not None else None
+    ) or "auto"
+    resolved_value: str = raw_value.lower().replace("-", "_")
+    if resolved_value not in _VALID_BENCHMARK_ADAPTERS:
+        raise ValueError(
+            "model.benchmark_adapter must be one of: auto, native, "
+            f"sentence_transformers. Got: {raw_value!r}"
+        )
+    return resolved_value
+
+
+def resolve_nanobeir_backend(
+    cfg: DictConfig,
+    *,
+    doc_only_enabled: bool | None = None,
+) -> tuple[str, str | None]:
+    model_cfg: DictConfig = cfg.model
+    benchmark_adapter: str = resolve_benchmark_adapter(model_cfg)
+    family: str = str(model_cfg.get("family", "splade")).strip().lower()
+    peft_cfg: DictConfig | None = (
+        model_cfg.get("peft") if "peft" in model_cfg else None
+    )
+    if bool(doc_only_enabled) or bool(model_cfg.get("doc_only", False)):
+        return "native", "model.doc_only requires native sparse query encoding."
+    if family == "lens":
+        return "native", "model.family=lens requires the native benchmark adapter."
+    if is_peft_enabled(peft_cfg):
+        return "native", "PEFT-wrapped models require the native benchmark adapter."
+
+    compatible: bool
+    reason: str | None
+    compatible, reason = resolve_nanobeir_compatibility(cfg)
+    if not compatible:
+        return "native", reason
+
+    if benchmark_adapter == "native":
+        return "native", "model.benchmark_adapter=native"
+    return "sentence_transformers", None
+
+
+def build_native_sparse_encoder_adapter(
+    cfg: DictConfig,
+    model: torch.nn.Module,
+    *,
+    device: torch.device,
+    batch_size: int,
+) -> NativeSparseEncoderAdapter:
+    """Build a native sparse adapter for models not served by MLMTransformer."""
+    tokenizer: PreTrainedTokenizerBase = build_tokenizer(
+        str(cfg.model.huggingface_name),
+        use_fast_tokenizer=bool(cfg.model.use_fast_tokenizer),
+        trust_remote_code=bool(cfg.model.trust_remote_code),
+        require_fast_tokenizer=bool(cfg.model.require_fast_tokenizer),
+    )
+    validate_lens_tokenizer(tokenizer, cfg.model)
+    max_length: int = int(cfg.nanobeir.max_seq_length)
+    return NativeSparseEncoderAdapter(
+        model=model,
+        tokenizer=tokenizer,
+        model_cfg=cfg.model,
+        device=device,
+        batch_size=int(batch_size),
+        max_query_length=max_length,
+        max_doc_length=max_length,
+    )
+
+
 def build_doc_only_sparse_encoder_adapter(
     cfg: DictConfig,
     model: torch.nn.Module,
@@ -278,21 +462,12 @@ def build_doc_only_sparse_encoder_adapter(
     device: torch.device,
     batch_size: int,
 ) -> DocOnlySparseEncoderAdapter:
-    """Build a NanoBEIR adapter for SPLADE-doc query encoding."""
-    tokenizer: PreTrainedTokenizerBase = build_tokenizer(
-        str(cfg.model.huggingface_name),
-        use_fast_tokenizer=bool(cfg.model.use_fast_tokenizer),
-        trust_remote_code=bool(cfg.model.trust_remote_code),
-        require_fast_tokenizer=bool(cfg.model.require_fast_tokenizer),
-    )
-    max_length: int = int(cfg.nanobeir.max_seq_length)
-    return DocOnlySparseEncoderAdapter(
+    """Backward-compatible alias for the native sparse adapter builder."""
+    return build_native_sparse_encoder_adapter(
+        cfg=cfg,
         model=model,
-        tokenizer=tokenizer,
         device=device,
-        batch_size=int(batch_size),
-        max_query_length=max_length,
-        max_doc_length=max_length,
+        batch_size=batch_size,
     )
 
 

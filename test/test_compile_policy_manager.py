@@ -10,10 +10,17 @@ from src.utils.logging import get_logger
 
 
 class _DummyEncoder(torch.nn.Module):
-    def __init__(self, *, freeze_backbone: bool, vocab_size: int = 30522) -> None:
+    def __init__(
+        self,
+        *,
+        freeze_backbone: bool,
+        vocab_size: int = 30522,
+        peft_enabled: bool = False,
+    ) -> None:
         super().__init__()
         self.freeze_backbone = bool(freeze_backbone)
         self.vocab_size = int(vocab_size)
+        self.peft_enabled = bool(peft_enabled)
 
     def forward(
         self,
@@ -21,8 +28,9 @@ class _DummyEncoder(torch.nn.Module):
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
         pooling_mode: torch.Tensor,
+        pooling_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        _ = attention_mask
+        _ = attention_mask, pooling_mask
         return input_ids.float() + pooling_mode.float()
 
 
@@ -32,11 +40,17 @@ class _DummyWrapper(torch.nn.Module):
         self._encoder = encoder
         self._pooling_mode = pooling_mode
 
-    def forward(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        pooling_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         return self._encoder(
             input_ids=input_ids,
             attention_mask=attention_mask,
             pooling_mode=self._pooling_mode,
+            pooling_mask=pooling_mask,
         )
 
 
@@ -47,11 +61,13 @@ class _DummyModel(torch.nn.Module):
         freeze_backbone: bool,
         vocab_size: int = 30522,
         doc_only: bool = False,
+        peft_enabled: bool = False,
     ) -> None:
         super().__init__()
         self.encoder = _DummyEncoder(
             freeze_backbone=freeze_backbone,
             vocab_size=vocab_size,
+            peft_enabled=peft_enabled,
         )
         self._query_pooling_mode = torch.tensor(1.0)
         self._doc_pooling_mode = torch.tensor(2.0)
@@ -66,6 +82,7 @@ class _DummyModel(torch.nn.Module):
         self._query_encoder_fn = self._query_encoder_wrapper
         self._doc_encoder_fn = self._doc_encoder_wrapper
         self.doc_only = bool(doc_only)
+        self.peft_enabled = bool(peft_enabled)
 
 
 class _DeviceTrackingModule(torch.nn.Module):
@@ -216,6 +233,30 @@ class CompilePolicyManagerTest(unittest.TestCase):
         self.assertTrue(manager.compile_enabled_for_current_stage)
         # doc_only keeps the bag-of-words query path eager and compiles docs only.
         self.assertEqual(compile_mock.call_count, 1)
+
+    def test_peft_never_uses_full_model_compile(self) -> None:
+        model = _DummyModel(
+            freeze_backbone=True,
+            vocab_size=30522,
+            peft_enabled=True,
+        )
+        manager = TrainingCompilePolicyManager(
+            model=model,
+            logger=get_logger("test.compile_policy.peft"),
+        )
+        cfg = _build_training_cfg(
+            torch_compile_mode="max-autotune",
+            strategy="single",
+            num_devices=1,
+        )
+
+        with patch("torch.compile", side_effect=lambda module, **kwargs: module) as compile_mock:
+            manager.setup(cfg)
+
+        self.assertTrue(manager.torch_compile_enabled)
+        self.assertFalse(manager.torch_compile_full_model)
+        self.assertTrue(manager.compile_enabled_for_current_stage)
+        self.assertEqual(compile_mock.call_count, 2)
 
     def test_prepare_for_device_moves_wrapper_modules(self) -> None:
         model = _DummyModel(freeze_backbone=True, vocab_size=30522)

@@ -7,6 +7,7 @@ from torch.utils.data import DataLoader, Dataset, Sampler
 from torch.utils.data.distributed import DistributedSampler
 from transformers import PreTrainedTokenizerBase
 
+from src.data.lens_formatting import validate_lens_tokenizer
 from src.utils.transformers import build_tokenizer
 
 
@@ -43,6 +44,7 @@ def build_model_tokenizer(model_cfg: DictConfig) -> PreTrainedTokenizerBase:
     )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token or tokenizer.cls_token
+    validate_lens_tokenizer(tokenizer, model_cfg)
     return tokenizer
 
 

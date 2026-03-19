@@ -11,6 +11,10 @@ from omegaconf import DictConfig
 from transformers import PreTrainedTokenizerBase
 
 from src.data.collator import UniversalCollator
+from src.data.lens_formatting import (
+    build_query_pooling_mask,
+    format_query_text,
+)
 from src.data.dataclass import RetrievalDataItem
 from src.data.pd_module import PDModule
 from src.data.pd_module.utils import tokenize_text, tokenize_text_windows
@@ -31,6 +35,7 @@ class RetrievalPDModule(PDModule):
         cfg: DictConfig,
         tokenizer: PreTrainedTokenizerBase,
         *,
+        model_cfg: DictConfig | None = None,
         seed: int,
         load_teacher_scores: bool | None = None,
         require_teacher_scores: bool | None = None,
@@ -38,6 +43,7 @@ class RetrievalPDModule(PDModule):
         super().__init__(
             cfg=cfg,
             tokenizer=tokenizer,
+            model_cfg=model_cfg,
             seed=seed,
             load_teacher_scores=load_teacher_scores,
             require_teacher_scores=require_teacher_scores,
@@ -119,9 +125,11 @@ class RetrievalPDModule(PDModule):
         self._ensure_query_index()
         qid: str = self._query_ids[int(idx)]
         query_idx: int = self._query_id_to_idx[qid]
-        query_text: str = self.dataset.query_text(query_idx)
+        raw_query_text: str = self.dataset.query_text(query_idx)
+        query_text: str = format_query_text(raw_query_text, self.model_cfg)
         query_input_ids: torch.Tensor
         query_attention_mask: torch.Tensor
+        query_pooling_mask: torch.Tensor
         if self._query_long_doc_strategy == "sliding_window":
             query_input_ids, query_attention_mask = tokenize_text_windows(
                 self.tokenizer,
@@ -129,6 +137,13 @@ class RetrievalPDModule(PDModule):
                 max_length=self.max_query_length,
                 max_padding=self.max_padding,
                 overlap_tokens=self._query_sliding_window_overlap_tokens,
+            )
+            query_pooling_mask = build_query_pooling_mask(
+                query_input_ids,
+                query_attention_mask,
+                self.tokenizer,
+                self.model_cfg,
+                missing_query_token_mode="keep",
             )
         else:
             single_input_ids: torch.Tensor
@@ -141,6 +156,12 @@ class RetrievalPDModule(PDModule):
             )
             query_input_ids = single_input_ids.unsqueeze(0)
             query_attention_mask = single_attention_mask.unsqueeze(0)
+            query_pooling_mask = build_query_pooling_mask(
+                query_input_ids,
+                query_attention_mask,
+                self.tokenizer,
+                self.model_cfg,
+            )
         return RetrievalDataItem(
             data_idx=int(idx),
             qid=qid,
@@ -148,6 +169,7 @@ class RetrievalPDModule(PDModule):
             query_text=query_text,
             query_input_ids=query_input_ids,
             query_attention_mask=query_attention_mask,
+            query_pooling_mask=query_pooling_mask,
         )
 
     # --- Property methods ---

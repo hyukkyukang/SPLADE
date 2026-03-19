@@ -4,7 +4,6 @@ import warnings
 from typing import Any
 
 import torch
-from dotenv import load_dotenv
 from omegaconf import DictConfig, OmegaConf
 
 from src.utils.logging import (
@@ -26,6 +25,13 @@ from src.utils.trainer import (
     get_gpu_trainer_kwargs,
     resolve_precision,
 )
+
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    def load_dotenv(*args: Any, **kwargs: Any) -> bool:
+        _ = args, kwargs
+        return False
 
 
 def normalize_tag(tag: object | None) -> str | None:

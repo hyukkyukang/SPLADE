@@ -4,6 +4,7 @@ from transformers import PreTrainedTokenizerBase
 
 from src.data.pd_module import PDModule
 from src.data.collator import UniversalCollator
+from src.data.lens_formatting import build_doc_pooling_mask
 from src.data.dataclass import EncodingDataItem
 from src.data.pd_module.utils import tokenize_text_windows
 
@@ -18,9 +19,15 @@ class EncodePDModule(PDModule):
         encoding_cfg: DictConfig,
         tokenizer: PreTrainedTokenizerBase,
         *,
+        model_cfg: DictConfig | None = None,
         seed: int,
     ) -> None:
-        super().__init__(cfg=cfg, tokenizer=tokenizer, seed=seed)
+        super().__init__(
+            cfg=cfg,
+            tokenizer=tokenizer,
+            model_cfg=model_cfg,
+            seed=seed,
+        )
         self.encoding_cfg: DictConfig = encoding_cfg
         self._collator: UniversalCollator | None = None
         strategy: str = str(
@@ -45,12 +52,18 @@ class EncodePDModule(PDModule):
         doc_text: str = self.dataset._corpus_text_from_row(row)
         doc_input_ids: torch.Tensor
         doc_attention_mask: torch.Tensor
+        doc_pooling_mask: torch.Tensor
         doc_input_ids, doc_attention_mask = self._tokenize_doc_text(doc_text)
+        doc_pooling_mask = build_doc_pooling_mask(
+            doc_attention_mask,
+            self.model_cfg,
+        )
         return EncodingDataItem(
             data_idx=int(idx),
             doc_id=doc_id,
             doc_input_ids=doc_input_ids,
             doc_attention_mask=doc_attention_mask,
+            doc_pooling_mask=doc_pooling_mask,
         )
 
     # --- Property methods ---

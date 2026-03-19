@@ -21,8 +21,10 @@ from src.prototype.embeddinggemma_lsr.cli import (
     resolve_torch_dtype,
 )
 from src.prototype.embeddinggemma_lsr.model import resolve_boundary_token_ids
-
-_COMPACT_HEAD_FILENAME: str = "splade_compact_head.pt"
+from src.utils.compact_head import (
+    COMPACT_HEAD_FILENAME,
+    build_token_aligned_compact_head_payload,
+)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -363,14 +365,24 @@ def _build_compact_head_payload(
         raise ValueError("No resolved terms were available to build compact head.")
     weight: torch.Tensor = torch.stack(weight_rows, dim=0).contiguous()
     bias: torch.Tensor = torch.tensor(bias_values, dtype=torch.float32)
-    return {
-        "weight": weight,
-        "bias": bias,
-        "terms": [term for term, _ in sorted(term_to_index.items(), key=lambda item: item[1])],
-        "token_ids": token_ids,
-        "term_to_index": term_to_index,
-        "term_to_token_id": {term: int(term_to_token_id[term]) for term in term_to_index},
-    }
+    return build_token_aligned_compact_head_payload(
+        weight=weight,
+        bias=bias,
+        token_ids=token_ids,
+        extra_metadata={
+            "terms": [
+                term
+                for term, _ in sorted(
+                    term_to_index.items(),
+                    key=lambda item: item[1],
+                )
+            ],
+            "term_to_index": term_to_index,
+            "term_to_token_id": {
+                term: int(term_to_token_id[term]) for term in term_to_index
+            },
+        },
+    )
 
 
 def main() -> None:
@@ -472,9 +484,10 @@ def main() -> None:
         df_map=df_map,
         alpha=float(args.alpha),
     )
-    compact_head_path: Path = output_dir / _COMPACT_HEAD_FILENAME
+    compact_head_path: Path = output_dir / COMPACT_HEAD_FILENAME
     torch.save(compact_head_payload, str(compact_head_path))
-    setattr(model.config, "splade_compact_head_file", _COMPACT_HEAD_FILENAME)
+    setattr(model.config, "splade_compact_head_file", COMPACT_HEAD_FILENAME)
+    setattr(model.config, "splade_compact_head_alignment", "token_ids")
     setattr(
         model.config,
         "splade_compact_vocab_size",
@@ -500,7 +513,7 @@ def main() -> None:
         "device": str(device),
         "zero_non_target_lm_head": bool(args.zero_non_target_lm_head),
         "non_target_bias": float(args.non_target_bias),
-        "compact_head_file": _COMPACT_HEAD_FILENAME,
+        "compact_head_file": COMPACT_HEAD_FILENAME,
         "compact_vocab_size": int(compact_head_payload["weight"].shape[0]),
         **lm_stats,
     }

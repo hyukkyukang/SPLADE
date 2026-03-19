@@ -1,0 +1,11 @@
+python_bin: python
+backbone_script: script/model_creation/lens/build_hf_backbone.py
+backbone_config: config/model_creation/lens/backbone.yaml
+cluster_script: script/model_creation/lens/build_clustered_head.py
+cluster_config: config/model_creation/lens/cluster_head_8k.yaml
+
+run_backbone: true
+run_cluster: true
+print_commands_only: false
+run_log_dir: outputs/model_creation/lens/pipeline_runs
+run_name: lens_cluster8k
