@@ -78,8 +78,15 @@ if [[ ! -x "${LAUNCH_SCRIPT}" ]]; then
   exit 1
 fi
 
-log "exec: bash ${LAUNCH_SCRIPT} (output -> ${PHASE2_LOG})"
-nohup bash "${LAUNCH_SCRIPT}" > "${PHASE2_LOG}" 2>&1 &
+PHASE2_PROFILE="${PHASE2_PROFILE:-1}"
+launch_env=()
+if [[ "${PHASE2_PROFILE}" == "1" ]]; then
+  launch_env+=("LENS_PROFILE=1")
+  log "PyTorchProfiler will be enabled for phase 2 (LENS_PROFILE=1)."
+fi
+
+log "exec: ${launch_env[*]} bash ${LAUNCH_SCRIPT} (output -> ${PHASE2_LOG})"
+nohup env "${launch_env[@]}" bash "${LAUNCH_SCRIPT}" > "${PHASE2_LOG}" 2>&1 &
 phase2_pid=$!
 log "phase 2 launched, pid=${phase2_pid}"
 log "watcher exiting."

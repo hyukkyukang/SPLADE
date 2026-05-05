@@ -1,34 +1,72 @@
 #!/usr/bin/env bash
 # Phase-2 LENS training launcher.
 #
-# Phase 1 (phase1_d4000_LR1e5_20260429_1005) ran with batch sizes shrunk
-# 4-32x below the paper-faithful lens_official defaults. Per-step Python /
-# DDP orchestration dominated, so the 8 GPUs averaged ~30-50% util while
-# all 8 rank processes pegged at 100% CPU. Phase 2 raises batches back
-# toward the lens_official defaults (still capped for 8x A100-40GB) and
-# halves grad_accumulation so each optimizer step does proportionally
-# more GPU work per Python iteration.
+# Defaults reflect the empirical sweep on top of phase 1
+# (phase1_d4000_LR1e5_20260429_1005) using PyTorchProfiler traces:
 #
-# Compute-rate diff vs Phase 1:
-#   - per-rank queries  : 1   ->  4
-#   - sub_batch_size    : 2   ->  4    (activation chunk size)
-#   - symmetric_batch   : 8   -> 64    (bge symmetric task batch)
-#   - sym_train_group   : 2   ->  4    (positives/negatives per query)
-#   - train_group_size  : 2   ->  4
-#   - grad_accumulation : 8   ->  4    (back to lens_official default)
+#   sub_batch_size  | avg step ms | wall vs phase 1
+#   ---------------- + ----------- + ---------------
+#   2 (phase 1)     |     879     |     baseline
+#   3               |     838     |   -5%
+#   4               |     750     |  -15%
+#   8               |     708     |  -19%   <- sweet spot, ships by default
+#   16              |     735     |  -16%   (chunks too big, GEMM regression)
 #
-# Effective global batch grows ~8x; expected step throughput ~3-5x.
+# Why sub_batch_size matters: in eager mode each ATen op carries ~155us
+# CPU dispatch overhead. Phase 1 launched ~62k aten::linear calls per
+# 35s window (1.77k/s), saturating the launch rate while the GPU sat
+# 85% idle. Bigger sub-batches mean fewer-but-bigger GEMM kernels --
+# same GPU work, fewer Python/dispatch round-trips.
 #
-# torch.compile is left OFF by default because lens_official.yaml turned
-# it off explicitly (compile + LoRA + MistralBi has been flaky in this
-# tree). Set ENABLE_COMPILE=1 to flip it on; first run pays a 10-20 min
-# inductor warmup, subsequent runs reuse $TRITON_CACHE_DIR.
+# Why we keep phase-1 outer batch geometry (BATCH=1, SYMM=8, TG=2):
+# Saved gradient-checkpointing activations live until backward
+# completes, scaling linearly with TOTAL docs encoded per step (regard-
+# less of sub_batch_size). The "paper-faithful" outer batch (SYMM=64,
+# TG=4, BATCH=4) increases that ~64x and OOMs even at sub=8 in current
+# memory. Achieving paper-faithful effective batch in this environment
+# requires either FSDP, or freeing the ~6GB orphaned CUDA context that
+# is currently held per-GPU by a defunct PID (host-side issue, not
+# fixable from inside this container).
+#
+# torch.compile is left OFF by default after empirical investigation.
+# The Python.h toolchain blocker that originally made compile crash is
+# fixed (apt-get install python3.12-dev), and LENS_COMPILE=1 now wires
+# torch.compile cleanly with dynamic=True. But measured wall time was
+# 977-1370 ms/step (vs 708 ms eager) because three structural
+# incompatibilities create a recompile storm:
+#   1. PEFT's enable_input_require_grads() forward hook flips the
+#      embedding output's requires_grad mid-forward. Gradient
+#      checkpointing recompute then sees a mismatched guard and
+#      forces a recompile per step.
+#   2. The HF @can_return_tuple wrapper in transformers/utils/generic.py
+#      uses *args/**kwargs, which dynamo can't trace through cleanly.
+#   3. max_padding=False yields per-sub-batch shape variation that
+#      dynamic=True only partially mitigates.
+# The trace showed ~30 root regions and one region recompiling 128
+# times. Making compile a net win on this stack would require either:
+#   - Replacing PEFT's hook with a compile-friendly equivalent, or
+#   - Running with max_padding=True + mode="reduce-overhead" + CUDA
+#     graphs for fully static shapes, or
+#   - Monkey-patching HF to remove the can_return_tuple wrapper.
+# All three are weeks-long projects, not flag flips. Set
+# ENABLE_COMPILE=1 if the upstream stack changes and re-measure.
 #
 # Usage:
 #   bash script/etc/launch_lens_phase2.sh                       # default tag
 #   TAG=phase2_d4000_run01 bash script/etc/launch_lens_phase2.sh
 #   ENABLE_COMPILE=1 bash script/etc/launch_lens_phase2.sh
 #   MAX_STEPS=10000 bash script/etc/launch_lens_phase2.sh
+#
+# Try the "paper-faithful" outer batch (will OOM today; here for when
+# memory is freed up):
+#   BATCH_SIZE=4 GRAD_ACCUMULATION=4 \
+#   SYMMETRIC_BATCH_SIZE=64 SYMMETRIC_TRAIN_GROUP_SIZE=4 \
+#   TRAIN_GROUP_SIZE=4 \
+#   bash script/etc/launch_lens_phase2.sh
+#
+# Diagnostic mode (PyTorch profiler, ~25-step trace -> ${log_dir}/profile/):
+#   LENS_PROFILE=1 MAX_STEPS=50 bash script/etc/launch_lens_phase2.sh
+#   # window controlled by LENS_PROFILE_WAIT/_WARMUP/_ACTIVE (defaults 1/4/20).
 
 set -euo pipefail
 
@@ -45,13 +83,15 @@ LR="${LR:-1e-5}"
 WARMUP_STEPS="${WARMUP_STEPS:-500}"
 CHECKPOINT_EVERY_N_STEPS="${CHECKPOINT_EVERY_N_STEPS:-500}"
 
-# --- batch geometry (the actual fix) ---------------------------------------
-BATCH_SIZE="${BATCH_SIZE:-4}"
-GRAD_ACCUMULATION="${GRAD_ACCUMULATION:-4}"
-SYMMETRIC_BATCH_SIZE="${SYMMETRIC_BATCH_SIZE:-64}"
-SYMMETRIC_TRAIN_GROUP_SIZE="${SYMMETRIC_TRAIN_GROUP_SIZE:-4}"
-TRAIN_GROUP_SIZE="${TRAIN_GROUP_SIZE:-4}"
-SUB_BATCH_SIZE="${SUB_BATCH_SIZE:-4}"
+# --- batch geometry --------------------------------------------------------
+# Outer batch matches phase 1 (proven memory-fit). The win lives in
+# SUB_BATCH_SIZE=8 -- see header comment for the ablation.
+BATCH_SIZE="${BATCH_SIZE:-1}"
+GRAD_ACCUMULATION="${GRAD_ACCUMULATION:-8}"
+SYMMETRIC_BATCH_SIZE="${SYMMETRIC_BATCH_SIZE:-8}"
+SYMMETRIC_TRAIN_GROUP_SIZE="${SYMMETRIC_TRAIN_GROUP_SIZE:-2}"
+TRAIN_GROUP_SIZE="${TRAIN_GROUP_SIZE:-2}"
+SUB_BATCH_SIZE="${SUB_BATCH_SIZE:-8}"
 
 # --- compile toggle --------------------------------------------------------
 ENABLE_COMPILE="${ENABLE_COMPILE:-0}"
@@ -78,6 +118,7 @@ echo "  symmetric_train_group     = ${SYMMETRIC_TRAIN_GROUP_SIZE}"
 echo "  train_group_size          = ${TRAIN_GROUP_SIZE}"
 echo "  sub_batch_size            = ${SUB_BATCH_SIZE}"
 echo "  torch_compile             = $([[ "${ENABLE_COMPILE}" == "1" ]] && echo on || echo off)"
+echo "  pytorch_profiler          = $([[ "${LENS_PROFILE:-0}" == "1" ]] && echo on || echo off)"
 echo "==========================="
 
 exec bash "${SCRIPT_DIR}/launch_lens.sh" train_lens_official \
