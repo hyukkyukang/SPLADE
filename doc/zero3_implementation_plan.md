@@ -334,3 +334,92 @@ changes to existing entry points.
 2. **Lightning vs raw DeepSpeed** — Lightning's `DeepSpeedStrategy` is
    what's outlined here. HF Trainer would match paper's stack exactly but
    is a much bigger rewrite. Pick based on trust of Lightning's integration.
+
+---
+
+## 2026-05-08 implementation findings (post-execution)
+
+The plan was executed end-to-end. Headline result: **DeepSpeed turned out
+not to be needed** once a separate environmental issue was fixed.
+
+### Phase A (plumbing) — ✅
+Strategy/config plumbing landed in commit `7834d4e`. Default behavior
+unchanged; ENABLE_DEEPSPEED=1 cleanly switches to DeepSpeedStrategy.
+
+### Phase B (smoke) — ✅ but with surprising memory finding
+Stage 3 *alone* gave **zero memory savings** for our PEFT/LoRA setup.
+Reason: ZeRO-3 only shards parameters in the optimizer's param group,
+which for LoRA is just the adapters (~100 MB). The 14 GB frozen Mistral
+base stays full-replicated. Stage 3 + offload_params=true did free the
+14 GB but at ~4× throughput cost (per-layer CPU<->GPU paging).
+
+### Phase C (sub_batch sweep) — ✅
+Under offload, sub_batch_size {8, 16, 32} all fit identically — paging
+dominates over chunk size. Not the binding constraint.
+
+### Phase D (outer batch ramp) — ✅ pivoted to DDP
+**Critical discovery:** the user killed a tritonserver process that was
+holding 6 GB of GPU memory per card. With the orphan gone, **plain DDP
+fit a much larger outer batch than projected** at native speed.
+
+Empirical sweep (DDP, 20 steps, sub_batch_size=8):
+
+| BATCH | SYMM | TG | neg/query | result    | it/s |
+|-------|------|----|-----------|-----------|------|
+| 1     | 8    | 2  | 128       | baseline  | 1.40 |
+| 1     | 16   | 4  | 512       | ✅        | 1.38 |
+| 1     | 32   | 4  | 1024      | ✅        | 1.35 |
+| 1     | 64   | 4  | 2048      | ✅        | 1.35 |
+| 1     | 128  | 4  | 4096      | ✅        | 1.37 |
+| 1     | 256  | 4  | 8192      | ✅ ships  | 1.35 |
+| 1     | 32   | 8  | 2048      | ❌ OOM    | --   |
+| 1     | 64   | 8  | 4096      | ❌ OOM    | --   |
+| 1     | 128  | 8  | 8192      | ❌ OOM    | --   |
+| 1     | 256  | 8  | 16384     | ❌ OOM    | --   |
+| 2     | 256  | 4  | 8192      | ❌ OOM    | --   |
+| 4     | 64   | 4  | 2048      | ❌ OOM    | --   |
+
+TG=8 has memory expansion in the loss path beyond per-rank items.
+Even SYMM=32 TG=8 (smallest TG=8 config) OOMs.
+
+**Best validated:** ``BATCH=1 SYMM=256 TG=4 sub=8`` → 8192 negatives
+per query, **64× Phase 1, 25% of paper's 32,768.** Native DDP
+throughput, no DeepSpeed.
+
+Set as the new default in ``script/etc/launch_lens_phase2.sh``.
+
+### Phase E (CPU offload), F (checkpoint merge) — N/A
+
+Both Phase E and F were specific to the DeepSpeed path. With DDP
+fitting our target batch, neither is needed.
+
+### Phase G (full launch) — ready to launch
+
+Recommended command for ~1-epoch full Phase 2 run:
+```
+TAG=phase2_paper-near_$(date +%Y%m%d) \
+MAX_STEPS=33000 \
+LR=1e-4 \
+WARMUP_STEPS=100 \
+BATCH_SIZE=1 GRAD_ACCUMULATION=8 \
+SYMMETRIC_BATCH_SIZE=256 SYMMETRIC_TRAIN_GROUP_SIZE=4 \
+TRAIN_GROUP_SIZE=4 SUB_BATCH_SIZE=8 \
+bash script/etc/launch_lens_phase2.sh
+```
+
+Wall estimate: 33000 optim steps × 8 microbatches / 1.35 it/s ≈ **54
+hours = ~2.25 days**. May need fewer steps (LR=1e-4 is 10× higher than
+Phase 1 so convergence is faster).
+
+### Future direction
+
+To match paper's full 32,768 negatives (TG=8), the structural blockers
+are: TG=8 loss memory expansion, and the activation pile-up across
+sub-batches that survive the autograd graph until backward. Options:
+1. **GradCache** — chunked backward eliminates the pile-up; was the
+   original Tier-1 recommendation.
+2. **bitsandbytes 4-bit quantization** of the frozen base — frees
+   ~10 GB without throughput cost, may unlock TG=8.
+3. **Investigate the TG=8 loss memory expansion** — there's clearly
+   a non-linear scaling in `lens_stride_in_batch_contrastive_loss`
+   or the multi-task path that doesn't reflect just per-rank items.

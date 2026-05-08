@@ -78,19 +78,44 @@ DATE_TAG="$(date +%Y%m%d_%H%M)"
 TAG="${TAG:-phase2_d4000_LR1e5_${DATE_TAG}}"
 
 # --- training schedule -----------------------------------------------------
+# LR and warmup defaults match the paper now that the outer batch is
+# paper-near (SYMM=256, TG=4 vs paper's 256/8). MAX_STEPS still defaults
+# to a smoke-friendly 5000; for a full ~1-epoch run set MAX_STEPS=33000.
 MAX_STEPS="${MAX_STEPS:-5000}"
-LR="${LR:-1e-5}"
-WARMUP_STEPS="${WARMUP_STEPS:-500}"
+LR="${LR:-1e-4}"
+WARMUP_STEPS="${WARMUP_STEPS:-100}"
 CHECKPOINT_EVERY_N_STEPS="${CHECKPOINT_EVERY_N_STEPS:-500}"
 
 # --- batch geometry --------------------------------------------------------
-# Outer batch matches phase 1 (proven memory-fit). The win lives in
-# SUB_BATCH_SIZE=8 -- see header comment for the ablation.
+# Outer batch tuned via a 2026-05-08 sweep on 8x A100-40GB after the
+# tritonserver orphan was cleared (see doc/zero3_implementation_plan.md
+# Phase D for the full ablation). Each smoke = 20 steps at native DDP speed.
+#
+#   SYMM  TG  neg/q   per-rank items   result        it/s
+#   ----  --  ------  --------------   ------------  ----
+#    8     2     128         16        baseline      1.40
+#   16     4     512         64        ✅ no warn    1.38
+#   32     4   1,024        128        ✅ no warn    1.35
+#   64     4   2,048        256        ✅ no warn    1.35
+#  128     4   4,096        512        ✅ no warn    1.37
+#  256     4   8,192       1024        ✅ no warn    1.35   <- ships
+#   --     8       *          *        ❌ OOM        --     (TG=8 has
+#                                                            extra memory
+#                                                            expansion in
+#                                                            the loss; doesn't
+#                                                            fit even at SYMM=32)
+#  256     4   8,192 (B=2)              ❌ OOM        --
+#
+# Settled on SYMM=256, TG=4, BATCH=1, sub=8 -> 8,192 negatives per query
+# (64x Phase 1's 128, 25% of paper's 32,768). Native DDP throughput at
+# 1.35 it/s, no DeepSpeed needed. To match paper's TG=8 (7 hard negatives
+# per query) on 40GB we'd need GradCache or weight quantization -- noted
+# in the plan as a future direction.
 BATCH_SIZE="${BATCH_SIZE:-1}"
 GRAD_ACCUMULATION="${GRAD_ACCUMULATION:-8}"
-SYMMETRIC_BATCH_SIZE="${SYMMETRIC_BATCH_SIZE:-8}"
-SYMMETRIC_TRAIN_GROUP_SIZE="${SYMMETRIC_TRAIN_GROUP_SIZE:-2}"
-TRAIN_GROUP_SIZE="${TRAIN_GROUP_SIZE:-2}"
+SYMMETRIC_BATCH_SIZE="${SYMMETRIC_BATCH_SIZE:-256}"
+SYMMETRIC_TRAIN_GROUP_SIZE="${SYMMETRIC_TRAIN_GROUP_SIZE:-4}"
+TRAIN_GROUP_SIZE="${TRAIN_GROUP_SIZE:-4}"
 SUB_BATCH_SIZE="${SUB_BATCH_SIZE:-8}"
 
 # --- compile toggle --------------------------------------------------------
