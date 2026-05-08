@@ -175,6 +175,43 @@ def _maybe_compile_encoder(
     return encoder
 
 
+def _is_deepspeed_enabled(cfg: DictConfig) -> bool:
+    """Single source of truth for whether DeepSpeed is in charge."""
+    ds = cfg.training.get("deepspeed") or {}
+    return bool(ds.get("enabled", False))
+
+
+def _build_strategy(cfg: DictConfig):
+    """Return the Lightning strategy object (or string) for this run.
+
+    Default is ``cfg.training.strategy`` (e.g. "ddp"). When
+    ``cfg.training.deepspeed.enabled`` is true, returns a DeepSpeedStrategy
+    configured per the rest of ``cfg.training.deepspeed.*`` (or, if
+    ``config_path`` is set, loads that DeepSpeed JSON directly).
+    """
+    if not _is_deepspeed_enabled(cfg):
+        return str(cfg.training.strategy)
+    from lightning.pytorch.strategies import DeepSpeedStrategy
+    ds = cfg.training.deepspeed
+    config_path = ds.get("config_path")
+    if config_path:
+        logger.info("DeepSpeedStrategy from config: %s", config_path)
+        return DeepSpeedStrategy(config=str(config_path))
+    stage = int(ds.get("stage", 3))
+    offload_opt = bool(ds.get("offload_optimizer", False))
+    offload_par = bool(ds.get("offload_params", False))
+    logger.info(
+        "DeepSpeedStrategy stage=%d offload_optimizer=%s offload_params=%s",
+        stage, offload_opt, offload_par,
+    )
+    return DeepSpeedStrategy(
+        stage=stage,
+        offload_optimizer=offload_opt,
+        offload_parameters=offload_par,
+        partition_activations=False,  # we use grad checkpointing instead
+    )
+
+
 def _build_profiler(cfg: DictConfig) -> Profiler | None:
     """Opt-in PyTorch profiler for diagnosing per-step bottlenecks.
 
@@ -228,6 +265,7 @@ def main(cfg: DictConfig) -> None:
         warmup_steps=int(cfg.training.warmup_steps),
         total_steps=total_steps,
         weight_decay=0.0,
+        deepspeed_enabled=_is_deepspeed_enabled(cfg),
     )
     data_module = LENSTrainDataModule(cfg=cfg)
 
@@ -281,7 +319,7 @@ def main(cfg: DictConfig) -> None:
     trainer = L.Trainer(
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
         devices="auto",
-        strategy=str(cfg.training.strategy),
+        strategy=_build_strategy(cfg),
         precision=str(cfg.training.precision),
         max_epochs=int(cfg.training.get("num_epochs", 1)),
         max_steps=-1 if total_steps is None else total_steps,

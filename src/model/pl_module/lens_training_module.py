@@ -43,6 +43,7 @@ class LENSTrainingModule(L.LightningModule):
         warmup_steps: int = 100,
         total_steps: Optional[int] = None,
         weight_decay: float = 0.0,
+        deepspeed_enabled: bool = False,
     ) -> None:
         super().__init__()
         self.encoder = encoder
@@ -54,6 +55,10 @@ class LENSTrainingModule(L.LightningModule):
         self._warmup_steps: int = int(warmup_steps)
         self._total_steps: Optional[int] = total_steps
         self._weight_decay: float = float(weight_decay)
+        # Flag set at construction time (configure_optimizers / clip can run
+        # before self.trainer is wired up). Driven by cfg.training.deepspeed
+        # via train_lens.py:_is_deepspeed_enabled.
+        self._deepspeed_enabled: bool = bool(deepspeed_enabled)
         self.save_hyperparameters(ignore=["encoder"])
 
     # --- Lightning hooks -----------------------------------------------------
@@ -128,7 +133,15 @@ class LENSTrainingModule(L.LightningModule):
         GradScaler is actually in use. Under bf16-mixed there is no scaler,
         so the unscaling concern doesn't apply and ``clip_grad_norm_`` is
         safe to call directly on the parameters.
+
+        Under DeepSpeed, clipping is owned by the DeepSpeed engine via the
+        ``gradient_clipping`` config field, and intercepting it here would
+        either double-clip or step on partitioned-grad invariants (ZeRO-3
+        only ever exposes a slice of the gradient on each rank). Skip in
+        that case.
         """
+        if self._deepspeed_enabled:
+            return
         if gradient_clip_val is None or gradient_clip_val <= 0:
             return
         params = [
@@ -155,11 +168,17 @@ class LENSTrainingModule(L.LightningModule):
         # ``clip_grad_norm_`` call that's safe under bf16-mixed.
         # configure_optimizers runs before Lightning moves params to GPU,
         # so we gate on CUDA availability rather than per-param device.
+        # Under DeepSpeed, the optimizer is wrapped by DeepSpeed's own
+        # FusedAdam during ``setup_optimizers``; passing ``fused=True`` to
+        # the inner ``torch.optim.AdamW`` then double-counts CUDA-graph
+        # capture and breaks ZeRO-3's partitioned-state assumptions. Use a
+        # plain (foreach) AdamW and let DeepSpeed re-wrap it.
+        use_fused = torch.cuda.is_available() and not self._deepspeed_enabled
         optimizer = torch.optim.AdamW(
             params,
             lr=self._opt_lr,
             weight_decay=self._weight_decay,
-            fused=torch.cuda.is_available(),
+            fused=use_fused,
         )
         if self._total_steps is None:
             return {"optimizer": optimizer}

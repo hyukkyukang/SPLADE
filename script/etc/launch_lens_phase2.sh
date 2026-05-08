@@ -104,6 +104,32 @@ if [[ "${ENABLE_COMPILE}" == "1" ]]; then
   )
 fi
 
+# --- DeepSpeed ZeRO toggle -------------------------------------------------
+# ENABLE_DEEPSPEED=1 switches the Lightning strategy to DeepSpeedStrategy.
+# DEEPSPEED_STAGE selects ZeRO stage (1, 2, or 3; default 3).
+# DEEPSPEED_OFFLOAD_OPTIMIZER=1 / DEEPSPEED_OFFLOAD_PARAMS=1 page state to
+# CPU at a throughput cost (use only when GPU memory still doesn't fit).
+# DEEPSPEED_CONFIG_PATH points at a custom JSON; null = Lightning defaults.
+ENABLE_DEEPSPEED="${ENABLE_DEEPSPEED:-0}"
+DEEPSPEED_STAGE="${DEEPSPEED_STAGE:-3}"
+DEEPSPEED_OFFLOAD_OPTIMIZER="${DEEPSPEED_OFFLOAD_OPTIMIZER:-0}"
+DEEPSPEED_OFFLOAD_PARAMS="${DEEPSPEED_OFFLOAD_PARAMS:-0}"
+DEEPSPEED_CONFIG_PATH="${DEEPSPEED_CONFIG_PATH:-}"
+DEEPSPEED_OVERRIDES=()
+if [[ "${ENABLE_DEEPSPEED}" == "1" ]]; then
+  # ``++key=value`` set-or-add; works whether ``training.deepspeed`` is
+  # present in ``config/training/_base.yaml`` or not.
+  DEEPSPEED_OVERRIDES+=(
+    "++training.deepspeed.enabled=true"
+    "++training.deepspeed.stage=${DEEPSPEED_STAGE}"
+    "++training.deepspeed.offload_optimizer=$([[ "${DEEPSPEED_OFFLOAD_OPTIMIZER}" == "1" ]] && echo true || echo false)"
+    "++training.deepspeed.offload_params=$([[ "${DEEPSPEED_OFFLOAD_PARAMS}" == "1" ]] && echo true || echo false)"
+  )
+  if [[ -n "${DEEPSPEED_CONFIG_PATH}" ]]; then
+    DEEPSPEED_OVERRIDES+=("++training.deepspeed.config_path=${DEEPSPEED_CONFIG_PATH}")
+  fi
+fi
+
 # --- model artifact (matches phase 1) --------------------------------------
 MODEL_HF_NAME="${MODEL_HF_NAME:-/mnt/ex-disk-1/hyukkyukang/SPLADE/lens/artifacts/mistral_cluster4k}"
 
@@ -119,6 +145,11 @@ echo "  train_group_size          = ${TRAIN_GROUP_SIZE}"
 echo "  sub_batch_size            = ${SUB_BATCH_SIZE}"
 echo "  torch_compile             = $([[ "${ENABLE_COMPILE}" == "1" ]] && echo on || echo off)"
 echo "  pytorch_profiler          = $([[ "${LENS_PROFILE:-0}" == "1" ]] && echo on || echo off)"
+if [[ "${ENABLE_DEEPSPEED}" == "1" ]]; then
+  echo "  deepspeed                 = stage=${DEEPSPEED_STAGE}, offload_optim=${DEEPSPEED_OFFLOAD_OPTIMIZER}, offload_params=${DEEPSPEED_OFFLOAD_PARAMS}"
+else
+  echo "  deepspeed                 = off"
+fi
 echo "==========================="
 
 exec bash "${SCRIPT_DIR}/launch_lens.sh" train_lens_official \
@@ -135,4 +166,5 @@ exec bash "${SCRIPT_DIR}/launch_lens.sh" train_lens_official \
   "training.lens_multi_task.sub_batch_size=${SUB_BATCH_SIZE}" \
   "+training.checkpoint_every_n_steps=${CHECKPOINT_EVERY_N_STEPS}" \
   "${COMPILE_OVERRIDES[@]}" \
+  "${DEEPSPEED_OVERRIDES[@]}" \
   "$@"
