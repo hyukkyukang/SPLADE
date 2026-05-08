@@ -19,7 +19,7 @@ from typing import Any
 import hydra
 import lightning as L
 import torch
-from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
+from lightning.pytorch.callbacks import EarlyStopping, LearningRateMonitor, ModelCheckpoint
 from lightning.pytorch.loggers import CSVLogger, Logger, MLFlowLogger
 from lightning.pytorch.profilers import Profiler, PyTorchProfiler
 from omegaconf import DictConfig, OmegaConf
@@ -255,6 +255,15 @@ def main(cfg: DictConfig) -> None:
     else:
         total_steps = int(total_steps)
 
+    # Online single-task validation (drives EarlyStopping when reached).
+    # Knobs:
+    #   LENS_VAL_TASK   (env)  e.g. "NFCorpus" -- enables online val
+    #   LENS_VAL_EVERY_N_OPTIM_STEPS (env, default 2000)
+    #   LENS_VAL_EARLY_STOP_THRESHOLD (env, default 0.41 -- just above paper)
+    val_task: str | None = os.environ.get("LENS_VAL_TASK") or None
+    data_module = LENSTrainDataModule(cfg=cfg)
+    val_tokenizer = data_module.tokenizer if val_task else None
+
     training_module = LENSTrainingModule(
         encoder=encoder,
         temperature=float(cfg.training.temperature),
@@ -266,8 +275,9 @@ def main(cfg: DictConfig) -> None:
         total_steps=total_steps,
         weight_decay=0.0,
         deepspeed_enabled=_is_deepspeed_enabled(cfg),
+        val_task=val_task,
+        val_tokenizer=val_tokenizer,
     )
-    data_module = LENSTrainDataModule(cfg=cfg)
 
     checkpoint_dir: str = os.path.join(cfg.log_dir, "checkpoints")
     os.makedirs(checkpoint_dir, exist_ok=True)
@@ -316,6 +326,38 @@ def main(cfg: DictConfig) -> None:
         logger.info("MLflow logger configured: experiment=%s, run_name=%s, uri=%s",
                     experiment_name, run_name, tracking_uri)
 
+    callbacks: list[Any] = [
+        checkpoint_callback,
+        LearningRateMonitor(logging_interval="step"),
+    ]
+    val_check_kwargs: dict[str, Any] = {}
+    if val_task:
+        # Validate every N optimizer steps. Lightning's val_check_interval
+        # is in *training-batch* units, so multiply by grad_accumulation.
+        n_optim_steps = int(os.environ.get("LENS_VAL_EVERY_N_OPTIM_STEPS", "2000"))
+        n_train_batches = n_optim_steps * int(cfg.training.grad_accumulation)
+        val_check_kwargs["val_check_interval"] = n_train_batches
+        # check_val_every_n_epoch=None lets val_check_interval drive cadence
+        # within the single training epoch, regardless of how big the epoch
+        # actually is.
+        val_check_kwargs["check_val_every_n_epoch"] = None
+        threshold = float(os.environ.get("LENS_VAL_EARLY_STOP_THRESHOLD", "0.41"))
+        callbacks.append(
+            EarlyStopping(
+                monitor="val_ndcg10",
+                mode="max",
+                stopping_threshold=threshold,
+                check_finite=False,        # NaN means "no signal"; don't stop
+                patience=10**9,            # never stop on stagnation, only on threshold
+                verbose=True,
+            )
+        )
+        logger.info(
+            "Online validation enabled: task=%s every %d optim steps; "
+            "early-stop when val_ndcg10 >= %.4f",
+            val_task, n_optim_steps, threshold,
+        )
+
     trainer = L.Trainer(
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
         devices="auto",
@@ -326,12 +368,14 @@ def main(cfg: DictConfig) -> None:
         accumulate_grad_batches=int(cfg.training.grad_accumulation),
         gradient_clip_val=float(cfg.training.get("max_grad_norm", 1.0) or 0.0),
         logger=loggers,
-        callbacks=[checkpoint_callback, LearningRateMonitor(logging_interval="step")],
+        callbacks=callbacks,
         profiler=_build_profiler(cfg),
         default_root_dir=cfg.log_dir,
         # Our SameDatasetBatchSampler already handles per-rank slicing via its
         # `rank` argument; tell Lightning not to wrap it in a DistributedSampler.
         use_distributed_sampler=False,
+        # Validation cadence (only set when LENS_VAL_TASK is provided).
+        **val_check_kwargs,
     )
     trainer.fit(training_module, datamodule=data_module)
 

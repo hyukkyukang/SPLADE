@@ -44,6 +44,8 @@ class LENSTrainingModule(L.LightningModule):
         total_steps: Optional[int] = None,
         weight_decay: float = 0.0,
         deepspeed_enabled: bool = False,
+        val_task: Optional[str] = None,
+        val_tokenizer: Any = None,
     ) -> None:
         super().__init__()
         self.encoder = encoder
@@ -59,7 +61,13 @@ class LENSTrainingModule(L.LightningModule):
         # before self.trainer is wired up). Driven by cfg.training.deepspeed
         # via train_lens.py:_is_deepspeed_enabled.
         self._deepspeed_enabled: bool = bool(deepspeed_enabled)
-        self.save_hyperparameters(ignore=["encoder"])
+        # Online validation: if val_task is set, on_validation_epoch_end will
+        # run an MTEB single-task eval against the live model. val_tokenizer
+        # MUST be passed in (we can't extract it from the PEFT-wrapped backbone
+        # cleanly).
+        self._val_task: Optional[str] = val_task
+        self._val_tokenizer = val_tokenizer
+        self.save_hyperparameters(ignore=["encoder", "val_tokenizer"])
 
     # --- Lightning hooks -----------------------------------------------------
 
@@ -118,6 +126,75 @@ class LENSTrainingModule(L.LightningModule):
         self.log("train/task_type", float(hash(str(batch.get("task_type", ""))) % 1000),
                  prog_bar=False, on_step=True, on_epoch=False, sync_dist=False)
         return total_loss
+
+    # --- Online validation -------------------------------------------------
+
+    def validation_step(self, batch: Any, batch_idx: int) -> None:
+        """No-op. The data module's val_dataloader emits a single dummy batch
+        purely to trigger ``on_validation_epoch_end`` -- the real eval runs
+        there, against the live model, on rank 0 only.
+        """
+        return None
+
+    def on_validation_epoch_end(self) -> None:
+        if not self._val_task:
+            return
+        if self._val_tokenizer is None:
+            self.print(
+                "[val] val_task=%s set but no tokenizer provided; skipping eval"
+                % self._val_task
+            )
+            return
+        # Run heavy eval on rank 0 only; other ranks receive the broadcast
+        # below so all of them log the same number and Lightning's
+        # EarlyStopping callback sees a consistent value.
+        score: Optional[float] = None
+        if self.global_rank == 0:
+            from src.utils.lens_inline_validation import run_single_task_eval
+            # Free any non-resident PyTorch cache so the eval encode has
+            # headroom on top of training's near-full memory footprint.
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            self.encoder.model.eval()
+            try:
+                score = run_single_task_eval(
+                    model=self.encoder.model,
+                    tokenizer=self._val_tokenizer,
+                    device=self.device,
+                    task_name=self._val_task,
+                    batch_size=16,    # conservative; training is at ~99% memory
+                    max_length=256,   # NFCorpus docs are short medical abstracts
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                self.print(f"[val] {self._val_task} eval crashed: {exc}")
+                score = None
+            finally:
+                self.encoder.model.train()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
+        # Broadcast the float score across ranks so every rank logs the same.
+        # NaN means "no signal" -- EarlyStopping is configured to ignore NaNs.
+        device = self.device if torch.cuda.is_available() else torch.device("cpu")
+        if score is None:
+            score_tensor = torch.tensor(float("nan"), device=device)
+        else:
+            score_tensor = torch.tensor(float(score), device=device)
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            torch.distributed.broadcast(score_tensor, src=0)
+
+        self.log(
+            "val_ndcg10",
+            score_tensor.item(),
+            prog_bar=True,
+            on_step=False,
+            on_epoch=True,
+            sync_dist=False,
+        )
+        self.print(
+            f"[val][step={self.global_step}] {self._val_task} "
+            f"nDCG@10 = {score_tensor.item():.4f}"
+        )
 
     def configure_gradient_clipping(
         self,
