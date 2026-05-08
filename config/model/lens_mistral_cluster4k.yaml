@@ -10,6 +10,13 @@ huggingface_model_class: MistralBiForCausalLM
 trust_remote_code: false
 use_fast_tokenizer: true
 require_fast_tokenizer: true
+# Force the strict-LENS tokenizer path at training time so the Phase 1
+# retrain uses the SAME tokenizer (base mistralai/Mistral-7B-v0.1 + 3 LENS
+# specials, no auto-EOS) that the official Yibin-Lei/LENS training used.
+# Without this, build_model_tokenizer would load the cluster4k artifact's
+# tokenizer.json (auto-EOS=True), producing a 1-token offset vs the
+# inference-time tokenizer in src.utils.lens_official_loader.
+strict_official_lens_tokenizer: true
 
 dtype: bfloat16
 attn_implementation: sdpa
@@ -20,7 +27,9 @@ bidirectional: true
 query_pooling: max
 doc_pooling: max
 sparse_activation: log1p_relu
-normalize: false
+# Paper LENS uses --normlized True during training; embeddings are L2-normalized
+# before the contrastive dot product (so the temperature 0.02 yields sane scores).
+normalize: true
 benchmark_adapter: native
 instruction_text: "Represent this query for retrieving relevant documents."
 doc_trim_last_tokens: 2

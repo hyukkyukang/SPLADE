@@ -20,6 +20,8 @@ def _build_training_cfg():
                 "query_weight": 0.0,
                 "doc_weight": 0.0,
                 "type": "l1",
+                "query_type": None,
+                "doc_type": None,
                 "paper_faithful": True,
                 "schedule_steps": 0,
             },
@@ -145,6 +147,32 @@ class LossServiceTest(unittest.TestCase):
 
         loss_computer = service.build_loss_computer()
         self.assertTrue(loss_computer.has_trainable_main_loss_parameters)
+
+    def test_split_regularization_types_override_shared_type(self) -> None:
+        cfg = _build_training_cfg()
+        cfg.regularization.type = "l1"
+        cfg.regularization.query_type = "l1"
+        cfg.regularization.doc_type = "flops"
+
+        service = LossRegularizationService(cfg)
+        loss_computer = service.build_loss_computer()
+
+        self.assertEqual(service.reg_query_type, "l1")
+        self.assertEqual(service.reg_doc_type, "flops")
+        self.assertEqual(loss_computer.reg_query_type, "l1")
+        self.assertEqual(loss_computer.reg_doc_type, "flops")
+
+    def test_split_regularization_types_fallback_to_shared_type(self) -> None:
+        cfg = _build_training_cfg()
+        cfg.regularization.type = "flops"
+
+        service = LossRegularizationService(cfg)
+        loss_computer = service.build_loss_computer()
+
+        self.assertEqual(service.reg_query_type, "flops")
+        self.assertEqual(service.reg_doc_type, "flops")
+        self.assertEqual(loss_computer.reg_query_type, "flops")
+        self.assertEqual(loss_computer.reg_doc_type, "flops")
 
 
 if __name__ == "__main__":

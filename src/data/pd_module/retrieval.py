@@ -18,6 +18,11 @@ from src.data.lens_formatting import (
 from src.data.dataclass import RetrievalDataItem
 from src.data.pd_module import PDModule
 from src.data.pd_module.utils import tokenize_text, tokenize_text_windows
+from src.data.pd_module.utils import (
+    resolve_num_mask_slots,
+    tokenize_text_with_mask_slots,
+    uses_ordered_mask_slot_pooling,
+)
 from src.data.utils import resolve_dataset_column
 from src.utils.dist import is_rank_zero, maybe_barrier
 from src.utils.logging import get_logger, log_if_rank_zero
@@ -116,6 +121,12 @@ class RetrievalPDModule(PDModule):
         self._query_sliding_window_overlap_tokens: int = max(
             0, int(self.cfg.get("query_sliding_window_overlap_tokens", 0))
         )
+        self._query_truncate_prefix_chars_per_token: int = max(
+            0, int(self.cfg.get("query_truncate_prefix_chars_per_token", 0))
+        )
+        self._query_truncate_prefix_min_chars: int = max(
+            0, int(self.cfg.get("query_truncate_prefix_min_chars", 4096))
+        )
 
     def __len__(self) -> int:
         self._ensure_query_index()
@@ -130,6 +141,34 @@ class RetrievalPDModule(PDModule):
         query_input_ids: torch.Tensor
         query_attention_mask: torch.Tensor
         query_pooling_mask: torch.Tensor
+        if uses_ordered_mask_slot_pooling(self.model_cfg):
+            if self._query_long_doc_strategy == "sliding_window":
+                raise NotImplementedError(
+                    "Sliding-window retrieval is not yet supported for ordered "
+                    "mask-slot models."
+                )
+            query_input_ids, query_attention_mask, query_pooling_mask = (
+                tokenize_text_with_mask_slots(
+                    self.tokenizer,
+                    query_text,
+                    max_length=self.max_query_length,
+                    num_mask_slots=resolve_num_mask_slots(self.model_cfg),
+                    max_padding=self.max_padding,
+                    model_cfg=self.model_cfg,
+                )
+            )
+            query_input_ids = query_input_ids.unsqueeze(0)
+            query_attention_mask = query_attention_mask.unsqueeze(0)
+            query_pooling_mask = query_pooling_mask.unsqueeze(0)
+            return RetrievalDataItem(
+                data_idx=int(idx),
+                qid=qid,
+                relevance_judgments=self.get_relevance_judgments(qid),
+                query_text=query_text,
+                query_input_ids=query_input_ids,
+                query_attention_mask=query_attention_mask,
+                query_pooling_mask=query_pooling_mask,
+            )
         if self._query_long_doc_strategy == "sliding_window":
             query_input_ids, query_attention_mask = tokenize_text_windows(
                 self.tokenizer,
@@ -153,6 +192,10 @@ class RetrievalPDModule(PDModule):
                 query_text,
                 max_length=self.max_query_length,
                 max_padding=self.max_padding,
+                fast_truncate_chars_per_token=(
+                    self._query_truncate_prefix_chars_per_token
+                ),
+                fast_truncate_min_chars=self._query_truncate_prefix_min_chars,
             )
             query_input_ids = single_input_ids.unsqueeze(0)
             query_attention_mask = single_attention_mask.unsqueeze(0)

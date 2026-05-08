@@ -1,7 +1,14 @@
-# SPLADE
+# SPLADE / LENS
 
-Training + evaluation repo for SPLADE v1/v2 sparse retrieval with BEIR and
-NanoBEIR support.
+Training + evaluation repo for sparse retrieval models, including:
+
+- SPLADE v1/v2/v3
+- SPLADE++-style variants with EmbeddingGemma backbones
+- LENS with bidirectional Mistral, clustered compact heads, and LoRA/PEFT
+
+The repo supports Hydra-driven training, sparse corpus encoding + inverted
+indexing, retrieval/reranking evaluation, NanoBEIR/MTEB proxy benchmarks, and
+model-creation utilities.
 
 ## Setup
 
@@ -23,6 +30,14 @@ All entrypoints use Hydra configs under `config/`.
 Datasets default to the Hugging Face Hub; dataset configs live in
 `config/dataset/`.
 
+Common entrypoints:
+
+- `script/train.py`: training
+- `script/encode.py`: sparse corpus encoding
+- `script/index.py`: inverted-index build
+- `script/evaluate.py`: retrieval, reranking, and benchmark dispatch
+- `script/model_creation/lens/*.py`: LENS artifact build pipeline
+
 ## Refactor docs
 
 - Architecture: `doc/analysis/refactor_architecture.md`
@@ -32,6 +47,33 @@ Datasets default to the Hugging Face Hub; dataset configs live in
 - Baseline command matrix: `doc/analysis/baseline_command_matrix.md`
 - EmbeddingGemma build pipeline: `doc/embeddinggemma_lsr_build_pipeline.md`
 
+## LENS model creation
+
+Build the default 4k-cluster LENS artifacts:
+
+```
+python script/model_creation/lens/build_pipeline.py \
+  --config config/model_creation/lens/pipeline_4k.yaml
+```
+
+Build the 8k-cluster variant:
+
+```
+python script/model_creation/lens/build_pipeline.py \
+  --config config/model_creation/lens/pipeline_8k.yaml
+```
+
+The pipeline prepares a self-contained Hugging Face backbone with LENS special
+tokens (`<instruct>`, `<query>`, `<response>`) and then writes a clustered
+`splade_compact_head.pt`. The default outputs are:
+
+- `outputs/model_creation/lens/hf_backbone`
+- `outputs/model_creation/lens/mistral_cluster4k`
+- `outputs/model_creation/lens/mistral_cluster8k`
+
+The bundled LENS training configs expect the clustered artifact directories
+above unless you override `model.huggingface_name`.
+
 ## Train
 
 Train a SPLADE model and write checkpoints/logs:
@@ -39,6 +81,30 @@ Train a SPLADE model and write checkpoints/logs:
 ```
 python script/train.py training=splade_v1 model=splade_v1
 ```
+
+Train the default LENS setup:
+
+```
+python script/train.py --config-name train_lens_mistral
+```
+
+`train_lens_mistral` uses:
+
+- `model=lens_mistral_cluster4k`
+- `training=lens_mistral`
+- MS MARCO training rows
+- MSMARCO dev-small-negatives validation
+- NanoBEIR validation during training
+
+Switch to the 8k clustered head with:
+
+```
+python script/train.py --config-name train_lens_mistral \
+  model=lens_mistral_cluster8k
+```
+
+The default LENS presets use bidirectional Mistral, max-pooling over activated
+LM logits, and LoRA/PEFT adapters.
 
 Use MS MARCO (HF Hub) for both train/val:
 
@@ -102,6 +168,24 @@ python script/train.py \
   dataset@val_dataset=msmarco
 ```
 
+Train the fixed-vocabulary pretrained diffusion-backbone ablation with UDLM
+(`kuleshov-group/udlm-lm1b`):
+
+```
+python script/train.py --config-name train_pretrained_diffusion_splade
+```
+
+Train the paired UDLM + MDLM-aux arm:
+
+```
+python script/train.py --config-name train_pretrained_diffusion_mdlm_splade
+```
+
+These UDLM presets pin query/document length to 128 to match the upstream
+checkpoint context length. The Hugging Face checkpoint also uses
+`trust_remote_code` and currently imports `einops` and `flash_attn`, so those
+packages must be available in the runtime environment.
+
 Train directly from a multi-teacher score dataset
 (`teacher_scores` + per-model columns):
 
@@ -131,7 +215,7 @@ Train with explicit MLflow tracking settings:
 
 ```
 python script/train.py \
-  training.mlflow.tracking_uri=http://127.0.0.1:5000
+  training.mlflow.tracking_uri=https://mlflow.hyukkyu.com
 ```
 
 MLflow GPU system metrics use NVML via `nvidia-ml-py`. If GPU utilization or
@@ -162,6 +246,10 @@ python script/encode.py \
   dataset=beir/trec-covid \
   encoding.encode_dir=log/encode
 ```
+
+For clustered LENS artifacts, encoded dimensions are latent cluster ids rather
+than tokenizer ids. Encode and index manifests record that output-space
+alignment automatically.
 
 ## Build inverted index
 
@@ -198,7 +286,7 @@ python script/evaluate.py \
   dataset=beir/msmarco
 ```
 
-## Evaluate (NanoBEIR proxy)
+## Evaluate (NanoBEIR / MTEB proxy)
 
 Quick proxy evaluation without full-corpus encoding:
 
@@ -209,6 +297,14 @@ python script/evaluate.py --benchmark nanobeir \
   nanobeir.save_json=true
 ```
 
+Run the shared sparse benchmark path through the MTEB entrypoint:
+
+```
+python script/evaluate.py --benchmark mteb \
+  --config-name evaluate_mteb \
+  testing.checkpoint_path=log/train/splade_v2/no_tag/checkpoints/last.ckpt
+```
+
 Use HF weights instead of a checkpoint:
 
 ```
@@ -216,6 +312,160 @@ python script/evaluate.py --benchmark nanobeir \
   nanobeir.use_huggingface_model=true \
   model.huggingface_name=naver/splade_v2
 ```
+
+Evaluate a LENS checkpoint on the native sparse benchmark adapter:
+
+```
+python script/evaluate.py --benchmark nanobeir \
+  --config-name evaluate_nanobeir \
+  model=lens_mistral_cluster4k \
+  testing.checkpoint_path=log/train/lens_mistral_cluster4k/no_tag/checkpoints/last.ckpt
+```
+
+Benchmark routing is backend-aware:
+
+- vanilla SPLADE can use the SentenceTransformers MLM sparse adapter
+- LENS, PEFT-wrapped models, and non-MLM backbones use the native sparse adapter
+
+## Patent document evaluation
+
+This repo also supports patent document retrieval evaluation with:
+
+- label dataset: `Hyukkyu/patent-us-small`
+- corpus dataset: `Hyukkyu/patent-us-corpus-small`
+
+The label dataset stores document-to-document relevance pairs:
+
+- `question_id`: patent document id used as the query document id
+- `label_id`: list of relevant patent document ids
+
+Queries are reconstructed by looking up each `question_id` in the patent corpus
+and rendering the same document text template used for corpus encoding:
+
+```text
+Title: {title}
+Abstract: {abstract}
+Claims: {claims}
+Description: {description}
+```
+
+The checked-in `patent_us_corpus_small` and `patent_us_small_eval` presets
+expect the small patent corpus parquet shards under
+`.cache/hf/patent-us-corpus-small/data/*.parquet`. The artifact builder and
+dataset loader both use `HF_TOKEN` / `HUGGINGFACE_HUB_TOKEN` from `.env` when
+accessing Hugging Face datasets.
+
+Build local `queries.parquet` and `qrels.parquet` artifacts for the `test` split:
+
+```
+python script/preprocess/patent/build_patent_us_eval_artifacts.py \
+  --benchmark-repo Hyukkyu/patent-us-small \
+  --benchmark-split test \
+  --corpus-repo Hyukkyu/patent-us-corpus-small \
+  --corpus-split train \
+  --output-dir data/eval/patent_us_small
+```
+
+Two long-document encoding modes are supported for learned sparse models such as
+SPLADE:
+
+- `encoding.long_doc_strategy=truncate`: encode only the first `max_doc_length`
+  tokens from the templated patent text
+- `encoding.long_doc_strategy=sliding_window`: encode the full templated patent
+  text in non-overlapping windows and aggregate the windows
+
+Use the same mode on both the corpus side and the query side.
+
+Encode the patent corpus with `naver/splade-v3` in `truncate` mode:
+
+```
+python script/encode.py \
+  model=splade_v3_naver \
+  dataset=patent_us_corpus_small \
+  tag=patent_us_small_splade_v3_truncate \
+  encoding.batch_size=160 \
+  encoding.max_windows_per_forward=160
+```
+
+Encode the same corpus in `sliding_window` mode:
+
+```
+python script/encode.py \
+  model=splade_v3_naver \
+  dataset=patent_us_corpus_small \
+  tag=patent_us_small_splade_v3_sliding \
+  encoding.batch_size=160 \
+  encoding.long_doc_strategy=sliding_window \
+  encoding.max_windows_per_forward=160
+```
+
+The current encode defaults already include the optimized settings used for the
+patent corpus benchmarks:
+
+- `encoding.prefetch_factor=4`
+- `encoding.torch_compile=true`
+- `encoding.torch_compile_mode=default`
+- `encoding.torch_compile_ddp_safe_mode=false`
+- `encoding.distributed_sampler_strategy=row_group_interleaved`
+
+Build the inverted index from the encoded shards:
+
+```
+python script/index.py \
+  model=splade_v3_naver \
+  dataset=patent_us_corpus_small \
+  tag=patent_us_small_splade_v3_truncate
+```
+
+Evaluate on the `test` split of `Hyukkyu/patent-us-small`:
+
+```
+python script/evaluation.py \
+  model=splade_v3_naver \
+  dataset=patent_us_small_eval \
+  testing=patent_us_small_eval \
+  tag=patent_us_small_splade_v3_truncate \
+  dataset.query_long_doc_strategy=truncate
+```
+
+For `sliding_window`, switch both sides together:
+
+```
+python script/evaluation.py \
+  model=splade_v3_naver \
+  dataset=patent_us_small_eval \
+  testing=patent_us_small_eval \
+  tag=patent_us_small_splade_v3_sliding \
+  dataset.query_long_doc_strategy=sliding_window
+```
+
+The `testing=patent_us_small_eval` preset reports only retrieval metrics for:
+
+- `MRR@1`
+- `MRR@5`
+- `MRR@10`
+- `MRR@16`
+- `MRR@32`
+- `MRR@63`
+- `MRR@150`
+- `MRR@300`
+- `Recall@1`
+- `Recall@5`
+- `Recall@10`
+- `Recall@16`
+- `Recall@32`
+- `Recall@63`
+- `Recall@150`
+- `Recall@300`
+
+It also enables `testing.exclude_self_match=true`, which is important because
+each query is itself a patent document from the corpus.
+
+If you want to evaluate a trained checkpoint instead of raw Hugging Face model
+weights, pass the same checkpoint to both steps:
+
+- `encoding.checkpoint_path=/path/to/checkpoint.ckpt`
+- `testing.checkpoint_path=/path/to/checkpoint.ckpt`
 
 ## Preprocess
 
@@ -246,11 +496,15 @@ python script/preprocess/mine_distillation_score.py \
 
 ## ANNA Conversion And Tokenizer Backend
 
-ANNA tokenizer and conversion source code lives under:
+The source-of-truth ANNA implementation now lives under:
 
 ```
-script/preprocess/anna/
+src/tokenization/anna_tokenizer.py
+src/preprocess/anna_conversion_utils.py
 ```
+
+The files under `script/preprocess/anna/` remain compatibility wrappers for the
+older script layout.
 
 Convert ANNA checkpoints to Hugging Face artifacts with:
 
@@ -285,6 +539,20 @@ python script/experiment/benchmark_anna_tokenizer_speed.py \
 
 Runtime code loads tokenizer/model through Hugging Face standard APIs
 (`AutoTokenizer.from_pretrained`, `AutoModelForMaskedLM.from_pretrained`).
+
+## LENS CPU smoke test
+
+Run the end-to-end CPU smoke path before the first real LENS training run:
+
+```
+python script/etc/lens_cpu_smoke.py \
+  --output-dir outputs/smoke/lens_cpu_smoke \
+  --cluster-count 8
+```
+
+This builds a tiny local Mistral artifact, runs the LENS backbone + clustered
+head pipeline, checks query/doc encoding, and executes a one-step
+train/validation loop on CPU.
 
 ## SPLADE-v3 data generation (before training)
 

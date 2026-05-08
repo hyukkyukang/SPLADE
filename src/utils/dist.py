@@ -38,3 +38,29 @@ def get_rank() -> int:
 def maybe_barrier() -> None:
     if torch.distributed.is_available() and torch.distributed.is_initialized():
         torch.distributed.barrier()
+
+
+def dist_gather_with_local_grad(tensor: torch.Tensor) -> torch.Tensor:
+    """All-gather ``tensor`` across ranks, preserving the gradient on the local slot.
+
+    ``dist.all_gather`` does not propagate gradients. We work around this by
+    replacing the local rank's buffer with the original ``tensor`` (which still
+    carries its autograd history) after the gather completes. Result: gradients
+    flow through *our own* contribution to the concatenation, which is exactly
+    what a contrastive loss needs.
+
+    Mirrors ``Yibin-Lei/LENS/finetune/modeling.py::_dist_gather_tensor``.
+    """
+    if not (torch.distributed.is_available() and torch.distributed.is_initialized()):
+        return tensor
+    world_size: int = int(torch.distributed.get_world_size())
+    if world_size == 1:
+        return tensor
+    rank: int = int(torch.distributed.get_rank())
+    contiguous: torch.Tensor = tensor.contiguous()
+    buffers: list[torch.Tensor] = [
+        torch.empty_like(contiguous) for _ in range(world_size)
+    ]
+    torch.distributed.all_gather(buffers, contiguous)
+    buffers[rank] = tensor
+    return torch.cat(buffers, dim=0)

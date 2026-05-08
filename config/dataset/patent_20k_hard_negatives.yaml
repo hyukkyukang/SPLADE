@@ -1,0 +1,37 @@
+# @package dataset
+defaults:
+  - _base@_here_
+
+name: patent_20k_hard_negatives
+type: patent_10k_hard_negatives
+split: train
+
+hf_name: Hyukkyu/patent-20k
+hf_subset: default
+hf_cache_dir: null
+hf_max_samples: null
+hf_skip_samples: 0
+hf_data_files: null
+
+max_query_length: 64
+max_doc_length: 256
+num_positives: 1
+num_negatives: 8
+
+negative_sampling:
+  strategy: topk_plus_random
+  top_k: 4
+  random_k: 4
+  random_pool: 16
+
+# These columns are placeholders for optional query/corpus loading paths.
+# Training uses the inline query and chunk texts from the meta rows directly.
+query_subset_name: default
+query_split_name: train
+query_id_column: query_id
+query_text_column: query_text
+corpus_subset_name: default
+corpus_split_name: train
+corpus_id_column: positive_node_id
+corpus_text_column: positive_text
+corpus_title_column: null

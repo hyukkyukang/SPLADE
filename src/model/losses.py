@@ -33,6 +33,122 @@ def multi_positive_contrastive_loss(
     return loss.mean()
 
 
+def lens_stride_in_batch_contrastive_loss(
+    q_reps: torch.Tensor,
+    p_reps: torch.Tensor,
+    *,
+    temperature: float,
+    train_group_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """In-batch contrastive loss with stride-positive indexing (LENS style).
+
+    Each query ``q_i`` has its positive at passage index ``i * train_group_size``
+    (the rest of its group are hard negatives). All other passages from other
+    queries in the batch are additional in-batch negatives.
+
+    Mirrors ``Yibin-Lei/LENS/finetune/modeling.py::BiEncoderModel.forward``.
+
+    Returns ``(loss, scores)`` where ``scores`` has shape ``(Q, Q*g)`` (pre-softmax).
+    """
+    if train_group_size <= 0:
+        raise ValueError("train_group_size must be positive.")
+    if p_reps.shape[0] % q_reps.shape[0] != 0:
+        raise ValueError(
+            "p_reps must be a multiple of q_reps along dim 0 "
+            f"(got {p_reps.shape[0]} vs {q_reps.shape[0]})."
+        )
+    stride: int = int(p_reps.shape[0] // q_reps.shape[0])
+    if stride != int(train_group_size):
+        raise ValueError(
+            f"Derived stride {stride} does not match train_group_size {train_group_size}."
+        )
+    scores: torch.Tensor = q_reps.float() @ p_reps.float().T
+    scores = scores / max(float(temperature), 1e-8)
+    target: torch.Tensor = torch.arange(
+        q_reps.shape[0], device=q_reps.device, dtype=torch.long
+    ) * stride
+    loss: torch.Tensor = F.cross_entropy(scores, target)
+    return loss, scores
+
+
+def lens_local_contrastive_loss(
+    q_reps: torch.Tensor,
+    p_reps: torch.Tensor,
+    *,
+    temperature: float,
+    train_group_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Local-only contrastive loss for symmetric class/clustering tasks.
+
+    Each query is only scored against its own passage group (1 positive,
+    train_group_size-1 negatives). No in-batch negatives. Target = 0.
+    """
+    if train_group_size <= 0:
+        raise ValueError("train_group_size must be positive.")
+    if p_reps.shape[0] != q_reps.shape[0] * train_group_size:
+        raise ValueError(
+            "Local contrastive requires p == q * train_group_size "
+            f"(got {p_reps.shape[0]} vs {q_reps.shape[0] * train_group_size})."
+        )
+    local_p: torch.Tensor = p_reps.float().view(
+        q_reps.shape[0], train_group_size, -1
+    )
+    scores: torch.Tensor = torch.einsum("bd,bgd->bg", q_reps.float(), local_p)
+    scores = scores / max(float(temperature), 1e-8)
+    target: torch.Tensor = torch.zeros(
+        q_reps.shape[0], device=q_reps.device, dtype=torch.long
+    )
+    loss: torch.Tensor = F.cross_entropy(scores, target)
+    return loss, scores
+
+
+def lens_kl_distill_loss(
+    q_reps: torch.Tensor,
+    p_reps: torch.Tensor,
+    full_scores: torch.Tensor,
+    teacher_scores: torch.Tensor,
+    *,
+    train_group_size: int,
+) -> torch.Tensor:
+    """KL distillation loss used in LENS retrieval training.
+
+    Given full pairwise ``scores`` of shape ``(Q, Q*g)`` and per-query teacher
+    scores flattened as ``(Q*g,)`` (concatenated pos + negs per query), slice
+    out only the local group scores ``(Q, g)`` and compute
+    ``-mean(Σ softmax(teacher) · log_softmax(student))``.
+
+    Mirrors ``Yibin-Lei/LENS/finetune/modeling.py``.
+    """
+    if train_group_size <= 0:
+        raise ValueError("train_group_size must be positive.")
+    q_count: int = int(q_reps.shape[0])
+    g: int = int(train_group_size)
+    if teacher_scores.numel() != q_count * g:
+        raise ValueError(
+            "teacher_scores must have Q*g entries "
+            f"(got {teacher_scores.numel()} for Q={q_count}, g={g})."
+        )
+    device = q_reps.device
+    teacher_matrix: torch.Tensor = teacher_scores.to(device=device).float().view(
+        q_count, g
+    )
+    teacher_probs: torch.Tensor = torch.softmax(teacher_matrix.detach(), dim=-1)
+
+    # Pull out the local group scores from the full (Q, Q*g) matrix.
+    row_indices: torch.Tensor = torch.arange(
+        q_count, device=device, dtype=torch.long
+    )
+    base_col: torch.Tensor = row_indices * g
+    group_offsets: torch.Tensor = torch.arange(g, device=device, dtype=torch.long)
+    col_indices: torch.Tensor = base_col.unsqueeze(1) + group_offsets.unsqueeze(0)
+    student_local: torch.Tensor = full_scores.float()[
+        row_indices.unsqueeze(1), col_indices
+    ]
+    student_log_probs: torch.Tensor = torch.log_softmax(student_local, dim=-1)
+    loss: torch.Tensor = -(teacher_probs * student_log_probs).sum(dim=-1).mean()
+    return loss
+
+
 _MainLossFn = Callable[
     [
         torch.Tensor,
@@ -63,6 +179,8 @@ class LossComputer(nn.Module):
         reg_doc_weight: float,
         reg_type: str,
         reg_paper_faithful: bool,
+        reg_query_type: str | None = None,
+        reg_doc_type: str | None = None,
         in_batch_weight: float = 1.0,
         pairwise_weight: float = 1.0,
         sigmoid_config: SigmoidPairwiseConfig | None = None,
@@ -76,7 +194,18 @@ class LossComputer(nn.Module):
         )
         self.reg_query_weight: float = float(reg_query_weight)
         self.reg_doc_weight: float = float(reg_doc_weight)
-        self.reg_type: str = str(reg_type).lower()
+        shared_reg_type: str = str(reg_type).lower()
+        self.reg_query_type: str = (
+            shared_reg_type if reg_query_type is None else str(reg_query_type).lower()
+        )
+        self.reg_doc_type: str = (
+            shared_reg_type if reg_doc_type is None else str(reg_doc_type).lower()
+        )
+        self.reg_type: str = (
+            self.reg_query_type
+            if self.reg_query_type == self.reg_doc_type
+            else "mixed"
+        )
         self.reg_paper_faithful: bool = bool(reg_paper_faithful)
         self.in_batch_weight: float = float(in_batch_weight)
         self.pairwise_weight: float = float(pairwise_weight)
@@ -111,10 +240,10 @@ class LossComputer(nn.Module):
             else (0.0, 0.0, 0.0)
         )
         self._reg_query_fn: _RegLossFn = self._resolve_reg_loss_fn(
-            self.reg_type, enabled=self.reg_query_weight > 0
+            self.reg_query_type, enabled=self.reg_query_weight > 0
         )
         self._reg_doc_fn: _RegLossFn = self._resolve_reg_loss_fn(
-            self.reg_type, enabled=self.reg_doc_weight > 0
+            self.reg_doc_type, enabled=self.reg_doc_weight > 0
         )
 
     # --- Protected methods ---

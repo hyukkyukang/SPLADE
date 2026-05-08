@@ -23,6 +23,7 @@ class UniversalCollator:
         pad_token_id: int,
         require_teacher_scores: bool = False,
         *,
+        slot_target_ignore_index: int = -100,
         max_padding: bool = False,
         max_query_length: int | None = None,
         max_doc_length: int | None = None,
@@ -30,6 +31,7 @@ class UniversalCollator:
     ) -> None:
         self.pad_token_id: int = int(pad_token_id)
         self.require_teacher_scores: bool = bool(require_teacher_scores)
+        self.slot_target_ignore_index: int = int(slot_target_ignore_index)
         self.max_padding: bool = bool(max_padding)
         self.max_query_length: int | None = (
             None if max_query_length is None else int(max_query_length)
@@ -380,10 +382,47 @@ class UniversalCollator:
                 neg_scores_items, batch_first=True, padding_value=float("nan")
             )
 
+        has_query_slot_targets: bool = any(
+            item.query_slot_target_ids is not None for item in batch
+        )
+        has_doc_slot_targets: bool = any(
+            item.doc_slot_target_ids is not None for item in batch
+        )
+        if has_query_slot_targets or has_doc_slot_targets:
+            if any(
+                item.query_slot_target_ids is None or item.doc_slot_target_ids is None
+                for item in batch
+            ):
+                raise ValueError(
+                    "Mixed presence of ordered mask-slot targets in training batch."
+                )
+            batch_dict["query_slot_target_ids"] = pad_sequence(
+                [item.query_slot_target_ids for item in batch],
+                batch_first=True,
+                padding_value=self.slot_target_ignore_index,
+            )
+            max_docs: int = max(int(item.doc_slot_target_ids.shape[0]) for item in batch)
+            max_slots: int = max(
+                int(item.doc_slot_target_ids.shape[1]) for item in batch
+            )
+            doc_slot_target_ids = torch.full(
+                (len(batch), max_docs, max_slots),
+                self.slot_target_ignore_index,
+                dtype=torch.long,
+            )
+            for batch_idx, item in enumerate(batch):
+                doc_count: int = int(item.doc_slot_target_ids.shape[0])
+                slot_count: int = int(item.doc_slot_target_ids.shape[1])
+                doc_slot_target_ids[
+                    batch_idx, :doc_count, :slot_count
+                ] = item.doc_slot_target_ids
+            batch_dict["doc_slot_target_ids"] = doc_slot_target_ids
+
         return batch_dict
 
     def _collate_encoding(self, batch: Sequence[EncodingDataItem]) -> dict[str, Any]:
         doc_ids: list[str] = [item.doc_id for item in batch]
+        raw_doc_group_ids: list[str | None] = [item.doc_group_id for item in batch]
         batch_size: int = len(batch)
         total_windows: int = sum(int(item.doc_input_ids.shape[0]) for item in batch)
         if self.max_padding:
@@ -428,10 +467,13 @@ class UniversalCollator:
                 item.doc_pooling_mask[:window_count, :doc_len]
             )
             window_offset = next_offset
-        return {
+        batch_dict: dict[str, Any] = {
             "doc_ids": doc_ids,
             "doc_input_ids": doc_input_ids,
             "doc_attention_mask": doc_attention_mask,
             "doc_pooling_mask": doc_pooling_mask,
             "doc_indptr": doc_indptr,
         }
+        if any(doc_group_id is not None for doc_group_id in raw_doc_group_ids):
+            batch_dict["doc_group_ids"] = raw_doc_group_ids
+        return batch_dict

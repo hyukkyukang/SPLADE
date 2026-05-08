@@ -6,14 +6,21 @@ import torch
 from omegaconf import DictConfig
 
 from src.metric.retrieval import RetrievalMetrics
+from src.model.retriever.dense.neural.hf_dense import DenseRetrievalModel
 from src.model.retriever.sparse.neural.splade import SpladeModel
 from src.utils.logging import log_if_rank_zero
-from src.utils.model_utils import build_splade_model, load_splade_checkpoint
+from src.utils.model_utils import (
+    build_retrieval_model,
+    build_splade_model,
+    load_dense_checkpoint,
+    load_splade_checkpoint,
+)
 
 _VALID_TORCH_COMPILE_MODES: tuple[str, ...] = (
     "default",
     "reduce-overhead",
     "max-autotune",
+    "max-autotune-no-cudagraphs",
 )
 
 
@@ -29,6 +36,10 @@ def resolve_cudagraph_mark_step() -> Callable[[], None] | None:
 
 def build_compile_kwargs(mode: str) -> dict[str, Any]:
     return {"mode": mode}
+
+
+def is_max_autotune_mode(mode: str) -> bool:
+    return str(mode).lower().startswith("max-autotune")
 
 
 def validate_torch_compile_mode(mode_value: Any) -> tuple[str, dict[str, Any]]:
@@ -57,6 +68,38 @@ def build_splade_model_with_checkpoint(
         missing, unexpected = load_splade_checkpoint(
             model, checkpoint_path, logger=logger
         )
+        log_if_rank_zero(
+            logger,
+            f"Loaded checkpoint. Missing: {len(missing)}, unexpected: {len(unexpected)}",
+        )
+    return model
+
+
+def build_retrieval_model_with_checkpoint(
+    cfg: DictConfig,
+    *,
+    use_cpu: bool,
+    checkpoint_path: str | None,
+    logger: logging.Logger,
+) -> SpladeModel | DenseRetrievalModel:
+    """Build a retrieval model and optionally load a checkpoint."""
+    model: SpladeModel | DenseRetrievalModel = build_retrieval_model(
+        cfg,
+        use_cpu=bool(use_cpu),
+        checkpoint_path=checkpoint_path,
+    )
+    if checkpoint_path:
+        family_value: str = str(cfg.model.get("family", "splade")).strip().lower()
+        missing: list[str]
+        unexpected: list[str]
+        if family_value == "dense":
+            missing, unexpected = load_dense_checkpoint(
+                model, checkpoint_path, logger=logger
+            )
+        else:
+            missing, unexpected = load_splade_checkpoint(
+                model, checkpoint_path, logger=logger
+            )
         log_if_rank_zero(
             logger,
             f"Loaded checkpoint. Missing: {len(missing)}, unexpected: {len(unexpected)}",

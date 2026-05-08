@@ -64,6 +64,7 @@ def _install_fake_hydra() -> None:
 _install_fake_hydra()
 
 from src.index.sparse import SparseShardWriter, load_shard_manifest
+from src.search.index import load_inverted_index
 
 
 class ClusteredSparseIndexMetadataTest(unittest.TestCase):
@@ -87,6 +88,7 @@ class ClusteredSparseIndexMetadataTest(unittest.TestCase):
             np.array([0, 2], dtype=np.int64),
             np.array([0, 5], dtype=np.int32),
             np.array([0.5, 1.5], dtype=np.float32),
+            doc_group_ids=["parent-1"],
         )
         writer.finalize()
 
@@ -103,6 +105,8 @@ class ClusteredSparseIndexMetadataTest(unittest.TestCase):
             self.assertFalse(metadata["output_token_aligned"])
             self.assertEqual(metadata["exclude_output_ids"], [1, 3])
             self.assertEqual(metadata["source_exclude_token_ids"], [26, 27, 28])
+            self.assertTrue(metadata["has_group_ids"])
+            self.assertEqual(shard_infos[0].group_ids_path.name, "shard_000000_group_ids.json")
 
     def test_index_script_metadata_records_cluster_alignment(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -138,6 +142,15 @@ class ClusteredSparseIndexMetadataTest(unittest.TestCase):
             self.assertFalse(metadata["output_token_aligned"])
             self.assertEqual(metadata["exclude_output_ids"], [1, 3])
             self.assertEqual(metadata["source_exclude_token_ids"], [26, 27, 28])
+            self.assertTrue(metadata["has_group_ids"])
+
+            group_ids_path = root / "index" / model_name / "group_ids.json"
+            with group_ids_path.open("r", encoding="utf-8") as handle:
+                group_ids = json.load(handle)
+            self.assertEqual(group_ids, ["parent-1"])
+
+            loaded_index = load_inverted_index(root / "index" / model_name)
+            self.assertEqual(loaded_index.group_ids, ["parent-1"])
 
 
 if __name__ == "__main__":

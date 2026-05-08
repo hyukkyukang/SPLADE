@@ -17,6 +17,10 @@ from src.index.sparse import (
     load_shard_manifest,
     resolve_numpy_dtype,
 )
+from src.index.dense import (
+    build_dense_faiss_index,
+    load_dense_shard_manifest,
+)
 from src.utils.logging import get_logger, log_if_rank_zero
 from src.utils.model_utils import resolve_tagged_output_dir
 from src.utils.output_space import OutputSpaceSpec
@@ -81,6 +85,51 @@ def main(cfg: DictConfig) -> None:
         logger,
         f"Loading shards from {shards_root}.",
     )
+    model_family: str = str(cfg.model.get("family", "splade")).strip().lower()
+    if model_family == "dense":
+        dense_shard_infos, metadata = load_dense_shard_manifest(encode_path)
+        dense_shard_infos = _ShardProgress(dense_shard_infos)
+        dim: int = int(metadata["dim"])
+        similarity: str = str(metadata.get("similarity", "dot")).lower()
+        normalized: bool = bool(metadata.get("normalized", False))
+        log_if_rank_zero(
+            logger,
+            f"Building FAISS index from {len(dense_shard_infos)} dense shards...",
+        )
+        faiss_index, doc_ids, group_ids = build_dense_faiss_index(
+            dense_shard_infos,
+            dim=dim,
+            similarity=similarity,
+            normalized=normalized,
+        )
+        import faiss
+
+        faiss.write_index(faiss_index, str(index_path / "faiss.index"))
+        with (index_path / "doc_ids.json").open("w", encoding="utf-8") as doc_file:
+            json.dump(doc_ids, doc_file)
+        if group_ids is not None:
+            with (index_path / "group_ids.json").open("w", encoding="utf-8") as group_file:
+                json.dump(group_ids, group_file)
+        metadata_out: dict[str, Any] = {
+            "index_kind": "dense",
+            "faiss_index_type": faiss_index.__class__.__name__,
+            "doc_count": len(doc_ids),
+            "dim": dim,
+            "value_dtype": str(metadata.get("value_dtype")),
+            "encode_dir": str(encode_path),
+            "model_family": metadata.get("model_family"),
+            "similarity": similarity,
+            "normalized": normalized or similarity == "cosine",
+            "has_group_ids": group_ids is not None,
+        }
+        with (index_path / "metadata.json").open("w", encoding="utf-8") as meta_file:
+            json.dump(metadata_out, meta_file, indent=2)
+        log_if_rank_zero(
+            logger,
+            f"Saved dense FAISS index to {index_path} (docs={len(doc_ids)}, dim={dim}).",
+        )
+        return
+
     shard_infos, metadata = load_shard_manifest(encode_path)
     shard_infos = _ShardProgress(shard_infos)
     vocab_size: int | None = None
@@ -112,7 +161,7 @@ def main(cfg: DictConfig) -> None:
     post_doc_ids: np.ndarray
     post_weights: np.ndarray
     doc_ids: list[str]
-    term_ptr, post_doc_ids, post_weights, doc_ids = build_inverted_index_from_shards(
+    term_ptr, post_doc_ids, post_weights, doc_ids, group_ids = build_inverted_index_from_shards(
         shard_infos, vocab_size=vocab_size, value_dtype=index_value_dtype
     )
 
@@ -143,6 +192,9 @@ def main(cfg: DictConfig) -> None:
 
     with (index_path / "doc_ids.json").open("w", encoding="utf-8") as doc_file:
         json.dump(doc_ids, doc_file)
+    if group_ids is not None:
+        with (index_path / "group_ids.json").open("w", encoding="utf-8") as group_file:
+            json.dump(group_ids, group_file)
 
     metadata_out: dict[str, Any] = {
         "vocab_size": vocab_size,
@@ -163,6 +215,7 @@ def main(cfg: DictConfig) -> None:
         "term_max_dtype": str(term_max.dtype),
         "block_max_dtype": str(block_max.dtype),
         "block_ptr_dtype": str(block_ptr.dtype),
+        "has_group_ids": group_ids is not None,
     }
     metadata_out.update(output_space.to_metadata_dict())
     with (index_path / "metadata.json").open("w", encoding="utf-8") as meta_file:

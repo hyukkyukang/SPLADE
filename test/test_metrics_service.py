@@ -29,11 +29,9 @@ class TrainingMetricsServiceTest(unittest.TestCase):
                 "q_active_dims": torch.tensor(10.0),
             },
         )
-        self.assertIn("train_loss", module.logged_names)
+        self.assertNotIn("train_loss", module.logged_names)
         self.assertNotIn("train_q_reg", module.logged_names)
         self.assertNotIn("train_q_active_dims", module.logged_names)
-        self.assertTrue(module.logged_kwargs["train_loss"]["on_step"])
-        self.assertTrue(module.logged_kwargs["train_loss"]["on_epoch"])
 
     def test_step_only_metrics_logged_on_interval_boundary(self) -> None:
         service = TrainingMetricsService(step_only_metric_log_interval=3)
@@ -49,6 +47,8 @@ class TrainingMetricsServiceTest(unittest.TestCase):
         self.assertIn("train_loss", module.logged_names)
         self.assertIn("train_q_reg", module.logged_names)
         self.assertIn("train_q_active_dims", module.logged_names)
+        self.assertTrue(module.logged_kwargs["train_loss"]["on_step"])
+        self.assertFalse(module.logged_kwargs["train_loss"]["on_epoch"])
         self.assertTrue(module.logged_kwargs["train_q_reg"]["on_step"])
         self.assertFalse(module.logged_kwargs["train_q_reg"]["on_epoch"])
 

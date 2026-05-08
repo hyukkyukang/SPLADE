@@ -5,6 +5,22 @@ from typing import Any, Iterable, Sequence
 import torch
 from omegaconf import DictConfig, OmegaConf
 
+from src.model.retriever.dense.neural.dpr_biencoder import (
+    DPRBiEncoderModel,
+    build_dpr_biencoder_model,
+    load_dpr_biencoder_checkpoint,
+)
+from src.model.retriever.dense.neural.hf_dense import DenseModel, DenseRetrievalModel
+from src.model.retriever.sparse.neural.mdlm_splade import MDLMSpladeModel
+from src.model.retriever.sparse.neural.ordered_mask_slot_splade import (
+    OrderedMaskSlotSpladeModel,
+)
+from src.model.retriever.sparse.neural.pretrained_diffusion_splade import (
+    PretrainedDiffusionSpladeModel,
+)
+from src.model.retriever.sparse.neural.pretrained_diffusion_ordered_mask_slot_splade import (
+    PretrainedDiffusionOrderedMaskSlotSpladeModel,
+)
 from src.model.retriever.sparse.neural.splade import SpladeModel
 from src.utils.logging import log_if_rank_zero
 
@@ -32,20 +48,121 @@ def build_splade_model(cfg: DictConfig, *, use_cpu: bool) -> SpladeModel:
     family_value: str = str(cfg.model.get("family", "splade")).lower()
     doc_only_flag: bool = bool(cfg.model.doc_only)
     doc_only: bool = doc_only_flag or name_value.endswith(("_doc", "-doc"))
+    local_files_only_value: Any = cfg.model.get("local_files_only")
+    local_files_only: bool | None = (
+        None if local_files_only_value is None else bool(local_files_only_value)
+    )
+    common_model_kwargs: dict[str, Any] = {
+        "family": family_value,
+        "model_name": cfg.model.huggingface_name,
+        "huggingface_model_class": str(cfg.model.huggingface_model_class),
+        "query_pooling": cfg.model.query_pooling,
+        "doc_pooling": cfg.model.doc_pooling,
+        "sparse_activation": cfg.model.sparse_activation,
+        "attn_implementation": cfg.model.attn_implementation,
+        "dtype": dtype,
+        "normalize": cfg.model.normalize,
+        "doc_only": doc_only,
+        "tie_word_embeddings": cfg.model.tie_word_embeddings,
+        "peft_cfg": cfg.model.get("peft"),
+        "freeze_backbone": bool(cfg.model.get("freeze_backbone", False)),
+        "trust_remote_code": bool(cfg.model.get("trust_remote_code", False)),
+        "model_revision": cfg.model.get("model_revision"),
+        "local_files_only": local_files_only,
+    }
+    if family_value == "mdlm_splade":
+        return MDLMSpladeModel(
+            **common_model_kwargs,
+            exclude_token_ids=cfg.model.get("exclude_token_ids"),
+            mask_token_id=cfg.model.get("mask_token_id"),
+        )
+    if family_value == "ordered_mask_slot_splade":
+        return OrderedMaskSlotSpladeModel(
+            **common_model_kwargs,
+            exclude_token_ids=cfg.model.get("exclude_token_ids"),
+            mask_token_id=cfg.model.get("mask_token_id"),
+            num_mask_slots=int(cfg.model.get("num_mask_slots", 0)),
+        )
+    if family_value == "pretrained_diffusion_splade":
+        return PretrainedDiffusionSpladeModel(
+            **common_model_kwargs,
+            exclude_token_ids=cfg.model.get("exclude_token_ids"),
+            mask_token_id=cfg.model.get("mask_token_id"),
+            tokenizer_name=cfg.model.get("tokenizer_name"),
+            tokenizer_revision=cfg.model.get("tokenizer_revision"),
+            use_fast_tokenizer=bool(cfg.model.get("use_fast_tokenizer", True)),
+            require_fast_tokenizer=bool(
+                cfg.model.get("require_fast_tokenizer", False)
+            ),
+            enforce_same_tokenizer_as_baseline=bool(
+                cfg.model.get("enforce_same_tokenizer_as_baseline", False)
+            ),
+            baseline_tokenizer_name=cfg.model.get("baseline_tokenizer_name"),
+        )
+    if family_value == "pretrained_diffusion_ordered_mask_slot_splade":
+        return PretrainedDiffusionOrderedMaskSlotSpladeModel(
+            **common_model_kwargs,
+            exclude_token_ids=cfg.model.get("exclude_token_ids"),
+            mask_token_id=cfg.model.get("mask_token_id"),
+            num_mask_slots=int(cfg.model.get("num_mask_slots", 0)),
+            tokenizer_name=cfg.model.get("tokenizer_name"),
+            tokenizer_revision=cfg.model.get("tokenizer_revision"),
+            use_fast_tokenizer=bool(cfg.model.get("use_fast_tokenizer", True)),
+            require_fast_tokenizer=bool(
+                cfg.model.get("require_fast_tokenizer", False)
+            ),
+            enforce_same_tokenizer_as_baseline=bool(
+                cfg.model.get("enforce_same_tokenizer_as_baseline", False)
+            ),
+            baseline_tokenizer_name=cfg.model.get("baseline_tokenizer_name"),
+        )
     return SpladeModel(
-        family=family_value,
-        model_name=cfg.model.huggingface_name,
-        huggingface_model_class=str(cfg.model.huggingface_model_class),
-        query_pooling=cfg.model.query_pooling,
-        doc_pooling=cfg.model.doc_pooling,
-        sparse_activation=cfg.model.sparse_activation,
-        attn_implementation=cfg.model.attn_implementation,
+        **common_model_kwargs,
+    )
+
+
+def build_dense_model(
+    cfg: DictConfig,
+    *,
+    use_cpu: bool,
+    checkpoint_path: str | None = None,
+) -> DenseRetrievalModel:
+    """Build a dense retrieval model from config with dtype handling."""
+    dtype: torch.dtype | None = resolve_model_dtype(cfg.model.dtype, use_cpu)
+    local_files_only_value: Any = cfg.model.get("local_files_only")
+    local_files_only: bool | None = (
+        None if local_files_only_value is None else bool(local_files_only_value)
+    )
+    dense_architecture: str = str(
+        cfg.model.get("dense_architecture", "shared")
+    ).strip().lower()
+    if dense_architecture == "dpr_biencoder":
+        return build_dpr_biencoder_model(
+            model_cfg=cfg.model,
+            dtype=dtype,
+            checkpoint_path=checkpoint_path,
+        )
+    return DenseModel(
+        family=str(cfg.model.get("family", "dense")).lower(),
+        model_name=str(cfg.model.huggingface_name),
+        huggingface_model_class=str(
+            cfg.model.get("huggingface_model_class", "AutoModel")
+        ),
+        query_pooling=str(cfg.model.get("query_pooling", "mean")),
+        doc_pooling=str(cfg.model.get("doc_pooling", "mean")),
+        query_window_pooling=str(
+            cfg.model.get("query_window_pooling", cfg.model.get("query_pooling", "mean"))
+        ),
+        doc_window_pooling=str(
+            cfg.model.get("doc_window_pooling", cfg.model.get("doc_pooling", "mean"))
+        ),
+        similarity=str(cfg.model.get("similarity", "dot")),
+        attn_implementation=cfg.model.get("attn_implementation"),
         dtype=dtype,
-        normalize=cfg.model.normalize,
-        doc_only=doc_only,
-        tie_word_embeddings=cfg.model.tie_word_embeddings,
-        peft_cfg=cfg.model.get("peft"),
-        freeze_backbone=bool(cfg.model.get("freeze_backbone", False)),
+        normalize=bool(cfg.model.get("normalize", False)),
+        trust_remote_code=bool(cfg.model.get("trust_remote_code", False)),
+        model_revision=cfg.model.get("model_revision"),
+        local_files_only=local_files_only,
     )
 
 
@@ -103,7 +220,7 @@ def _expand_splade_encoder_aliases(state_dict: dict[str, Any]) -> dict[str, Any]
     return expanded
 
 
-def _normalize_checkpoint_state_dict(state_dict: dict[str, Any]) -> dict[str, Any]:
+def _normalize_checkpoint_state_dict_base(state_dict: dict[str, Any]) -> dict[str, Any]:
     prefixes: tuple[str, ...] = (
         "model._orig_mod.module.",
         "model._orig_mod.",
@@ -130,7 +247,11 @@ def _normalize_checkpoint_state_dict(state_dict: dict[str, Any]) -> dict[str, An
             changed = True
         cleaned[cleaned_key] = value
     cleaned_or_original: dict[str, Any] = cleaned if changed else state_dict
-    return _expand_splade_encoder_aliases(cleaned_or_original)
+    return cleaned_or_original
+
+
+def _normalize_checkpoint_state_dict(state_dict: dict[str, Any]) -> dict[str, Any]:
+    return _expand_splade_encoder_aliases(_normalize_checkpoint_state_dict_base(state_dict))
 
 
 def load_splade_checkpoint(
@@ -162,6 +283,55 @@ def load_splade_checkpoint(
             "Checkpoint parameters do not match the current model definition."
         )
     return missing_keys, unexpected_keys
+
+
+def load_dense_checkpoint(
+    model: DenseRetrievalModel,
+    checkpoint_path: str,
+    logger: logging.Logger | None = None,
+) -> tuple[list[str], list[str]]:
+    """Load a Lightning checkpoint into a dense encoder."""
+    if isinstance(model, DPRBiEncoderModel):
+        return load_dpr_biencoder_checkpoint(model, checkpoint_path, logger=logger)
+    checkpoint: dict[str, Any] = torch.load(checkpoint_path, map_location="cpu")
+    state_dict: dict[str, Any] = checkpoint.get("state_dict", checkpoint)
+    state_dict_to_load: dict[str, Any] = _normalize_checkpoint_state_dict_base(
+        state_dict
+    )
+    incompatible: Any = model.load_state_dict(state_dict_to_load, strict=False)
+    missing_keys: list[str] = list(incompatible.missing_keys)
+    unexpected_keys: list[str] = list(incompatible.unexpected_keys)
+    if missing_keys or unexpected_keys:
+        error_logger = logger or logging.getLogger(__name__)
+        error_logger.error(
+            "Checkpoint parameter mismatch: missing=%d, unexpected=%d.",
+            len(missing_keys),
+            len(unexpected_keys),
+        )
+        if missing_keys:
+            error_logger.error(
+                "Missing keys (sample): %s", ", ".join(missing_keys[:10])
+            )
+        if unexpected_keys:
+            error_logger.error(
+                "Unexpected keys (sample): %s", ", ".join(unexpected_keys[:10])
+            )
+        raise RuntimeError(
+            "Checkpoint parameters do not match the current model definition."
+        )
+    return missing_keys, unexpected_keys
+
+
+def build_retrieval_model(
+    cfg: DictConfig,
+    *,
+    use_cpu: bool,
+    checkpoint_path: str | None = None,
+) -> SpladeModel | DenseRetrievalModel:
+    family_value: str = str(cfg.model.get("family", "splade")).strip().lower()
+    if family_value == "dense":
+        return build_dense_model(cfg, use_cpu=use_cpu, checkpoint_path=checkpoint_path)
+    return build_splade_model(cfg, use_cpu=use_cpu)
 
 
 def _load_checkpoint_hparams(checkpoint_path: str) -> DictConfig | None:

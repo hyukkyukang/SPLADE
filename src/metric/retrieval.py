@@ -11,6 +11,14 @@ from torchmetrics.retrieval import (
 )
 
 DEFAULT_K_LIST: list[int] = [1, 5, 10, 50, 100]
+DEFAULT_METRIC_FAMILIES: list[str] = ["nDCG", "MRR", "MAP", "Recall", "Success"]
+_VALID_METRIC_FAMILIES: dict[str, str] = {
+    "ndcg": "nDCG",
+    "mrr": "MRR",
+    "map": "MAP",
+    "recall": "Recall",
+    "success": "Success",
+}
 
 
 def resolve_k_list(k_list: Sequence[int] | None) -> list[int]:
@@ -18,6 +26,30 @@ def resolve_k_list(k_list: Sequence[int] | None) -> list[int]:
     if k_list is not None and len(k_list) > 0:
         return list(dict.fromkeys(int(k) for k in k_list))
     return list(DEFAULT_K_LIST)
+
+
+def resolve_metric_families(metric_families: Sequence[str] | None) -> list[str]:
+    """Resolve retrieval metric families from explicit values or defaults."""
+    if metric_families is None or len(metric_families) == 0:
+        return list(DEFAULT_METRIC_FAMILIES)
+    resolved: list[str] = []
+    seen: set[str] = set()
+    raw_family: str
+    for raw_family in metric_families:
+        family_key: str = str(raw_family).strip().lower()
+        family_name: str | None = _VALID_METRIC_FAMILIES.get(family_key)
+        if family_name is None:
+            raise ValueError(
+                "metric_families must be drawn from "
+                f"{sorted(_VALID_METRIC_FAMILIES.values())}. Got: {raw_family!r}"
+            )
+        if family_name in seen:
+            continue
+        seen.add(family_name)
+        resolved.append(family_name)
+    if not resolved:
+        raise ValueError("metric_families must contain at least one metric family.")
+    return resolved
 
 
 class RetrievalMetrics(MetricCollection):
@@ -32,12 +64,15 @@ class RetrievalMetrics(MetricCollection):
         self,
         dataset_name: str = "",
         k_list: Optional[List[int]] = None,
+        metric_families: Optional[Sequence[str]] = None,
         sync_on_compute: bool = False,
     ) -> None:
         k_list_final: List[int] = k_list if k_list is not None else list(DEFAULT_K_LIST)
+        metric_families_final: list[str] = resolve_metric_families(metric_families)
 
         metrics: Dict[str, torch.nn.Module] = self._build_metrics(
             k_list=k_list_final,
+            metric_families=metric_families_final,
             sync_on_compute=sync_on_compute,
         )
         prefix: str = f"{dataset_name}_" if dataset_name else ""
@@ -59,22 +94,34 @@ class RetrievalMetrics(MetricCollection):
     def _build_metrics(
         self,
         k_list: List[int],
+        metric_families: Sequence[str],
         sync_on_compute: bool = False,
     ) -> Dict[str, torch.nn.Module]:
         metrics: Dict[str, torch.nn.Module] = {}
         for k in k_list:
             # sync_on_compute=False: disable automatic distributed sync for performance.
-            metrics[f"nDCG_{k}"] = RetrievalNormalizedDCG(
-                top_k=k, sync_on_compute=sync_on_compute
-            )
-            metrics[f"MRR_{k}"] = RetrievalMRR(top_k=k, sync_on_compute=sync_on_compute)
-            metrics[f"MAP_{k}"] = RetrievalMAP(top_k=k, sync_on_compute=sync_on_compute)
-            metrics[f"Recall_{k}"] = RetrievalRecall(
-                top_k=k, sync_on_compute=sync_on_compute
-            )
-            metrics[f"Success_{k}"] = RetrievalHitRate(
-                top_k=k, sync_on_compute=sync_on_compute
-            )
+            family: str
+            for family in metric_families:
+                if family == "nDCG":
+                    metrics[f"nDCG_{k}"] = RetrievalNormalizedDCG(
+                        top_k=k, sync_on_compute=sync_on_compute
+                    )
+                elif family == "MRR":
+                    metrics[f"MRR_{k}"] = RetrievalMRR(
+                        top_k=k, sync_on_compute=sync_on_compute
+                    )
+                elif family == "MAP":
+                    metrics[f"MAP_{k}"] = RetrievalMAP(
+                        top_k=k, sync_on_compute=sync_on_compute
+                    )
+                elif family == "Recall":
+                    metrics[f"Recall_{k}"] = RetrievalRecall(
+                        top_k=k, sync_on_compute=sync_on_compute
+                    )
+                elif family == "Success":
+                    metrics[f"Success_{k}"] = RetrievalHitRate(
+                        top_k=k, sync_on_compute=sync_on_compute
+                    )
         return metrics
 
     def append(

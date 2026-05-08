@@ -1,0 +1,65 @@
+# True MTEB retrieval evaluation config
+seed: 10
+log_dir_base: "log"
+tag: null
+log_dir: ${tagged_log_dir:${log_dir_base},${tag}}
+root_dir_path: "."
+
+defaults:
+  - _self_
+  - model: splade_v1
+  - testing: default
+  - override hydra/job_logging: colorlog_custom
+
+mteb:
+  benchmark_name: BEIR
+  tasks: null
+  languages: null
+  eval_splits: null
+  batch_size: ${testing.batch_size}
+  query_batch_size: null
+  corpus_batch_size: null
+  max_query_length: 512
+  max_doc_length: 512
+  max_active_dims: null
+  corpus_chunk_size: 50000
+  heartbeat_interval_seconds: 120
+  num_proc: 1
+  public_only: true
+  use_huggingface_model: false
+  overwrite_results: true
+  save_json: true
+  show_progress_bar: true
+  parallel:
+    enabled: true
+    gpu_ids: null
+    max_workers: null
+
+mlflow:
+  enabled: true
+  experiment_name: Eval-True-MTEB
+  tracking_uri: ${oc.env:MLFLOW_TRACKING_URI,https://mlflow.hyukkyu.com}
+  run_name: ${oc.env:MLFLOW_RUN_NAME,null}
+  artifact_location: ${oc.env:MLFLOW_ARTIFACT_LOCATION,null}
+  insecure_tls: ${oc.decode:${oc.env:MLFLOW_TRACKING_INSECURE_TLS,true}}
+  server_cert_path: ${oc.env:MLFLOW_TRACKING_SERVER_CERT_PATH,null}
+  client_cert_path: ${oc.env:MLFLOW_TRACKING_CLIENT_CERT_PATH,null}
+  system_metrics_enabled: ${oc.decode:${oc.env:MLFLOW_ENABLE_SYSTEM_METRICS_LOGGING,true}}
+  system_metrics_sampling_interval: ${oc.decode:${oc.env:MLFLOW_SYSTEM_METRICS_SAMPLING_INTERVAL,30}}
+  system_metrics_samples_before_logging: ${oc.decode:${oc.env:MLFLOW_SYSTEM_METRICS_SAMPLES_BEFORE_LOGGING,1}}
+  log_artifacts: false
+  tags: {}
+
+hydra:
+  output_subdir: null
+  run:
+    dir: ${log_dir}
+  job_logging:
+    handlers:
+      console:
+        class: logging.StreamHandler
+        formatter: colorlog
+        stream: ext://sys.stdout
+      file:
+        class: logging.FileHandler
+        filename: ${log_dir}/evaluate_true_mteb.log

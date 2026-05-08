@@ -1,0 +1,15 @@
+# @package dataset
+defaults:
+  - msmarco_hard_negatives@_here_
+
+hf_name: parquet
+hf_subset: null
+hf_data_files:
+  train: data/msmarco_hn_profile_slice_1024/meta.parquet
+
+query_corpus_hf_name: parquet
+query_corpus_hf_data_files: null
+query_hf_data_files:
+  train: data/msmarco_hn_profile_slice_1024/queries.parquet
+corpus_hf_data_files:
+  train: data/msmarco_hn_profile_slice_1024/corpus.parquet

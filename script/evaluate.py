@@ -1,14 +1,15 @@
 """Backward-compatible evaluate entrypoint.
 
 Routes retrieval evaluation to ``script/evaluation.py`` and supports
-``--benchmark nanobeir`` / ``--benchmark mteb`` benchmark entrypoints.
+``--benchmark nanobeir`` / ``--benchmark mteb`` / ``--benchmark true_mteb``
+benchmark entrypoints.
 """
 
 from __future__ import annotations
 
 import sys
 
-_SUPPORTED_BENCHMARK_NAMES: set[str] = {"nanobeir", "mteb"}
+_SUPPORTED_BENCHMARK_NAMES: set[str] = {"nanobeir", "mteb", "true_mteb"}
 
 
 def _extract_benchmark_argument(argv: list[str]) -> tuple[str | None, list[str]]:
@@ -58,6 +59,12 @@ def main() -> None:
         from script.evaluate_mteb import main as mteb_main
 
         mteb_main()
+        return
+
+    if benchmark_name == "true_mteb":
+        from script.evaluate_true_mteb import main as true_mteb_main
+
+        true_mteb_main()
         return
 
     supported_values: str = ", ".join(sorted(_SUPPORTED_BENCHMARK_NAMES))

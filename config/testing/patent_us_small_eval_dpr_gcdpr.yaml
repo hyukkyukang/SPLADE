@@ -1,0 +1,17 @@
+# @package testing
+defaults:
+  - _base
+
+name: patent_us_small_eval_dpr_gcdpr
+
+batch_size: 32
+num_workers: 8
+torch_compile: false
+max_windows_per_forward: null
+exclude_self_match: false
+faiss_gpu_shard: true
+result_group_key: group_id
+group_candidate_pool: 200
+search_top_k: 200
+k_list: [1, 5, 10, 16, 32, 64, 150, 1000, 3000, 10000]
+metric_families: [Success]

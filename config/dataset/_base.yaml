@@ -6,12 +6,14 @@ split: train
 corpus_split: ${.split}
 hf_split: ${.split}
 
-# MSMARCO max query token number is 87, 128 is a good compromise
+# Use 128-token query/doc limits by default for consistent static shapes.
 max_query_length: 128
-max_doc_length: 256
+max_doc_length: 128
 max_padding: true
 query_long_doc_strategy: truncate
 query_sliding_window_overlap_tokens: 0
+query_truncate_prefix_chars_per_token: 16
+query_truncate_prefix_min_chars: 4096
 num_negatives: 1
 num_positives: 1
 
@@ -63,9 +65,11 @@ query_text_column: text
 corpus_subset_name: corpus
 corpus_split_name: ${.corpus_split}
 corpus_id_column: _id
+corpus_group_id_column: null
 corpus_text_column: text
 corpus_title_column: null
 corpus_additional_text_columns: []
+corpus_text_template: null
 
 # Optional: join scored hard negatives by query id.
 score_hf_name: null

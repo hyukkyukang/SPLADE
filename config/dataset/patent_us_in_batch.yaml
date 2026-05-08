@@ -1,0 +1,43 @@
+# @package dataset
+defaults:
+  - _base@_here_
+
+name: patent_us_in_batch
+type: patent_us_in_batch
+split: train
+corpus_split: train
+hf_split: train
+
+max_query_length: 64
+max_doc_length: 512
+num_positives: 1
+num_negatives: 0
+
+negative_sampling:
+  strategy: random
+  top_k: null
+  random_k: null
+  random_pool: null
+
+hf_name: parquet
+hf_subset: null
+hf_cache_dir: null
+hf_max_samples: null
+hf_skip_samples: 0
+hf_data_files:
+  train: data/patent/train/usc102103_in_batch_metadata.parquet
+
+query_corpus_hf_name: null
+query_corpus_hf_cache_dir: null
+query_corpus_hf_data_files: null
+query_hf_data_files: null
+corpus_hf_data_files:
+  train: .cache/hf/patent-us-corpus/patent_us_docs_slice*.parquet
+
+query_id_column: query_id
+query_text_column: query_text
+corpus_id_column: doc_id
+corpus_title_column: title
+corpus_text_column: abstract
+corpus_additional_text_columns:
+  - claims

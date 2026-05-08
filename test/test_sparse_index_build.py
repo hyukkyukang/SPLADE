@@ -37,12 +37,15 @@ class SparseIndexBuildTest(unittest.TestCase):
             indices_path = root / "indices.npy"
             values_path = root / "values.npy"
             doc_ids_path = root / "doc_ids.json"
+            group_ids_path = root / "group_ids.json"
 
             np.save(indptr_path, np.array([0, 2], dtype=np.int64))
             np.save(indices_path, np.array([1, 3], dtype=np.int32))
             np.save(values_path, np.array([0.5, 1.5], dtype=np.float16))
             with doc_ids_path.open("w", encoding="utf-8") as handle:
                 json.dump(["doc-1"], handle)
+            with group_ids_path.open("w", encoding="utf-8") as handle:
+                json.dump(["patent-1"], handle)
 
             shard = ShardInfo(
                 rank=0,
@@ -53,8 +56,9 @@ class SparseIndexBuildTest(unittest.TestCase):
                 indices_path=indices_path,
                 values_path=values_path,
                 doc_ids_path=doc_ids_path,
+                group_ids_path=group_ids_path,
             )
-            term_ptr, post_doc_ids, post_weights, doc_ids = (
+            term_ptr, post_doc_ids, post_weights, doc_ids, group_ids = (
                 build_inverted_index_from_shards(
                     [shard],
                     vocab_size=5,
@@ -69,6 +73,7 @@ class SparseIndexBuildTest(unittest.TestCase):
                 post_weights, np.array([0.5, 1.5], dtype=np.float32)
             )
             self.assertEqual(doc_ids, ["doc-1"])
+            self.assertEqual(group_ids, ["patent-1"])
 
 
 if __name__ == "__main__":

@@ -1,0 +1,51 @@
+# Training entrypoint config for patent DPR English data finetuning with SPLADE-v3.
+# Uses English-only subset of the coworker's DPR training data
+# (negative1_ko_en_20251202_filtered.json), converted to inline triplets.
+seed: 10
+log_dir_base: "log/train/${model.name}"
+tag: null
+log_dir: ${tagged_log_dir:${log_dir_base},${tag}}
+root_dir_path: "."
+required_train_dataset_name: patent_dpr_en
+
+defaults:
+  - model: splade_v3_naver
+  - dataset@train_dataset: patent_dpr_en
+  - dataset@val_dataset: patent_dpr_en_val
+  - training: splade_v3_patent_dpr_en
+  - testing: default
+  - override hydra/job_logging: colorlog_custom
+  - _self_
+
+training:
+  num_devices: 8
+
+train_dataset:
+  max_padding: ${training.max_padding}
+
+val_dataset:
+  max_padding: ${training.max_padding}
+
+nanobeir:
+  enabled: false
+  run_every_n_val: 1
+  datasets: []
+  batch_size: ${training.eval_batch_size}
+  max_seq_length: ${train_dataset.max_doc_length}
+  use_cpu: ${training.use_cpu}
+  cache_dir: null
+  save_json: false
+
+hydra:
+  output_subdir: null
+  run:
+    dir: ${log_dir}
+  job_logging:
+    handlers:
+      console:
+        class: logging.StreamHandler
+        formatter: colorlog
+        stream: ext://sys.stdout
+      file:
+        class: logging.FileHandler
+        filename: ${log_dir}/train.log

@@ -174,6 +174,9 @@ def resolve_model_source(
     checkpoint_path: str | None = normalize_optional_path(
         testing_cfg.checkpoint_path
     )
+    model_hf_name: str | None = None
+    if hasattr(cfg, "model") and cfg.model is not None:
+        model_hf_name = normalize_optional_path(cfg.model.get("huggingface_name"))
 
     if hf_model_path:
         if checkpoint_path:
@@ -185,6 +188,15 @@ def resolve_model_source(
         if set_nanobeir_flag and hasattr(cfg, "nanobeir"):
             cfg.nanobeir.use_huggingface_model = True
         log_if_rank_zero(logger, f"Using Hugging Face model: {hf_model_path}")
+        return cfg
+
+    if (
+        set_nanobeir_flag
+        and hasattr(cfg, "nanobeir")
+        and bool(cfg.nanobeir.use_huggingface_model)
+        and model_hf_name is not None
+    ):
+        log_if_rank_zero(logger, f"Using Hugging Face model: {model_hf_name}")
         return cfg
 
     if not checkpoint_path:

@@ -8,6 +8,7 @@ import torch
 from torch import nn
 
 from src.model.retriever.sparse.neural.splade import SpladeEncoder, SpladeModel
+from src.utils.compact_head import OFFICIAL_LENS_HEAD_FILENAME
 
 
 class _DummyHiddenOutput:
@@ -228,6 +229,56 @@ class LensCompactHeadAlignmentTest(unittest.TestCase):
                         sparse_activation="log1p_relu",
                         doc_only=True,
                     )
+
+
+    def test_official_lens_lm_head_file_loads_as_clustered_head(self) -> None:
+        dummy_model = _DummyCausalLM(vocab_size=32, hidden_size=8)
+        with tempfile.TemporaryDirectory(prefix="official_lens_local_") as tmp:
+            model_dir = Path(tmp)
+            torch.save(nn.Linear(8, 4, bias=True), model_dir / OFFICIAL_LENS_HEAD_FILENAME)
+
+            with patch(
+                "src.model.retriever.sparse.neural.splade.build_masked_lm_model",
+                return_value=dummy_model,
+            ), patch(
+                "src.model.retriever.sparse.neural.splade.resolve_model_name_or_path",
+                return_value=str(model_dir),
+            ):
+                encoder = SpladeEncoder(
+                    model_name=str(model_dir),
+                    sparse_activation="log1p_relu",
+                    huggingface_model_class="MistralBiForCausalLM",
+                )
+
+        self.assertFalse(encoder.output_token_aligned)
+        self.assertEqual(encoder.compact_head_alignment, "latent_cluster")
+        self.assertEqual(tuple(encoder.compact_head.weight.shape), (4, 8))
+
+    def test_official_lens_hub_head_downloads_when_model_source_is_repo_id(self) -> None:
+        dummy_model = _DummyCausalLM(vocab_size=32, hidden_size=8)
+        with tempfile.TemporaryDirectory(prefix="official_lens_hub_") as tmp:
+            artifact_path = Path(tmp) / OFFICIAL_LENS_HEAD_FILENAME
+            torch.save(nn.Linear(8, 5, bias=False), artifact_path)
+
+            with patch(
+                "src.model.retriever.sparse.neural.splade.build_masked_lm_model",
+                return_value=dummy_model,
+            ), patch(
+                "src.model.retriever.sparse.neural.splade.resolve_model_name_or_path",
+                return_value="yibinlei/LENS-d4000",
+            ), patch(
+                "src.model.retriever.sparse.neural.splade._maybe_download_hf_artifact",
+                return_value=artifact_path,
+            ) as mocked_download:
+                encoder = SpladeEncoder(
+                    model_name="yibinlei/LENS-d4000",
+                    sparse_activation="log1p_relu",
+                    huggingface_model_class="MistralBiForCausalLM",
+                )
+
+        self.assertEqual(mocked_download.call_count, 1)
+        self.assertFalse(encoder.output_token_aligned)
+        self.assertEqual(tuple(encoder.compact_head.weight.shape), (5, 8))
 
 
 if __name__ == "__main__":

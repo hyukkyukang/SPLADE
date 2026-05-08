@@ -52,8 +52,14 @@ def _writer_worker_loop(
             item = queue_in.get()
             if item is None:
                 break
-            doc_ids, indptr, indices, values = item
-            writer.write_sparse_csr_batch(doc_ids, indptr, indices, values)
+            doc_ids, indptr, indices, values, doc_group_ids = item
+            writer.write_sparse_csr_batch(
+                doc_ids,
+                indptr,
+                indices,
+                values,
+                doc_group_ids=doc_group_ids,
+            )
         writer.finalize()
     except Exception as exc:  # pragma: no cover - defensive logging
         try:
@@ -115,11 +121,12 @@ class AsyncSparseWriter:
         indptr: torch.Tensor,
         indices: torch.Tensor,
         values: torch.Tensor,
+        doc_group_ids: Sequence[str | None] | None = None,
     ) -> None:
         self._raise_if_error()
         if self._queue is None:
             raise RuntimeError("Async writer is not started.")
-        payload = (list(doc_ids), indptr, indices, values)
+        payload = (list(doc_ids), indptr, indices, values, None if doc_group_ids is None else list(doc_group_ids))
         try:
             self._queue.put(payload, timeout=1.0)
         except queue.Full:

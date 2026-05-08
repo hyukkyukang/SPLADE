@@ -48,6 +48,7 @@ from src.utils.script_setup import (
     normalize_tag,
     resolve_trainer_settings,
 )
+from src.utils.trainer import resolve_validation_check_interval
 
 logger: logging.Logger = get_logger(__name__, __file__)
 
@@ -492,13 +493,27 @@ def main(cfg: DictConfig) -> None:
     if progress_bar is not None:
         callbacks.append(progress_bar)
     lightning_profiler: Profiler | None = _build_lightning_profiler(cfg, training_cfg)
+    resolved_val_check_interval: int | float = resolve_validation_check_interval(
+        training_cfg
+    )
+    optimizer_step_validation_interval: Any | None = training_cfg.get(
+        "val_check_interval_optimizer_steps"
+    )
+    if optimizer_step_validation_interval is not None:
+        log_if_rank_zero(
+            logger,
+            "Resolved validation cadence to every "
+            f"{int(optimizer_step_validation_interval)} optimizer steps "
+            f"({int(resolved_val_check_interval)} training batches with "
+            f"grad_accumulation={int(training_cfg.grad_accumulation)}).",
+        )
 
     trainer: L.Trainer = L.Trainer(
         deterministic=False,
         precision=precision,
         max_steps=cfg.training.max_steps,
         accumulate_grad_batches=cfg.training.grad_accumulation,
-        val_check_interval=cfg.training.val_check_interval,
+        val_check_interval=resolved_val_check_interval,
         limit_val_batches=cfg.training.limit_val_batches,
         log_every_n_steps=cfg.training.log_every_n_steps,
         default_root_dir=cfg.log_dir,

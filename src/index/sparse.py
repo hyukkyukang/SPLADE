@@ -62,6 +62,7 @@ class ShardInfo:
     indices_path: Path
     values_path: Path
     doc_ids_path: Path
+    group_ids_path: Path | None = None
 
 
 class SparseShardWriter:
@@ -129,6 +130,7 @@ class SparseShardWriter:
     # --- Protected methods ---
     def _reset_buffer(self) -> None:
         self._buffer_doc_ids: list[str] = []
+        self._buffer_group_ids: list[str] = []
         self._buffer_indices: list[np.ndarray] = []
         self._buffer_values: list[np.ndarray] = []
         self._buffer_indptr: list[int] = [0]
@@ -174,8 +176,18 @@ class SparseShardWriter:
         )
         return indices_np, values_np
 
-    def _append_doc(self, doc_id: str, indices: np.ndarray, values: np.ndarray) -> None:
+    def _append_doc(
+        self,
+        doc_id: str,
+        indices: np.ndarray,
+        values: np.ndarray,
+        *,
+        doc_group_id: str | None = None,
+    ) -> None:
         self._buffer_doc_ids.append(doc_id)
+        if doc_group_id is not None:
+            resolved_group_id: str = str(doc_group_id).strip()
+            self._buffer_group_ids.append(resolved_group_id or doc_id)
         self._buffer_indices.append(indices)
         self._buffer_values.append(values)
         next_ptr: int = int(self._buffer_indptr[-1]) + int(indices.size)
@@ -203,12 +215,17 @@ class SparseShardWriter:
         indices_path: Path = Path(f"{shard_prefix}_indices.npy")
         values_path: Path = Path(f"{shard_prefix}_values.npy")
         doc_ids_path: Path = Path(f"{shard_prefix}_doc_ids.json")
+        group_ids_path: Path | None = None
 
         np.save(indptr_path, indptr)
         np.save(indices_path, indices)
         np.save(values_path, values)
         with doc_ids_path.open("w", encoding="utf-8") as doc_file:
             json.dump(self._buffer_doc_ids, doc_file)
+        if self._buffer_group_ids:
+            group_ids_path = Path(f"{shard_prefix}_group_ids.json")
+            with group_ids_path.open("w", encoding="utf-8") as group_file:
+                json.dump(self._buffer_group_ids, group_file)
 
         shard_record: dict[str, Any] = {
             "shard_id": self._shard_idx,
@@ -219,6 +236,8 @@ class SparseShardWriter:
             "values": values_path.name,
             "doc_ids": doc_ids_path.name,
         }
+        if group_ids_path is not None:
+            shard_record["group_ids"] = group_ids_path.name
         self._manifest.append(shard_record)
         self._shard_idx += 1
         self._total_docs += len(self._buffer_doc_ids)
@@ -226,11 +245,19 @@ class SparseShardWriter:
         self._reset_buffer()
 
     # --- Public methods ---
-    def write_batch(self, doc_ids: Sequence[str], doc_reps: torch.Tensor) -> None:
+    def write_batch(
+        self,
+        doc_ids: Sequence[str],
+        doc_reps: torch.Tensor,
+        *,
+        doc_group_ids: Sequence[str | None] | None = None,
+    ) -> None:
         if len(doc_ids) == 0:
             return
         if int(doc_reps.shape[0]) != len(doc_ids):
             raise ValueError("doc_ids length does not match doc_reps batch size.")
+        if doc_group_ids is not None and len(doc_group_ids) != len(doc_ids):
+            raise ValueError("doc_group_ids length does not match doc_ids batch size.")
 
         doc_reps_cpu: torch.Tensor = doc_reps.detach()
         if doc_reps_cpu.is_cuda:
@@ -240,11 +267,19 @@ class SparseShardWriter:
         batch_size: int = int(doc_reps_cpu.shape[0])
         for idx in range(batch_size):
             doc_id: str = str(doc_ids[idx])
+            doc_group_id: str | None = (
+                None if doc_group_ids is None else doc_group_ids[idx]
+            )
             vector: torch.Tensor = doc_reps_cpu[idx]
             indices: np.ndarray
             values: np.ndarray
             indices, values = self._sparsify_vector(vector)
-            self._append_doc(doc_id, indices, values)
+            self._append_doc(
+                doc_id,
+                indices,
+                values,
+                doc_group_id=doc_group_id,
+            )
             if len(self._buffer_doc_ids) >= self.shard_max_docs:
                 self._flush()
 
@@ -253,14 +288,28 @@ class SparseShardWriter:
         doc_ids: Sequence[str],
         indices_list: Sequence[np.ndarray],
         values_list: Sequence[np.ndarray],
+        *,
+        doc_group_ids: Sequence[str | None] | None = None,
     ) -> None:
         if len(doc_ids) == 0:
             return
         if len(doc_ids) != len(indices_list) or len(doc_ids) != len(values_list):
             raise ValueError("Sparse batch inputs must align with doc_ids length.")
+        if doc_group_ids is not None and len(doc_group_ids) != len(doc_ids):
+            raise ValueError("doc_group_ids length does not match doc_ids batch size.")
 
-        for doc_id, indices, values in zip(doc_ids, indices_list, values_list):
-            self._append_doc(str(doc_id), indices, values)
+        for row_idx, (doc_id, indices, values) in enumerate(
+            zip(doc_ids, indices_list, values_list)
+        ):
+            doc_group_id: str | None = (
+                None if doc_group_ids is None else doc_group_ids[row_idx]
+            )
+            self._append_doc(
+                str(doc_id),
+                indices,
+                values,
+                doc_group_id=doc_group_id,
+            )
             if len(self._buffer_doc_ids) >= self.shard_max_docs:
                 self._flush()
 
@@ -270,10 +319,14 @@ class SparseShardWriter:
         indptr: np.ndarray | torch.Tensor,
         indices: np.ndarray | torch.Tensor,
         values: np.ndarray | torch.Tensor,
+        *,
+        doc_group_ids: Sequence[str | None] | None = None,
     ) -> None:
         """Write a CSR batch (indptr/indices/values) for provided doc_ids."""
         if len(doc_ids) == 0:
             return
+        if doc_group_ids is not None and len(doc_group_ids) != len(doc_ids):
+            raise ValueError("doc_group_ids length does not match doc_ids batch size.")
 
         indptr_np: np.ndarray = (
             indptr.detach().cpu().numpy() if isinstance(indptr, torch.Tensor) else indptr
@@ -297,9 +350,17 @@ class SparseShardWriter:
             raise ValueError("CSR indptr length must equal doc_ids length + 1.")
 
         for doc_idx, doc_id in enumerate(doc_ids):
+            doc_group_id: str | None = (
+                None if doc_group_ids is None else doc_group_ids[doc_idx]
+            )
             start: int = int(indptr_np[doc_idx])
             end: int = int(indptr_np[doc_idx + 1])
-            self._append_doc(str(doc_id), indices_np[start:end], values_np[start:end])
+            self._append_doc(
+                str(doc_id),
+                indices_np[start:end],
+                values_np[start:end],
+                doc_group_id=doc_group_id,
+            )
             if len(self._buffer_doc_ids) >= self.shard_max_docs:
                 self._flush()
 
@@ -317,6 +378,7 @@ class SparseShardWriter:
             "model_family": self.model_family,
             "doc_count": self._total_docs,
             "nnz": self._total_nnz,
+            "has_group_ids": any("group_ids" in shard for shard in self._manifest),
             "shards": self._manifest,
         }
         manifest_payload.update(self.output_space.to_metadata_dict())
@@ -357,6 +419,7 @@ def load_shard_manifest(encode_path: Path) -> tuple[list[ShardInfo], dict[str, A
                 ),
                 "value_dtype": manifest.get("value_dtype"),
                 "model_family": manifest.get("model_family"),
+                "has_group_ids": bool(manifest.get("has_group_ids", False)),
             }
             metadata.update(output_space.to_metadata_dict())
 
@@ -372,6 +435,11 @@ def load_shard_manifest(encode_path: Path) -> tuple[list[ShardInfo], dict[str, A
                     indices_path=rank_dir / str(shard["indices"]),
                     values_path=rank_dir / str(shard["values"]),
                     doc_ids_path=rank_dir / str(shard["doc_ids"]),
+                    group_ids_path=(
+                        None
+                        if shard.get("group_ids") is None
+                        else rank_dir / str(shard["group_ids"])
+                    ),
                 )
             )
 
@@ -407,10 +475,12 @@ def build_inverted_index_from_shards(
     vocab_size: int,
     *,
     value_dtype: np.dtype,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str]]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str], list[str] | None]:
     """Build inverted index arrays from sparse shards."""
     term_counts: np.ndarray = np.zeros(int(vocab_size), dtype=np.int64)
     doc_ids: list[str] = []
+    group_ids: list[str] = []
+    has_group_ids: bool = False
 
     for shard in shard_infos:
         indices: np.ndarray = np.load(shard.indices_path)
@@ -421,6 +491,16 @@ def build_inverted_index_from_shards(
         with shard.doc_ids_path.open("r", encoding="utf-8") as doc_file:
             shard_doc_ids: list[str] = json.load(doc_file)
         doc_ids.extend(shard_doc_ids)
+        if shard.group_ids_path is not None:
+            with shard.group_ids_path.open("r", encoding="utf-8") as group_file:
+                shard_group_ids: list[str] = json.load(group_file)
+            if len(shard_group_ids) != len(shard_doc_ids):
+                raise ValueError(
+                    "Sparse shard group_ids length does not match doc_ids: "
+                    f"{shard.group_ids_path}"
+                )
+            group_ids.extend(str(group_id) for group_id in shard_group_ids)
+            has_group_ids = True
 
     term_ptr: np.ndarray = np.zeros(int(vocab_size) + 1, dtype=np.int64)
     term_ptr[1:] = np.cumsum(term_counts)
@@ -448,7 +528,7 @@ def build_inverted_index_from_shards(
         )
         doc_offset += int(indptr.shape[0]) - 1
 
-    return term_ptr, post_doc_ids, post_weights, doc_ids
+    return term_ptr, post_doc_ids, post_weights, doc_ids, group_ids if has_group_ids else None
 
 
 @numba.njit

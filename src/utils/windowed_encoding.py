@@ -108,7 +108,7 @@ def encode_and_aggregate_windows(
         )
 
     normalized_pooling_mode: str = str(pooling_mode).lower()
-    if normalized_pooling_mode not in {"sum", "max"}:
+    if normalized_pooling_mode not in {"sum", "max", "mean"}:
         raise ValueError(
             "Unsupported pooling for window aggregation: "
             f"{normalized_pooling_mode}"
@@ -159,7 +159,7 @@ def encode_and_aggregate_windows(
             chunk_pooling_mask,
         )[:real_count]
         if aggregated is None:
-            if normalized_pooling_mode == "sum":
+            if normalized_pooling_mode in {"sum", "mean"}:
                 aggregated = chunk_representations.new_zeros((num_entities, output_dim))
             else:
                 aggregated = chunk_representations.new_full(
@@ -176,9 +176,12 @@ def encode_and_aggregate_windows(
             device=chunk_representations.device,
             dtype=torch.long,
         )
+        reduce_mode: str = (
+            "sum" if normalized_pooling_mode == "mean" else normalized_pooling_mode
+        )
         partial_representations = torch.segment_reduce(
             chunk_representations,
-            reduce=normalized_pooling_mode,
+            reduce=reduce_mode,
             lengths=lengths_tensor,
         )
         entity_indices_tensor = torch.tensor(
@@ -186,7 +189,7 @@ def encode_and_aggregate_windows(
             device=chunk_representations.device,
             dtype=torch.long,
         )
-        if normalized_pooling_mode == "sum":
+        if normalized_pooling_mode in {"sum", "mean"}:
             aggregated.index_add_(0, entity_indices_tensor, partial_representations)
         else:
             current = aggregated.index_select(0, entity_indices_tensor)
@@ -202,6 +205,13 @@ def encode_and_aggregate_windows(
             dtype=output_dtype,
             device=input_ids.device,
         )
+    if normalized_pooling_mode == "mean":
+        lengths_tensor = torch.tensor(
+            entity_lengths,
+            device=aggregated.device,
+            dtype=aggregated.dtype,
+        ).clamp_min(1.0)
+        aggregated = aggregated / lengths_tensor.unsqueeze(-1)
     if normalized_pooling_mode == "max":
         empty_entity_indices: list[int] = [
             entity_idx for entity_idx, count in enumerate(entity_lengths) if count <= 0

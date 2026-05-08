@@ -1,0 +1,21 @@
+# @package dataset
+# cfli/bge-full-data — multi-task training mix used by LENS and BGE-EN-ICL.
+# Consumed by src.data.dataset.bge_full_data.BgeFullDataset and the LENS
+# training data module.
+name: bge_full_data
+type: lens_multi_task
+# Local dir populated via
+#   python -c "import datasets; datasets.load_dataset('cfli/bge-full-data').save_to_disk('<path>')"
+path: ${oc.env:LENS_DATA,/mnt/ex-disk-1/hyukkyukang/SPLADE/lens/data}/bge_full_data_raw
+hf_name: cfli/bge-full-data
+cache_dir: ${oc.env:HF_DATASETS_CACHE,null}
+# Training-side knobs — picked up by LENSCollator + SameDatasetBatchSampler.
+train_group_size: ${training.lens_multi_task.train_group_size}
+symmetric_batch_size: ${training.lens_multi_task.symmetric_batch_size}
+symmetric_train_group_size: ${training.lens_multi_task.symmetric_train_group_size}
+max_class_neg: ${training.lens_multi_task.max_class_neg}
+sub_batch_size: ${training.lens_multi_task.sub_batch_size}
+query_max_len: ${training.lens_multi_task.query_max_len}
+passage_max_len: ${training.lens_multi_task.passage_max_len}
+use_special_tokens: true
+shuffle_ratio: 0.0

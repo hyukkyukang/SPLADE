@@ -38,6 +38,7 @@ class RetrievalEvalLightningModule(L.LightningModule):
         self.metric_collection: RetrievalMetrics = RetrievalMetrics(
             dataset_name=self.cfg.dataset.name,
             k_list=self._retrieval_helper.k_list,
+            metric_families=self.cfg.testing.get("metric_families"),
             sync_on_compute=False,
         )
         self._local_query_offset: int = 0

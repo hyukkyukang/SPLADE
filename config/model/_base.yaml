@@ -1,10 +1,27 @@
 name: splade
 family: splade
+representation_type: sparse
+dense_architecture: shared
+backbone_pretraining_type: mlm
 huggingface_name: distilbert-base-uncased
+tokenizer_name: null
 huggingface_model_class: AutoModelForMaskedLM
 trust_remote_code: false
 use_fast_tokenizer: true
 require_fast_tokenizer: false
+# LENS reproduction: when true, uses the official Yibin-Lei tokenizer setup
+# (slow tokenizer, padding_side=left, add_eos_token=True, unk->eos pad fallback).
+# Has no effect for non-LENS models.
+strict_official_lens_tokenizer: false
+# LENS reproduction: when true, the sparse SPLADE wrapper bypasses its own
+# compact-head build and loads the official `lm_head.pth` artifact directly
+# from `huggingface_name` (e.g. yibinlei/LENS-d{4000,8000}).
+load_official_lens: false
+model_revision: null
+tokenizer_revision: null
+local_files_only: null
+enforce_same_tokenizer_as_baseline: false
+baseline_tokenizer_name: distilbert-base-uncased
 
 # encoder settings
 dtype: float32
@@ -17,7 +34,10 @@ bidirectional: false
 # encoding options
 query_pooling: max
 doc_pooling: max
+query_window_pooling: ${model.query_pooling}
+doc_window_pooling: ${model.doc_pooling}
 sparse_activation: log1p_relu
+similarity: dot
 normalize: false
 doc_only: false
 benchmark_adapter: auto
@@ -43,3 +63,16 @@ peft:
 
 # retrieval index
 exclude_token_ids: []
+
+bert_config:
+  vocab_size: null
+  hidden_size: null
+  num_hidden_layers: null
+  num_attention_heads: null
+  intermediate_size: null
+  max_position_embeddings: null
+  type_vocab_size: null
+  hidden_dropout_prob: null
+  attention_probs_dropout_prob: null
+  layer_norm_eps: null
+  pad_token_id: null

@@ -1,0 +1,23 @@
+# @package model
+defaults:
+  - _base
+
+name: ordered_mask_slot_splade_distilbert
+family: ordered_mask_slot_splade
+backbone_pretraining_type: mlm
+huggingface_name: distilbert-base-uncased
+huggingface_model_class: AutoModelForMaskedLM
+benchmark_adapter: native
+query_pooling: max
+doc_pooling: max
+sparse_activation: log1p_relu
+num_mask_slots: 8
+mask_token_id: 103
+exclude_token_ids: [0, 100, 101, 102, 103]
+ordered_mask_slots:
+  idf_cache_dir: null
+  idf_batch_size: 2048
+  idf_log_interval: 100000
+  idf_cache_wait_timeout_seconds: 14400
+  idf_num_workers: 0
+  idf_shards_per_worker: 4

@@ -1,0 +1,26 @@
+# @package dataset
+defaults:
+  - _base@_here_
+
+name: patent_us_claim_passages_small
+type: corpus_only
+split: train
+corpus_split: train
+hf_split: train
+
+max_doc_length: 512
+
+query_corpus_hf_name: parquet
+query_corpus_hf_data_files:
+  train: data/corpus/patent_us_claim_passages_small/passages.parquet
+query_subset_name: null
+corpus_subset_name: null
+
+query_id_column: passage_id
+query_text_column: text
+corpus_id_column: passage_id
+corpus_group_id_column: parent_doc_id
+corpus_title_column: null
+corpus_text_column: text
+corpus_additional_text_columns: []
+corpus_text_template: null

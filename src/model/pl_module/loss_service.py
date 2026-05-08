@@ -60,6 +60,22 @@ class LossRegularizationService:
             # Single lambda applied to both query and document regularization.
             self.reg_query_weight = float(reg_weight_value)
             self.reg_doc_weight = float(reg_weight_value)
+        self.reg_type: str = str(self.reg_cfg.type).lower()
+        self.reg_query_type: str = self._resolve_regularization_type(
+            explicit_type=self.reg_cfg.get("query_type"),
+            fallback_type=self.reg_type,
+        )
+        self.reg_doc_type: str = self._resolve_regularization_type(
+            explicit_type=self.reg_cfg.get("doc_type"),
+            fallback_type=self.reg_type,
+        )
+
+    def _resolve_regularization_type(
+        self, *, explicit_type: Any | None, fallback_type: str
+    ) -> str:
+        if explicit_type is None:
+            return fallback_type
+        return str(explicit_type).strip().lower()
 
     def _resolve_sigmoid_config(self) -> SigmoidPairwiseConfig | None:
         if self.loss_type != "sigmoid_pairwise_hard":
@@ -116,7 +132,9 @@ class LossRegularizationService:
             distill_losses=list(self._resolved_distill_losses),
             reg_query_weight=self.reg_query_weight,
             reg_doc_weight=self.reg_doc_weight,
-            reg_type=str(self.reg_cfg.type),
+            reg_type=self.reg_type,
+            reg_query_type=self.reg_query_type,
+            reg_doc_type=self.reg_doc_type,
             reg_paper_faithful=bool(self.reg_cfg.paper_faithful),
             in_batch_weight=self.in_batch_weight,
             pairwise_weight=self.pairwise_weight,

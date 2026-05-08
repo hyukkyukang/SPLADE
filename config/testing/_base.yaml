@@ -17,14 +17,27 @@ num_devices: null
 gpu_sparsify: true
 scoring_workers: 4
 scoring_method: full
+# Options: threads, processes, gpu.
 scoring_backend: threads
+# Only used when scoring_backend=gpu.
+gpu_scoring_device: cuda:0
+gpu_scoring_values_dtype: float16
+gpu_query_chunk: null
 wand_block_size: 256
 exclude_self_match: false
+faiss_use_gpu: true
+faiss_gpu_required: false
+faiss_gpu_shard: false
+faiss_use_float16: true
+result_group_key: none
+group_candidate_pool: null
+search_top_k: null
 sparse_top_k: 512
 sparse_min_weight: 0.0
 query_exclude_token_ids: ${model.exclude_token_ids}
 
 k_list: [1, 5, 10, 50, 100]
+metric_families: null
 save_run: false
 run_path: null
 # Optional: set to a Hugging Face model repo ID or local path to use HF weights.

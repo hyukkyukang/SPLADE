@@ -78,11 +78,12 @@ class CompileRuntimeService:
         stage: str,
     ) -> None:
         policy.prepare_for_device(device=self._module.device, use_compiled=use_compiled)
+        policy.set_train_core_active(stage == "train" and use_compiled)
         policy.set_compile_state(use_compiled=use_compiled)
         self._module._compile_policy = policy
         self._module.loss_computer = self.resolve_stage_loss_computer(
             stage=stage,
-            use_compiled=bool(policy.compile_enabled_for_current_stage),
+            use_compiled=bool(use_compiled and policy.torch_compile_enabled),
         )
         self._sync_model_with_active_compile_policy()
 

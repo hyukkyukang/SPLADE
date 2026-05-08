@@ -14,7 +14,7 @@ def _estimate_posting_length(term_ptr: np.ndarray, q_indices: np.ndarray) -> int
     return total
 
 
-@numba.njit
+@numba.njit(cache=True)
 def _accumulate_scores(
     term_ptr: np.ndarray,
     post_doc_ids: np.ndarray,
@@ -111,7 +111,7 @@ def score_query_postings(
     )
 
 
-@numba.njit
+@numba.njit(cache=True)
 def _advance_to(
     post_doc_ids: np.ndarray, pos: int, end: int, target_doc: int
 ) -> int:
@@ -126,7 +126,7 @@ def _advance_to(
     return left
 
 
-@numba.njit
+@numba.njit(cache=True)
 def _min_score(values: np.ndarray, count: int) -> float:
     min_val: float = float(values[0])
     for idx in range(1, count):
@@ -136,7 +136,7 @@ def _min_score(values: np.ndarray, count: int) -> float:
     return min_val
 
 
-@numba.njit
+@numba.njit(cache=True)
 def _find_min_index(values: np.ndarray, count: int) -> int:
     min_idx: int = 0
     min_val: float = float(values[0])
@@ -148,7 +148,7 @@ def _find_min_index(values: np.ndarray, count: int) -> int:
     return min_idx
 
 
-@numba.njit
+@numba.njit(cache=True)
 def _init_order(current_doc: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     order: np.ndarray = np.argsort(current_doc)
     order_pos: np.ndarray = np.empty(order.shape[0], dtype=np.int64)
@@ -157,7 +157,7 @@ def _init_order(current_doc: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return order, order_pos
 
 
-@numba.njit
+@numba.njit(cache=True)
 def _sift_forward(
     order: np.ndarray, order_pos: np.ndarray, current_doc: np.ndarray, term_idx: int
 ) -> None:
@@ -174,7 +174,7 @@ def _sift_forward(
     order_pos[term_idx] = pos
 
 
-@numba.njit
+@numba.njit(cache=True)
 def _refresh_current_doc(
     post_doc_ids: np.ndarray,
     pos: np.ndarray,
@@ -189,7 +189,7 @@ def _refresh_current_doc(
         current_doc[term_idx] = sentinel
 
 
-@numba.njit
+@numba.njit(cache=True)
 def _refresh_block_cache(
     term_start: np.ndarray,
     term_end: np.ndarray,
@@ -220,7 +220,7 @@ def _refresh_block_cache(
         block_max_val[term_idx] = float(block_max[block_id])
 
 
-@numba.njit
+@numba.njit(cache=True)
 def _score_query_postings_wand(
     term_ptr: np.ndarray,
     post_doc_ids: np.ndarray,
@@ -372,7 +372,7 @@ def score_query_postings_wand(
     ].astype(np.float32, copy=False)
 
 
-@numba.njit
+@numba.njit(cache=True)
 def _score_query_postings_bmw(
     term_ptr: np.ndarray,
     post_doc_ids: np.ndarray,

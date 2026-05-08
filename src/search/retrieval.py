@@ -19,6 +19,7 @@ from src.search.scoring import (
     score_query_postings_bmw,
     score_query_postings_wand,
 )
+from src.search.scoring_gpu import GpuIndex, build_gpu_index, score_batch_gpu
 from src.search.sparsify import sparsify_batch_gpu_csr, sparsify_query_vector
 from src.utils.model_utils import resolve_tagged_output_dir
 from src.utils.output_space import resolve_model_output_exclude_ids
@@ -129,9 +130,24 @@ class IndexedRetrievalHelper:
         self._exclude_self_match: bool = bool(
             self.cfg.testing.get("exclude_self_match", False)
         )
+        self._result_group_key: str = str(
+            self.cfg.testing.get("result_group_key", "none")
+        ).strip().lower()
+        self._group_candidate_pool: int | None = (
+            None
+            if self.cfg.testing.get("group_candidate_pool") is None
+            else max(1, int(self.cfg.testing.group_candidate_pool))
+        )
+        self._configured_search_top_k: int | None = (
+            None
+            if self.cfg.testing.get("search_top_k") is None
+            else max(1, int(self.cfg.testing.search_top_k))
+        )
         self._scoring_top_k: int = self.k_max + (
             1 if self._exclude_self_match else 0
         )
+        if self._configured_search_top_k is not None:
+            self._scoring_top_k = int(self._configured_search_top_k)
 
         self._gpu_sparsify: bool = bool(self.cfg.testing.gpu_sparsify)
         scoring_workers_value = self.cfg.testing.scoring_workers
@@ -145,11 +161,36 @@ class IndexedRetrievalHelper:
         scoring_backend_normalized = str(scoring_backend_value).lower()
         if scoring_backend_normalized in {"process", "processes"}:
             scoring_backend_normalized = "processes"
+        if scoring_backend_normalized not in {"threads", "processes", "gpu"}:
+            raise ValueError(
+                "testing.scoring_backend must be 'threads', 'processes', or 'gpu'. "
+                f"Got: {scoring_backend_value}"
+            )
         self._scoring_backend: str = scoring_backend_normalized
+
+        gpu_device_value = self.cfg.testing.get("gpu_scoring_device", "cuda:0")
+        self._gpu_scoring_device: str = str(gpu_device_value)
+        gpu_values_dtype_value = str(
+            self.cfg.testing.get("gpu_scoring_values_dtype", "float16")
+        ).lower()
+        if gpu_values_dtype_value not in {"float16", "float32"}:
+            raise ValueError(
+                "testing.gpu_scoring_values_dtype must be 'float16' or 'float32'. "
+                f"Got: {gpu_values_dtype_value}"
+            )
+        self._gpu_scoring_values_dtype: torch.dtype = (
+            torch.float16 if gpu_values_dtype_value == "float16" else torch.float32
+        )
+        gpu_query_chunk_value = self.cfg.testing.get("gpu_query_chunk")
+        self._gpu_query_chunk: int | None = (
+            None if gpu_query_chunk_value is None else max(1, int(gpu_query_chunk_value))
+        )
+        self._gpu_index: GpuIndex | None = None
 
         self._index: InvertedIndex | None = None
         self._index_path: Path | None = None
         self._doc_ids: list[str] | None = None
+        self._group_ids: list[str] | None = None
         self._doc_count: int = 0
         self._block_size: int = 0
         self._query_exclude_token_ids: list[int] = []
@@ -180,8 +221,24 @@ class IndexedRetrievalHelper:
         """Load index metadata and initialize scoring resources."""
         self._index = self._load_index()
         self._doc_ids = list(self._index.doc_ids)
+        self._group_ids = (
+            None if self._index.group_ids is None else list(self._index.group_ids)
+        )
         self._doc_count = len(self._doc_ids)
         self._block_size = int(self._index.metadata.get("block_size") or 0)
+        if self._uses_grouped_results():
+            if self._group_ids is None:
+                raise ValueError(
+                    "testing.result_group_key requested grouped sparse retrieval, "
+                    "but the loaded sparse index does not provide group_ids."
+                )
+            if self._group_candidate_pool is None:
+                self._group_candidate_pool = (
+                    int(self._configured_search_top_k)
+                    if self._configured_search_top_k is not None
+                    else max(self.k_max * 8, 2048)
+                )
+            self._scoring_top_k = max(self._scoring_top_k, int(self._group_candidate_pool))
         self._validate_scoring_method()
         (
             self._query_exclude_token_ids,
@@ -191,7 +248,37 @@ class IndexedRetrievalHelper:
         self._query_exclude_output_ids = []
         self._query_exclude_output_ids_tensor = None
         self._query_exclude_output_ids_resolved = not bool(self._query_exclude_token_ids)
-        self._start_executor()
+        if self._scoring_backend == "gpu":
+            if self._use_cpu:
+                raise ValueError(
+                    "testing.scoring_backend=gpu is incompatible with testing.use_cpu=true."
+                )
+            if not torch.cuda.is_available():
+                raise RuntimeError(
+                    "testing.scoring_backend=gpu requested but CUDA is not available."
+                )
+            if self._scoring_method != "full":
+                self._logger.warning(
+                    "GPU scoring backend ignores scoring_method=%s and computes exact "
+                    "dense matmul scores (equivalent to 'full').",
+                    self._scoring_method,
+                )
+            self._gpu_index = build_gpu_index(
+                self._index,
+                values_dtype=self._gpu_scoring_values_dtype,
+                device=self._gpu_scoring_device,
+            )
+            self._logger.info(
+                "GPU scoring index ready: n_docs=%d vocab=%d dtype=%s device=%s",
+                self._gpu_index.n_docs,
+                self._gpu_index.vocab_size,
+                str(self._gpu_scoring_values_dtype),
+                str(self._gpu_index.device),
+            )
+            self._executor = None
+            self._resolved_workers = 1
+        else:
+            self._start_executor()
 
     def _resolve_query_exclude_output_ids(self, model: Any) -> None:
         if self._query_exclude_output_ids_resolved:
@@ -221,6 +308,8 @@ class IndexedRetrievalHelper:
             self._executor.shutdown(wait=True)
             self._executor = None
         self._thread_local = threading.local()
+        self._group_ids = None
+        self._gpu_index = None
 
     def encode_queries(
         self,
@@ -268,6 +357,17 @@ class IndexedRetrievalHelper:
         scored = self._score_batch(q_indices_list, q_values_list)
         results: list[tuple[list[str], list[float]]] = []
         for query_idx, (top_docs, top_scores) in enumerate(scored):
+            if self._uses_grouped_results():
+                results.append(
+                    self._score_grouped_row(
+                        top_docs.tolist(),
+                        top_scores.tolist(),
+                        query_id=(
+                            None if query_ids_list is None else query_ids_list[query_idx]
+                        ),
+                    )
+                )
+                continue
             raw_doc_ids: list[str] = [
                 self._doc_ids[int(doc_idx)] for doc_idx in top_docs.tolist()
             ]
@@ -292,6 +392,40 @@ class IndexedRetrievalHelper:
                 selected_scores = raw_scores[: self.k_max]
             results.append((selected_doc_ids, selected_scores))
         return results
+
+    def _uses_grouped_results(self) -> bool:
+        return self._result_group_key not in {"", "none", "doc_id", "passage_id"}
+
+    def _score_grouped_row(
+        self,
+        doc_indexes: Sequence[int],
+        scores: Sequence[float],
+        *,
+        query_id: str | None,
+    ) -> tuple[list[str], list[float]]:
+        if self._group_ids is None:
+            raise ValueError("Grouped sparse retrieval requires loaded group ids.")
+        grouped_scores: dict[str, float] = {}
+        for doc_idx, score in zip(doc_indexes, scores):
+            if int(doc_idx) < 0:
+                continue
+            group_id: str = self._group_ids[int(doc_idx)]
+            if self._exclude_self_match and query_id is not None and group_id == query_id:
+                continue
+            score_value: float = float(score)
+            existing_score: float | None = grouped_scores.get(group_id)
+            if existing_score is None or score_value > existing_score:
+                grouped_scores[group_id] = score_value
+
+        sorted_groups: list[tuple[str, float]] = sorted(
+            grouped_scores.items(),
+            key=lambda item: item[1],
+            reverse=True,
+        )[: self.k_max]
+        return (
+            [group_id for group_id, _ in sorted_groups],
+            [float(score) for _, score in sorted_groups],
+        )
 
     @staticmethod
     def _resolve_pad_token_id(model: Any) -> int:
@@ -399,6 +533,7 @@ class IndexedRetrievalHelper:
             if self._scoring_backend == "processes":
                 if self._index_path is None:
                     raise ValueError("Index path must be set before scoring.")
+                self._prewarm_numba()
                 self._executor = ProcessPoolExecutor(
                     max_workers=self._resolved_workers,
                     initializer=_init_process_pool,
@@ -417,6 +552,68 @@ class IndexedRetrievalHelper:
                 self._executor = ThreadPoolExecutor(max_workers=self._resolved_workers)
         else:
             self._executor = None
+
+    def _prewarm_numba(self) -> None:
+        """Trigger numba JIT in the parent process so workers hit the disk cache.
+
+        Why: numba @njit(cache=True) compiles once per (function, signature) and
+        caches to disk. Compiling in the parent first means ProcessPoolExecutor
+        workers load from cache instead of each re-JIT-ing independently.
+        """
+        if self._index is None:
+            return
+        index: InvertedIndex = self._index
+        doc_count: int = len(index.doc_ids)
+        scores, seen = prepare_score_buffers(doc_count)
+        q_indices: np.ndarray = np.zeros(1, dtype=np.int32)
+        q_values: np.ndarray = np.ones(1, dtype=np.float32)
+        method: str = self._scoring_method
+        top_k: int = max(1, int(self._scoring_top_k))
+        if method == "wand" and index.term_max is not None:
+            score_query_postings_wand(
+                index.term_ptr,
+                index.post_doc_ids,
+                index.post_weights,
+                index.term_max,
+                q_indices,
+                q_values,
+                scores=scores,
+                seen=seen,
+                top_k=top_k,
+            )
+        elif (
+            method == "bmw"
+            and index.term_max is not None
+            and index.block_max is not None
+            and index.block_ptr is not None
+        ):
+            block_size: int = int(index.metadata.get("block_size") or 0)
+            if block_size > 0:
+                score_query_postings_bmw(
+                    index.term_ptr,
+                    index.post_doc_ids,
+                    index.post_weights,
+                    index.term_max,
+                    index.block_max,
+                    index.block_ptr,
+                    q_indices,
+                    q_values,
+                    scores=scores,
+                    seen=seen,
+                    top_k=top_k,
+                    block_size=block_size,
+                )
+        else:
+            score_query_postings(
+                index.term_ptr,
+                index.post_doc_ids,
+                index.post_weights,
+                q_indices,
+                q_values,
+                scores=scores,
+                seen=seen,
+                top_k=top_k,
+            )
 
     def _get_thread_buffers(self) -> tuple[np.ndarray, np.ndarray]:
         if not hasattr(self._thread_local, "buffers"):
@@ -472,6 +669,19 @@ class IndexedRetrievalHelper:
             raise ValueError("Index must be loaded before scoring queries.")
         if not q_indices_list:
             return []
+        if self._scoring_backend == "gpu":
+            if self._gpu_index is None:
+                raise RuntimeError(
+                    "GPU scoring backend selected but GPU index is not initialized. "
+                    "Call setup() before scoring."
+                )
+            return score_batch_gpu(
+                self._gpu_index,
+                q_indices_list,
+                q_values_list,
+                top_k=self._scoring_top_k,
+                query_chunk=self._gpu_query_chunk,
+            )
         if self._executor is None or len(q_indices_list) <= 1:
             return [
                 self._score_single(q_indices, q_values)

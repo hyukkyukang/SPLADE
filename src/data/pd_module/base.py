@@ -84,13 +84,22 @@ class PDModule(PyTorchDataset):
         )
 
     def _tokenize_text(
-        self, text: str, *, max_length: int
+        self,
+        text: str,
+        *,
+        max_length: int,
+        fast_truncate_chars_per_token: int | None = None,
+        fast_truncate_min_chars: int = 4096,
+        prefix_builder=None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return tokenize_text(
             self.tokenizer,
             text,
             max_length=max_length,
             max_padding=self.max_padding,
+            fast_truncate_chars_per_token=fast_truncate_chars_per_token,
+            fast_truncate_min_chars=fast_truncate_min_chars,
+            prefix_builder=prefix_builder,
         )
 
     def _tokenize_docs(

@@ -13,6 +13,12 @@ from src.utils.output_space import (
     OutputSpaceSpec,
     normalize_compact_head_alignment,
 )
+from src.utils.compact_head import (
+    COMPACT_HEAD_FILENAME,
+    OFFICIAL_LENS_HEAD_FILENAME,
+    load_compact_head_payload,
+    torch_load_compact_head_artifact,
+)
 from src.utils.peft import (
     apply_peft_adapter,
     resolve_peft_settings,
@@ -20,7 +26,6 @@ from src.utils.peft import (
 )
 from src.utils.transformers import build_masked_lm_model, resolve_model_name_or_path
 
-_COMPACT_HEAD_FILENAME: str = "splade_compact_head.pt"
 class _Log1pRelu(nn.Module):
     def forward(self, logits: torch.Tensor) -> torch.Tensor:
         return torch.log1p(torch.relu(logits))
@@ -91,6 +96,41 @@ def _supports_use_cache_forward(module: nn.Module) -> bool:
         return False
 
 
+def _filter_forward_kwargs(
+    module: nn.Module,
+    kwargs: dict[str, Any],
+) -> dict[str, Any]:
+    """Drop unsupported kwargs for backbones that expose narrow forward signatures."""
+    if not kwargs:
+        return {}
+    forward_fn: Any = getattr(module, "forward", None)
+    if not callable(forward_fn):
+        return {}
+    try:
+        parameters = inspect.signature(forward_fn).parameters.values()
+    except (TypeError, ValueError):
+        return {}
+    if any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters):
+        return dict(kwargs)
+    supported_names: set[str] = {parameter.name for parameter in parameters}
+    return {name: value for name, value in kwargs.items() if name in supported_names}
+
+
+def _extract_logits_from_model_output(model_output: Any) -> torch.Tensor:
+    if isinstance(model_output, torch.Tensor):
+        return model_output
+    logits: Any = getattr(model_output, "logits", None)
+    if isinstance(logits, torch.Tensor):
+        return logits
+    if (
+        isinstance(model_output, tuple)
+        and len(model_output) > 0
+        and isinstance(model_output[0], torch.Tensor)
+    ):
+        return model_output[0]
+    raise ValueError("Language-model forward did not return accessible logits.")
+
+
 def _resolve_module_dtype(
     module: nn.Module,
     *,
@@ -109,24 +149,55 @@ def _resolve_module_dtype(
     return fallback
 
 
+def _maybe_download_hf_artifact(repo_id: str, filename: str) -> Path | None:
+    try:
+        from huggingface_hub import hf_hub_download
+    except Exception:
+        return None
+    try:
+        resolved_path: str = hf_hub_download(repo_id=repo_id, filename=filename)
+    except Exception:
+        return None
+    candidate: Path = Path(resolved_path).expanduser()
+    return candidate if candidate.is_file() else None
+
+
 def _resolve_compact_head_path(
     model_name: str,
     model: PreTrainedModel,
 ) -> Path | None:
     """Return compact-head artifact path when available."""
     resolved_source: str = resolve_model_name_or_path(model_name)
-    model_dir: Path = Path(resolved_source).expanduser()
-    if not model_dir.is_dir():
-        return None
-    candidates: list[Path] = []
+    candidate_filenames: list[str] = []
     config_file: Any = getattr(model.config, "splade_compact_head_file", None)
     if config_file is not None and str(config_file).strip():
-        candidates.append(model_dir / str(config_file))
-    candidates.append(model_dir / _COMPACT_HEAD_FILENAME)
-    candidate: Path
-    for candidate in candidates:
-        if candidate.is_file():
-            return candidate
+        candidate_filenames.append(str(config_file).strip())
+    for filename in (COMPACT_HEAD_FILENAME, OFFICIAL_LENS_HEAD_FILENAME):
+        if filename not in candidate_filenames:
+            candidate_filenames.append(filename)
+
+    for source in (resolved_source, model_name):
+        model_dir: Path = Path(source).expanduser()
+        if not model_dir.is_dir():
+            continue
+        candidate: Path
+        for filename in candidate_filenames:
+            candidate = model_dir / filename
+            if candidate.is_file():
+                return candidate
+
+    seen_repo_ids: set[str] = set()
+    repo_id: str
+    for repo_id in (str(resolved_source).strip(), str(model_name).strip()):
+        if not repo_id or repo_id in seen_repo_ids:
+            continue
+        seen_repo_ids.add(repo_id)
+        if Path(repo_id).expanduser().exists():
+            continue
+        for filename in candidate_filenames:
+            downloaded: Path | None = _maybe_download_hf_artifact(repo_id, filename)
+            if downloaded is not None:
+                return downloaded
     return None
 
 
@@ -142,6 +213,9 @@ class SpladeEncoder(nn.Module):
         tie_word_embeddings: bool = False,
         peft_cfg: DictConfig | None = None,
         freeze_backbone: bool = False,
+        trust_remote_code: bool = False,
+        model_revision: str | None = None,
+        local_files_only: bool | None = None,
     ) -> None:
         super().__init__()
         kwargs: dict[str, Any] = {}
@@ -157,6 +231,9 @@ class SpladeEncoder(nn.Module):
             self.mlm = build_masked_lm_model(
                 model_name,
                 model_class_name=huggingface_model_class,
+                trust_remote_code=trust_remote_code,
+                revision=model_revision,
+                local_files_only=local_files_only,
                 **kwargs,
             )
         resolved_peft_settings = resolve_peft_settings(
@@ -203,7 +280,7 @@ class SpladeEncoder(nn.Module):
             torch.empty((0,), dtype=torch.long),
             persistent=False,
         )
-        self._encode_logits: Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
+        self._encode_logits: Callable[..., torch.Tensor]
         self._setup_compact_head(model_name=model_name, dtype=dtype)
         self._encode_logits = self._resolve_encode_logits()
         self.freeze_backbone: bool = bool(freeze_backbone) and not self._peft_enabled
@@ -219,9 +296,9 @@ class SpladeEncoder(nn.Module):
         if artifact_path is None:
             return
 
-        payload: Any = torch.load(str(artifact_path), map_location="cpu")
-        if not isinstance(payload, dict):
-            raise ValueError(f"Invalid compact-head payload at {artifact_path}.")
+        payload: dict[str, Any] = load_compact_head_payload(
+            torch_load_compact_head_artifact(artifact_path)
+        )
         raw_weight: Any = payload.get("weight")
         if not isinstance(raw_weight, torch.Tensor) or raw_weight.ndim != 2:
             raise ValueError(
@@ -385,44 +462,80 @@ class SpladeEncoder(nn.Module):
         self.mlm.eval()
 
     def _encode_logits_mlm(
-        self, input_ids: torch.Tensor, attention_mask: torch.Tensor
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        **model_kwargs: Any,
     ) -> torch.Tensor:
-        return self.mlm(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-        ).logits
+        forward_kwargs: dict[str, Any] = {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+        }
+        forward_kwargs.update(_filter_forward_kwargs(self.mlm, model_kwargs))
+        return _extract_logits_from_model_output(
+            self.mlm(
+                **forward_kwargs,
+            )
+        )
 
     def _encode_logits_mlm_no_cache(
-        self, input_ids: torch.Tensor, attention_mask: torch.Tensor
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        **model_kwargs: Any,
     ) -> torch.Tensor:
-        return self.mlm(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            use_cache=False,
-        ).logits
+        forward_kwargs: dict[str, Any] = {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "use_cache": False,
+        }
+        forward_kwargs.update(_filter_forward_kwargs(self.mlm, model_kwargs))
+        return _extract_logits_from_model_output(
+            self.mlm(
+                **forward_kwargs,
+            )
+        )
 
     def _encode_logits_compact(
-        self, input_ids: torch.Tensor, attention_mask: torch.Tensor
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        **model_kwargs: Any,
     ) -> torch.Tensor:
         hidden_model: nn.Module = cast(nn.Module, self._hidden_model)
         compact_head: nn.Linear = cast(nn.Linear, self.compact_head)
+        hidden_forward_kwargs: dict[str, Any] = {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "return_dict": True,
+        }
+        hidden_forward_kwargs.update(
+            _filter_forward_kwargs(hidden_model, model_kwargs)
+        )
         hidden_states: torch.Tensor = hidden_model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            return_dict=True,
+            **hidden_forward_kwargs
         ).last_hidden_state
         return compact_head(hidden_states.to(dtype=compact_head.weight.dtype))
 
     def _encode_logits_compact_no_cache(
-        self, input_ids: torch.Tensor, attention_mask: torch.Tensor
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        **model_kwargs: Any,
     ) -> torch.Tensor:
         hidden_model: nn.Module = cast(nn.Module, self._hidden_model)
         compact_head: nn.Linear = cast(nn.Linear, self.compact_head)
+        hidden_forward_kwargs: dict[str, Any] = {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "return_dict": True,
+            "use_cache": False,
+        }
+        hidden_forward_kwargs.update(
+            _filter_forward_kwargs(hidden_model, model_kwargs)
+        )
         hidden_states: torch.Tensor = hidden_model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            return_dict=True,
-            use_cache=False,
+            **hidden_forward_kwargs
         ).last_hidden_state
         return compact_head(hidden_states.to(dtype=compact_head.weight.dtype))
 
@@ -536,6 +649,15 @@ class SpladeEncoder(nn.Module):
         )
         return embeddings
 
+    def encode_raw_logits(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        **model_kwargs: Any,
+    ) -> torch.Tensor:
+        """Return raw LM logits before SPLADE activation/pooling."""
+        return self._encode_logits(input_ids, attention_mask, **model_kwargs)
+
 
 class _SpladeEncoderWrapper(nn.Module):
     def __init__(self, encoder: SpladeEncoder, pooling_mode: torch.Tensor) -> None:
@@ -574,6 +696,9 @@ class SpladeModel(nn.Module):
         tie_word_embeddings: bool = False,
         peft_cfg: DictConfig | None = None,
         freeze_backbone: bool = False,
+        trust_remote_code: bool = False,
+        model_revision: str | None = None,
+        local_files_only: bool | None = None,
     ) -> None:
         super().__init__()
         self.family: str = str(family).lower()
@@ -587,6 +712,9 @@ class SpladeModel(nn.Module):
             tie_word_embeddings=tie_word_embeddings,
             peft_cfg=peft_cfg,
             freeze_backbone=freeze_backbone,
+            trust_remote_code=trust_remote_code,
+            model_revision=model_revision,
+            local_files_only=local_files_only,
         )
         self.query_pooling: str = query_pooling
         self.doc_pooling: str = doc_pooling
@@ -740,6 +868,16 @@ class SpladeModel(nn.Module):
         return embeddings
 
     # --- Public methods ---
+    def postprocess_query_embeddings(self, embeddings: torch.Tensor) -> torch.Tensor:
+        if self.normalize:
+            embeddings = F.normalize(embeddings, p=2, dim=-1)
+        return embeddings
+
+    def postprocess_doc_embeddings(self, embeddings: torch.Tensor) -> torch.Tensor:
+        if self.normalize:
+            embeddings = F.normalize(embeddings, p=2, dim=-1)
+        return embeddings
+
     def encode_queries(
         self,
         input_ids: torch.Tensor,
@@ -751,9 +889,7 @@ class SpladeModel(nn.Module):
             attention_mask,
             pooling_mask,
         )
-        if self.normalize:
-            embeddings = F.normalize(embeddings, p=2, dim=-1)
-        return embeddings
+        return self.postprocess_query_embeddings(embeddings)
 
     def encode_docs(
         self,
@@ -766,9 +902,7 @@ class SpladeModel(nn.Module):
             attention_mask=attention_mask,
             pooling_mask=pooling_mask,
         )
-        if self.normalize:
-            embeddings = F.normalize(embeddings, p=2, dim=-1)
-        return embeddings
+        return self.postprocess_doc_embeddings(embeddings)
 
     def forward(
         self,

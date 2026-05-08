@@ -1,0 +1,18 @@
+# @package model
+defaults:
+  - _base
+
+name: pretrained_diffusion_splade_template
+family: pretrained_diffusion_splade
+backbone_pretraining_type: diffusion
+huggingface_name: replace-with-diffusion-backbone
+tokenizer_name: distilbert-base-uncased
+huggingface_model_class: AutoModelForMaskedLM
+benchmark_adapter: native
+enforce_same_tokenizer_as_baseline: true
+baseline_tokenizer_name: distilbert-base-uncased
+query_pooling: max
+doc_pooling: max
+sparse_activation: log1p_relu
+mask_token_id: 103
+exclude_token_ids: [0, 100, 101, 102, 103]

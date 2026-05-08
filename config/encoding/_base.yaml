@@ -3,15 +3,19 @@ name: encoding_base
 
 batch_size: 1024
 num_workers: 8
-prefetch_factor: 2
+prefetch_factor: 4
 max_padding: true
 long_doc_strategy: truncate
 sliding_window_overlap_tokens: 0
 max_windows_per_forward: null
+distributed_sampler_strategy: row_group_interleaved
+truncate_prefix_chars_per_token: 16
+truncate_prefix_min_chars: 4096
 
 precision: bf16-mixed
 torch_compile: true
-torch_compile_mode: max-autotune
+torch_compile_mode: default
+torch_compile_ddp_safe_mode: false
 use_cpu: false
 strategy: ddp
 static_graph: true

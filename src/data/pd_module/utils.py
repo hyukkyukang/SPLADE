@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Any, Callable, Iterable, Sequence
 
 import torch
 from omegaconf import DictConfig
@@ -12,6 +12,7 @@ from src.data.lens_formatting import (
 )
 from src.data.dataclass import MetaItem
 from src.data.dataset import BaseDataset
+from src.data.text_prefix import TextPrefix, slice_text_prefix
 
 
 @dataclass(frozen=True)
@@ -34,6 +35,38 @@ class RerankInputs:
     teacher_scores: torch.Tensor
     num_pos: int
     num_neg: int
+    query_slot_target_ids: torch.Tensor | None = None
+    doc_slot_target_ids: torch.Tensor | None = None
+
+
+_ORDERED_MASK_SLOT_FAMILIES: frozenset[str] = frozenset(
+    {
+        "ordered_mask_slot_splade",
+        "pretrained_diffusion_ordered_mask_slot_splade",
+    }
+)
+
+
+def uses_ordered_mask_slot_pooling(model_cfg: DictConfig | None) -> bool:
+    if model_cfg is None:
+        return False
+    family: str = str(model_cfg.get("family", "splade")).strip().lower()
+    return family in _ORDERED_MASK_SLOT_FAMILIES
+
+
+def resolve_num_mask_slots(model_cfg: DictConfig | None) -> int:
+    if model_cfg is None:
+        return 0
+    return max(int(model_cfg.get("num_mask_slots", 0)), 0)
+
+
+def resolve_mask_slot_ignore_index(training_cfg: DictConfig | None) -> int:
+    if training_cfg is None:
+        return -100
+    ordered_cfg: DictConfig | None = training_cfg.get("ordered_mask_slots")
+    if ordered_cfg is None:
+        return -100
+    return int(ordered_cfg.get("ignore_index", -100))
 
 
 def _resolve_padding(
@@ -55,20 +88,195 @@ def tokenize_text(
     max_length: int,
     max_padding: bool | None = None,
     padding: str | bool | None = None,
+    fast_truncate_chars_per_token: int | None = None,
+    fast_truncate_min_chars: int = 4096,
+    prefix_builder: Callable[[int], TextPrefix] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     resolved_padding: str | bool = _resolve_padding(
         max_padding=max_padding, padding=padding
     )
-    tokens: dict[str, torch.Tensor] = tokenizer(
-        text,
-        padding=resolved_padding,
-        truncation=True,
-        max_length=int(max_length),
-        return_tensors="pt",
+    if (
+        fast_truncate_chars_per_token is None
+        or int(fast_truncate_chars_per_token) <= 0
+        or int(max_length) <= 0
+    ):
+        tokens: dict[str, torch.Tensor] = tokenizer(
+            text,
+            padding=resolved_padding,
+            truncation=True,
+            max_length=int(max_length),
+            return_tensors="pt",
+        )
+        input_ids: torch.Tensor = tokens["input_ids"].squeeze(0)
+        attention_mask: torch.Tensor = tokens["attention_mask"].squeeze(0)
+        return input_ids, attention_mask
+
+    char_budget: int = max(
+        int(fast_truncate_min_chars),
+        int(max_length) * int(fast_truncate_chars_per_token),
     )
-    input_ids: torch.Tensor = tokens["input_ids"].squeeze(0)
-    attention_mask: torch.Tensor = tokens["attention_mask"].squeeze(0)
-    return input_ids, attention_mask
+    full_text: str = str(text)
+    while True:
+        prefix: TextPrefix
+        if prefix_builder is None:
+            prefix = slice_text_prefix(full_text, char_budget=char_budget)
+        else:
+            prefix = prefix_builder(int(char_budget))
+        tokens = tokenizer(
+            prefix.text,
+            padding=resolved_padding,
+            truncation=True,
+            max_length=int(max_length),
+            return_tensors="pt",
+        )
+        input_ids = tokens["input_ids"].squeeze(0)
+        attention_mask = tokens["attention_mask"].squeeze(0)
+        if not prefix.truncated or int(input_ids.shape[0]) >= int(max_length):
+            return input_ids, attention_mask
+        next_budget: int = max(int(char_budget) * 2, int(char_budget) + 1)
+        if next_budget == char_budget:
+            return input_ids, attention_mask
+        char_budget = next_budget
+
+
+def _resolve_mask_token_id(
+    tokenizer: PreTrainedTokenizerBase,
+    model_cfg: DictConfig | None,
+) -> int:
+    configured_value: Any = None if model_cfg is None else model_cfg.get("mask_token_id")
+    if configured_value is not None:
+        token_id: int = int(configured_value)
+        if token_id >= 0:
+            return token_id
+    mask_token_id: int | None = tokenizer.mask_token_id
+    if mask_token_id is None or int(mask_token_id) < 0:
+        raise ValueError(
+            "Ordered mask-slot models require a valid mask token id from the tokenizer "
+            "or model.mask_token_id."
+        )
+    return int(mask_token_id)
+
+
+def _tokenize_texts_with_mask_slots(
+    tokenizer: PreTrainedTokenizerBase,
+    texts: Sequence[str],
+    *,
+    max_length: int,
+    num_mask_slots: int,
+    max_padding: bool | None,
+    model_cfg: DictConfig | None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    if num_mask_slots <= 0:
+        raise ValueError("num_mask_slots must be positive for ordered mask-slot inputs.")
+    if max_length <= num_mask_slots:
+        raise ValueError(
+            "max_length must be greater than num_mask_slots for ordered mask-slot inputs."
+        )
+
+    text_budget: int = int(max_length) - int(num_mask_slots)
+    mask_token_id: int = _resolve_mask_token_id(tokenizer, model_cfg)
+    encoded: dict[str, list[list[int]]] = tokenizer(
+        list(texts),
+        add_special_tokens=True,
+        padding=False,
+        truncation=True,
+        max_length=text_budget,
+        return_attention_mask=False,
+    )
+    input_id_rows: list[list[int]] = encoded["input_ids"]
+    resolved_max_length: int
+    if max_padding:
+        resolved_max_length = int(max_length)
+    else:
+        resolved_max_length = 0
+        row_ids: list[int]
+        for row_ids in input_id_rows:
+            resolved_max_length = max(
+                resolved_max_length,
+                min(len(row_ids) + int(num_mask_slots), int(max_length)),
+            )
+
+    padded_input_ids: list[torch.Tensor] = []
+    padded_attention_masks: list[torch.Tensor] = []
+    padded_pooling_masks: list[torch.Tensor] = []
+    row_input_ids: list[int]
+    for row_input_ids in input_id_rows:
+        active_ids: list[int] = list(row_input_ids) + ([mask_token_id] * int(num_mask_slots))
+        if len(active_ids) > resolved_max_length:
+            active_ids = active_ids[:resolved_max_length]
+        active_length: int = len(active_ids)
+        if active_length < int(num_mask_slots):
+            raise ValueError(
+                "Mask-slot tokenization produced fewer active slots than requested."
+            )
+        pad_length: int = max(resolved_max_length - active_length, 0)
+        pad_token_id: int = int(tokenizer.pad_token_id)
+        input_ids = torch.tensor(
+            active_ids + ([pad_token_id] * pad_length),
+            dtype=torch.long,
+        )
+        attention_mask = torch.tensor(
+            ([1] * active_length) + ([0] * pad_length),
+            dtype=torch.long,
+        )
+        pooling_mask = torch.zeros(resolved_max_length, dtype=torch.long)
+        slot_start: int = active_length - int(num_mask_slots)
+        pooling_mask[slot_start:active_length] = 1
+        padded_input_ids.append(input_ids)
+        padded_attention_masks.append(attention_mask)
+        padded_pooling_masks.append(pooling_mask)
+
+    return (
+        torch.stack(padded_input_ids, dim=0),
+        torch.stack(padded_attention_masks, dim=0),
+        torch.stack(padded_pooling_masks, dim=0),
+    )
+
+
+def tokenize_text_with_mask_slots(
+    tokenizer: PreTrainedTokenizerBase,
+    text: str,
+    *,
+    max_length: int,
+    num_mask_slots: int,
+    max_padding: bool | None,
+    model_cfg: DictConfig | None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    input_ids, attention_mask, pooling_mask = _tokenize_texts_with_mask_slots(
+        tokenizer,
+        [text],
+        max_length=max_length,
+        num_mask_slots=num_mask_slots,
+        max_padding=max_padding,
+        model_cfg=model_cfg,
+    )
+    return input_ids.squeeze(0), attention_mask.squeeze(0), pooling_mask.squeeze(0)
+
+
+def tokenize_docs_with_mask_slots(
+    tokenizer: PreTrainedTokenizerBase,
+    docs: Iterable[str],
+    *,
+    max_length: int,
+    num_mask_slots: int,
+    max_padding: bool | None,
+    model_cfg: DictConfig | None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    docs_list: list[str] = list(docs)
+    if not docs_list:
+        empty_shape: tuple[int, int] = (0, int(max_length))
+        empty_ids: torch.Tensor = torch.empty(empty_shape, dtype=torch.long)
+        empty_mask: torch.Tensor = torch.empty(empty_shape, dtype=torch.long)
+        empty_pooling_mask: torch.Tensor = torch.empty(empty_shape, dtype=torch.long)
+        return empty_ids, empty_mask, empty_pooling_mask
+    return _tokenize_texts_with_mask_slots(
+        tokenizer,
+        docs_list,
+        max_length=max_length,
+        num_mask_slots=num_mask_slots,
+        max_padding=max_padding,
+        model_cfg=model_cfg,
+    )
 
 
 def tokenize_text_windows(
@@ -162,6 +370,8 @@ def build_rerank_inputs(
     max_query_length: int,
     max_doc_length: int,
     max_padding: bool,
+    term_supervision: Any | None = None,
+    term_supervision_ignore_index: int = -100,
 ) -> RerankInputs:
     raw_query_text: str = dataset.resolve_query_text(meta_item)
     query_text: str = format_query_text(raw_query_text, model_cfg)
@@ -173,33 +383,61 @@ def build_rerank_inputs(
     doc_texts: list[str] = pos_texts + neg_texts
     num_pos: int = len(pos_texts)
     num_neg: int = len(neg_texts)
+    use_mask_slots: bool = uses_ordered_mask_slot_pooling(model_cfg)
+    num_mask_slots: int = resolve_num_mask_slots(model_cfg)
 
     query_input_ids: torch.Tensor
     query_attention_mask: torch.Tensor
-    query_input_ids, query_attention_mask = tokenize_text(
-        tokenizer,
-        query_text,
-        max_length=max_query_length,
-        max_padding=max_padding,
-    )
-    query_pooling_mask: torch.Tensor = build_query_pooling_mask(
-        query_input_ids,
-        query_attention_mask,
-        tokenizer,
-        model_cfg,
-    )
+    query_pooling_mask: torch.Tensor
+    if use_mask_slots:
+        query_input_ids, query_attention_mask, query_pooling_mask = (
+            tokenize_text_with_mask_slots(
+                tokenizer,
+                query_text,
+                max_length=max_query_length,
+                num_mask_slots=num_mask_slots,
+                max_padding=max_padding,
+                model_cfg=model_cfg,
+            )
+        )
+    else:
+        query_input_ids, query_attention_mask = tokenize_text(
+            tokenizer,
+            query_text,
+            max_length=max_query_length,
+            max_padding=max_padding,
+        )
+        query_pooling_mask = build_query_pooling_mask(
+            query_input_ids,
+            query_attention_mask,
+            tokenizer,
+            model_cfg,
+        )
     doc_input_ids: torch.Tensor
     doc_attention_mask: torch.Tensor
-    doc_input_ids, doc_attention_mask = tokenize_docs(
-        tokenizer,
-        doc_texts,
-        max_length=max_doc_length,
-        max_padding=max_padding,
-    )
-    doc_pooling_mask: torch.Tensor = build_doc_pooling_mask(
-        doc_attention_mask,
-        model_cfg,
-    )
+    doc_pooling_mask: torch.Tensor
+    if use_mask_slots:
+        doc_input_ids, doc_attention_mask, doc_pooling_mask = (
+            tokenize_docs_with_mask_slots(
+                tokenizer,
+                doc_texts,
+                max_length=max_doc_length,
+                num_mask_slots=num_mask_slots,
+                max_padding=max_padding,
+                model_cfg=model_cfg,
+            )
+        )
+    else:
+        doc_input_ids, doc_attention_mask = tokenize_docs(
+            tokenizer,
+            doc_texts,
+            max_length=max_doc_length,
+            max_padding=max_padding,
+        )
+        doc_pooling_mask = build_doc_pooling_mask(
+            doc_attention_mask,
+            model_cfg,
+        )
 
     doc_mask: torch.Tensor
     pos_mask: torch.Tensor
@@ -207,6 +445,29 @@ def build_rerank_inputs(
     teacher_scores: torch.Tensor = build_teacher_scores(
         meta_item.pos_scores, meta_item.neg_scores, num_pos=num_pos, num_neg=num_neg
     )
+    query_slot_target_ids: torch.Tensor | None = None
+    doc_slot_target_ids: torch.Tensor | None = None
+    if use_mask_slots and term_supervision is not None:
+        query_slot_target_ids = term_supervision.top_k_doc_target_ids(
+            pos_texts[0] if num_pos > 0 else "",
+            k=num_mask_slots,
+            ignore_index=term_supervision_ignore_index,
+        )
+        query_term_target_ids: torch.Tensor = term_supervision.top_k_query_target_ids(
+            raw_query_text,
+            k=num_mask_slots,
+            ignore_index=term_supervision_ignore_index,
+        )
+        total_docs: int = len(doc_texts)
+        doc_slot_target_ids = torch.full(
+            (total_docs, num_mask_slots),
+            int(term_supervision_ignore_index),
+            dtype=torch.long,
+        )
+        if num_pos > 0:
+            doc_slot_target_ids[:num_pos] = query_term_target_ids.unsqueeze(0).expand(
+                num_pos, -1
+            )
 
     return RerankInputs(
         qid=meta_item.qid,
@@ -225,4 +486,6 @@ def build_rerank_inputs(
         teacher_scores=teacher_scores,
         num_pos=num_pos,
         num_neg=num_neg,
+        query_slot_target_ids=query_slot_target_ids,
+        doc_slot_target_ids=doc_slot_target_ids,
     )

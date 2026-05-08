@@ -1,0 +1,52 @@
+# Patent DPR retrieval evaluation config with remote MLflow logging enabled.
+seed: 10
+log_dir_base: "log"
+tag: null
+log_dir: ${tagged_log_dir:${log_dir_base},${tag}}
+root_dir_path: "."
+
+defaults:
+  - _self_
+  - model: dpr_bilingual_negative1_ko_en
+  - encoding: default
+  - dataset: patent_us_small_eval_dpr_gcdpr
+  - testing: patent_us_small_eval_dpr_gcdpr
+  - override hydra/job_logging: colorlog_custom
+
+dataset:
+  max_padding: ${testing.max_padding}
+
+evaluation:
+  type: retrieval
+
+mlflow:
+  enabled: true
+  experiment_name: Eval-Patent-DPR
+  tracking_uri: ${oc.env:MLFLOW_TRACKING_URI,https://mlflow.hyukkyu.com}
+  run_name: ${oc.env:MLFLOW_RUN_NAME,null}
+  artifact_location: ${oc.env:MLFLOW_ARTIFACT_LOCATION,null}
+  insecure_tls: ${oc.decode:${oc.env:MLFLOW_TRACKING_INSECURE_TLS,true}}
+  server_cert_path: ${oc.env:MLFLOW_TRACKING_SERVER_CERT_PATH,null}
+  client_cert_path: ${oc.env:MLFLOW_TRACKING_CLIENT_CERT_PATH,null}
+  system_metrics_enabled: ${oc.decode:${oc.env:MLFLOW_ENABLE_SYSTEM_METRICS_LOGGING,true}}
+  system_metrics_sampling_interval: ${oc.decode:${oc.env:MLFLOW_SYSTEM_METRICS_SAMPLING_INTERVAL,30}}
+  system_metrics_samples_before_logging: ${oc.decode:${oc.env:MLFLOW_SYSTEM_METRICS_SAMPLES_BEFORE_LOGGING,1}}
+  log_artifacts: true
+  tags:
+    task: patent_document_retrieval
+    domain: patent
+    protocol: gcdpr_proxy
+
+hydra:
+  output_subdir: null
+  run:
+    dir: ${log_dir}
+  job_logging:
+    handlers:
+      console:
+        class: logging.StreamHandler
+        formatter: colorlog
+        stream: ext://sys.stdout
+      file:
+        class: logging.FileHandler
+        filename: ${log_dir}/evaluate.log

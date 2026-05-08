@@ -1,0 +1,37 @@
+# @package dataset
+defaults:
+  - _base@_here_
+
+name: patent_us_small_eval_dpr_gcdpr
+type: beir
+split: test
+corpus_split: train
+hf_split: test
+
+max_query_length: 512
+max_doc_length: 512
+query_long_doc_strategy: truncate
+query_sliding_window_overlap_tokens: 0
+
+query_corpus_hf_name: parquet
+query_subset_name: null
+corpus_subset_name: null
+
+query_hf_data_files:
+  test: data/eval/patent_us_small_dpr_gcdpr/queries.parquet
+corpus_hf_data_files:
+  train: data/corpus/patent_us_claim_passages_small/passages.parquet
+
+query_id_column: query_id
+query_text_column: text
+corpus_id_column: passage_id
+corpus_group_id_column: parent_doc_id
+corpus_title_column: null
+corpus_text_column: text
+corpus_additional_text_columns: []
+corpus_text_template: null
+
+qrels_hf_name: parquet
+qrels_hf_split: test
+qrels_hf_data_files:
+  test: data/eval/patent_us_small_dpr_gcdpr/qrels.parquet

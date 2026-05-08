@@ -1,0 +1,75 @@
+# @package training
+# Hyperparameters for full paper-faithful LENS reproduction on this machine.
+#
+# Reference: Yibin-Lei/LENS/finetune/train.sh (16×A100-80GB).
+# Scaled for 8×A100-40GB on this box:
+# - per-rank batch 16 (paper 32)
+# - sub_batch_size 8 (paper 64)
+# - grad_accumulation 4 → effective global batch 16×8×4 = 512 queries (paper parity)
+defaults:
+  - _base
+
+name: lens_official
+
+lr: 1.0e-4
+temperature: 0.02
+
+batch_size: 16
+eval_batch_size: 8
+grad_accumulation: 4
+num_workers: 8
+prefetch_factor: 4
+max_padding: false
+
+precision: bf16-mixed
+use_cpu: false
+torch_compile: false
+torch_compile_loss: false
+static_graph: true
+find_unused_parameters: false
+strategy: ddp
+max_grad_norm: 1.0
+
+warmup_steps: 100
+max_steps: null
+num_epochs: 1
+
+# Disable FLOPS regularizer for LENS.
+regularization:
+  query_weight: 0.0
+  doc_weight: 0.0
+  type: l1
+  paper_faithful: true
+  weight: null
+  schedule_steps: 0
+
+# Multi-task training settings.
+lens_multi_task:
+  enabled: true
+  train_group_size: 8
+  symmetric_batch_size: 128         # paper 256; halved for 8 GPUs × 40 GB
+  symmetric_train_group_size: 8
+  max_class_neg: 7
+  sub_batch_size: 8                 # paper 64 (on 80 GB)
+  pad_to_multiple_of: 8
+  cross_device_negatives: true
+  query_max_len: 512
+  passage_max_len: 512
+
+loss:
+  type: lens_multi_task
+  in_batch_weight: 1.0
+  pairwise_weight: 1.0
+
+distill:
+  enabled: true
+  loss: kl
+  teacher_score_key: teacher_scores
+  fail_on_missing: false            # only retrieval rows carry teacher scores
+  weight: 1.0
+
+mlflow:
+  enabled: true
+  experiment_name: Train-LENS
+  tracking_uri: ${oc.env:MLFLOW_TRACKING_URI,https://mlflow.hyukkyu.com}
+  run_name: ${oc.env:MLFLOW_RUN_NAME,null}

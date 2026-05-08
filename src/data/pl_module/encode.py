@@ -3,6 +3,7 @@ from omegaconf import DictConfig
 from torch.utils.data import DataLoader
 from transformers import PreTrainedTokenizerBase
 
+from src.data.dataset.parquet_view import ProjectedParquetDataset
 from src.data.pl_module.common import (
     build_inference_dataloader,
     build_model_tokenizer,
@@ -46,6 +47,18 @@ class EncodeDataModule(L.LightningDataModule):
         prefetch_factor: int | None = (
             int(self.cfg.encoding.prefetch_factor) if num_workers > 0 else None
         )
+        sampler_strategy: str = str(
+            self.cfg.encoding.get(
+                "distributed_sampler_strategy", "row_group_interleaved"
+            )
+        )
+        sampler_row_groups: list[object] | None = None
+        corpus_dataset = self.dataset.dataset.corpus_dataset
+        if (
+            sampler_strategy.strip().lower() == "row_group_interleaved"
+            and isinstance(corpus_dataset, ProjectedParquetDataset)
+        ):
+            sampler_row_groups = list(corpus_dataset._entries)
         return build_inference_dataloader(
             dataset=self.dataset,
             batch_size=int(self.cfg.encoding.batch_size),
@@ -56,4 +69,6 @@ class EncodeDataModule(L.LightningDataModule):
             drop_last=False,
             distributed_shuffle=False,
             prefetch_factor=prefetch_factor,
+            distributed_sampler_strategy=sampler_strategy,
+            distributed_sampler_row_groups=sampler_row_groups,
         )

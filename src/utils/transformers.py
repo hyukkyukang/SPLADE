@@ -3,17 +3,21 @@ from typing import Any, Callable
 
 import torch
 from transformers import (
+    AutoModel,
     AutoModelForCausalLM,
     AutoModelForMaskedLM,
     AutoTokenizer,
     BertConfig,
     BertForMaskedLM,
+    BertModel,
     PreTrainedModel,
     PreTrainedTokenizerBase,
 )
 from src.model.retriever.sparse.neural.bidirectional_mistral import (
     MistralBiForCausalLM,
 )
+from src.model.retriever.sparse.neural.udlm import UDLMForMaskedLMCompat
+from src.utils.compact_head import OFFICIAL_LENS_HEAD_FILENAME
 from src.utils.normalize import normalize_optional_str as _normalize_optional_str
 
 _CHECKPOINT_PRIORITY_FILES: tuple[str, ...] = (
@@ -28,9 +32,12 @@ _MODEL_STATE_PREFIXES: tuple[str, ...] = (
 )
 _DEFAULT_HF_MODEL_CLASS_NAME: str = "AutoModelForMaskedLM"
 _HF_MODEL_CLASSES: dict[str, Any] = {
+    "AutoModel": AutoModel,
     "AutoModelForMaskedLM": AutoModelForMaskedLM,
     "AutoModelForCausalLM": AutoModelForCausalLM,
+    "BertModel": BertModel,
     "MistralBiForCausalLM": MistralBiForCausalLM,
+    "UDLMForMaskedLMCompat": UDLMForMaskedLMCompat,
 }
 
 
@@ -194,6 +201,27 @@ def _collect_local_fallback_dirs(model_name_or_path: str) -> list[Path]:
     return candidates
 
 
+def _has_official_lens_lm_head_artifact(model_name_or_path: str) -> bool:
+    local_path: Path | None = _normalize_local_path(model_name_or_path)
+    if local_path is not None and local_path.is_dir():
+        if (local_path / OFFICIAL_LENS_HEAD_FILENAME).is_file():
+            return True
+    try:
+        from huggingface_hub import hf_hub_download
+    except Exception:
+        return False
+    repo_id: str = str(model_name_or_path).strip()
+    if not repo_id:
+        return False
+    if Path(repo_id).expanduser().exists():
+        return False
+    try:
+        _ = hf_hub_download(repo_id=repo_id, filename=OFFICIAL_LENS_HEAD_FILENAME)
+    except Exception:
+        return False
+    return True
+
+
 def _looks_like_hf_model_dir(path: Path) -> bool:
     config_path: Path = path / "config.json"
     if not config_path.is_file():
@@ -238,6 +266,10 @@ def _load_tokenizer_from_source(
     trust_remote_code: bool,
     require_fast_tokenizer: bool,
     local_files_only: bool | None,
+    revision: str | None,
+    add_eos_token: bool = False,
+    padding_side: str | None = None,
+    pad_fallback_order: tuple[str, ...] = ("eos_token", "cls_token"),
 ) -> PreTrainedTokenizerBase:
     tokenizer_kwargs: dict[str, object] = {
         "use_fast": bool(use_fast_tokenizer),
@@ -245,6 +277,14 @@ def _load_tokenizer_from_source(
     }
     if local_files_only is not None:
         tokenizer_kwargs["local_files_only"] = bool(local_files_only)
+    resolved_revision: str | None = _normalize_optional_str(revision)
+    if resolved_revision is not None:
+        tokenizer_kwargs["revision"] = resolved_revision
+    if bool(add_eos_token):
+        # `add_eos_token` is honored by the slow Llama/Mistral tokenizers; fast
+        # tokenizers ignore it, so when we need EOS appended we must also force
+        # use_fast=False upstream.
+        tokenizer_kwargs["add_eos_token"] = True
     tokenizer: PreTrainedTokenizerBase = AutoTokenizer.from_pretrained(
         source,
         **tokenizer_kwargs,
@@ -254,8 +294,18 @@ def _load_tokenizer_from_source(
             "Fast tokenizer is required but the loaded tokenizer is slow: "
             f"{source}"
         )
+    if padding_side is not None:
+        tokenizer.padding_side = str(padding_side)
     if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token or tokenizer.cls_token
+        attr: str
+        for attr in pad_fallback_order:
+            candidate: Any = getattr(tokenizer, attr, None)
+            if candidate is not None:
+                tokenizer.pad_token = candidate
+                candidate_id: Any = getattr(tokenizer, f"{attr}_id", None)
+                if candidate_id is not None:
+                    tokenizer.pad_token_id = int(candidate_id)
+                break
     return tokenizer
 
 
@@ -266,8 +316,19 @@ def build_tokenizer(
     trust_remote_code: bool = False,
     require_fast_tokenizer: bool = False,
     local_files_only: bool | None = None,
+    revision: str | None = None,
+    strict_official_lens_tokenizer: bool = False,
 ) -> PreTrainedTokenizerBase:
-    """Build a tokenizer with local-checkpoint fallback for ANNA-style runs."""
+    """Build a tokenizer with local-checkpoint fallback.
+
+    `strict_official_lens_tokenizer=True` reproduces the exact tokenizer setup
+    used by the official LENS training and inference code (Yibin-Lei/LENS):
+    `use_fast=False`, `padding_side='left'`, `add_eos_token=False` (Mistral
+    default — the official appends "</s>" as a string suffix at inference
+    time, not via auto-tokenizer flag), and the `unk -> eos` pad-token
+    fallback order. Required for exact embedding parity against
+    `yibinlei/LENS-d{4000,8000}`.
+    """
     sources: list[str] = [model_name]
     resolved_model_source: str = resolve_model_name_or_path(model_name)
     if resolved_model_source not in sources:
@@ -280,11 +341,32 @@ def build_tokenizer(
         if candidate_source not in sources:
             sources.append(candidate_source)
 
+    add_eos_token: bool = False
+    padding_side: str | None = None
+    pad_fallback_order: tuple[str, ...] = ("eos_token", "cls_token")
+    effective_use_fast: bool = bool(use_fast_tokenizer)
+    effective_require_fast: bool = bool(require_fast_tokenizer)
+    if bool(strict_official_lens_tokenizer):
+        # Paper-faithful tokenizer: slow sentencepiece, left-pad, pad fallback
+        # `unk -> eos`. Mirrors the official Yibin-Lei/LENS `eval/model.py`,
+        # which loads the raw `mistralai/Mistral-7B-v0.1` tokenizer (Mistral
+        # default add_eos_token=False) and appends "</s>" as a string suffix.
+        # The encoder-side suffix tokenization yields a single </s>; we must
+        # NOT have the tokenizer auto-append a second one — otherwise the
+        # `mask[..., -2:]` exclusion would keep the last real token instead
+        # of dropping it (changing the pool window vs. what the model was
+        # trained to produce).
+        effective_use_fast = False
+        effective_require_fast = False
+        add_eos_token = False
+        padding_side = "left"
+        pad_fallback_order = ("unk_token", "eos_token")
+
     first_error: Exception | None = None
     load_attempts: list[tuple[bool, bool]] = [
-        (bool(use_fast_tokenizer), bool(require_fast_tokenizer))
+        (effective_use_fast, effective_require_fast)
     ]
-    if bool(use_fast_tokenizer) and not bool(require_fast_tokenizer):
+    if effective_use_fast and not effective_require_fast:
         # Fall back to a slow tokenizer when fast backend construction fails.
         load_attempts.append((False, False))
     source: str
@@ -299,6 +381,10 @@ def build_tokenizer(
                     trust_remote_code=trust_remote_code,
                     require_fast_tokenizer=require_fast,
                     local_files_only=local_files_only,
+                    revision=revision,
+                    add_eos_token=add_eos_token,
+                    padding_side=padding_side,
+                    pad_fallback_order=pad_fallback_order,
                 )
             except Exception as exc:
                 if first_error is None:
@@ -440,8 +526,10 @@ def _maybe_load_condenser_checkpoint(
 
 def _resolve_hf_model_loader(
     model_class_name: str | None,
+    *,
+    default_name: str = _DEFAULT_HF_MODEL_CLASS_NAME,
 ) -> tuple[str, Any]:
-    resolved_name: str = _DEFAULT_HF_MODEL_CLASS_NAME
+    resolved_name: str = default_name
     if model_class_name is not None:
         normalized_name: str = str(model_class_name).strip()
         if normalized_name:
@@ -458,13 +546,16 @@ def _resolve_hf_model_loader(
     return resolved_name, model_class
 
 
-def build_masked_lm_model(
+def build_pretrained_model(
     model_name_or_path: str,
     *,
     model_class_name: str | None = None,
     attn_implementation: str | None = None,
     dtype: torch.dtype | None = None,
     tie_word_embeddings: bool = False,
+    trust_remote_code: bool = False,
+    revision: str | None = None,
+    local_files_only: bool | None = None,
 ) -> PreTrainedModel:
     """Build an LM model with optional Condenser checkpoint fallback."""
     model_kwargs: dict[str, Any] = {"tie_word_embeddings": tie_word_embeddings}
@@ -472,6 +563,55 @@ def build_masked_lm_model(
         model_kwargs["attn_implementation"] = attn_implementation
     if dtype is not None:
         model_kwargs["dtype"] = dtype
+    model_kwargs["trust_remote_code"] = bool(trust_remote_code)
+    resolved_revision: str | None = _normalize_optional_str(revision)
+    if resolved_revision is not None:
+        model_kwargs["revision"] = resolved_revision
+    if local_files_only is not None:
+        model_kwargs["local_files_only"] = bool(local_files_only)
+    resolved_model_class_name: str
+    model_class: Any
+    resolved_model_class_name, model_class = _resolve_hf_model_loader(
+        model_class_name,
+        default_name="AutoModel",
+    )
+
+    try:
+        return model_class.from_pretrained(model_name_or_path, **model_kwargs)
+    except Exception as primary_error:
+        if (
+            resolved_model_class_name == "MistralBiForCausalLM"
+            and _has_official_lens_lm_head_artifact(model_name_or_path)
+        ):
+            retry_kwargs: dict[str, Any] = dict(model_kwargs)
+            retry_kwargs["ignore_mismatched_sizes"] = True
+            return model_class.from_pretrained(model_name_or_path, **retry_kwargs)
+        raise primary_error
+
+
+def build_masked_lm_model(
+    model_name_or_path: str,
+    *,
+    model_class_name: str | None = None,
+    attn_implementation: str | None = None,
+    dtype: torch.dtype | None = None,
+    tie_word_embeddings: bool = False,
+    trust_remote_code: bool = False,
+    revision: str | None = None,
+    local_files_only: bool | None = None,
+) -> PreTrainedModel:
+    """Build an LM model with optional Condenser checkpoint fallback."""
+    model_kwargs: dict[str, Any] = {"tie_word_embeddings": tie_word_embeddings}
+    if attn_implementation is not None:
+        model_kwargs["attn_implementation"] = attn_implementation
+    if dtype is not None:
+        model_kwargs["dtype"] = dtype
+    model_kwargs["trust_remote_code"] = bool(trust_remote_code)
+    resolved_revision: str | None = _normalize_optional_str(revision)
+    if resolved_revision is not None:
+        model_kwargs["revision"] = resolved_revision
+    if local_files_only is not None:
+        model_kwargs["local_files_only"] = bool(local_files_only)
     resolved_model_class_name: str
     model_class: Any
     resolved_model_class_name, model_class = _resolve_hf_model_loader(model_class_name)
@@ -479,6 +619,13 @@ def build_masked_lm_model(
     try:
         return model_class.from_pretrained(model_name_or_path, **model_kwargs)
     except Exception as primary_error:
+        if (
+            resolved_model_class_name == "MistralBiForCausalLM"
+            and _has_official_lens_lm_head_artifact(model_name_or_path)
+        ):
+            retry_kwargs: dict[str, Any] = dict(model_kwargs)
+            retry_kwargs["ignore_mismatched_sizes"] = True
+            return model_class.from_pretrained(model_name_or_path, **retry_kwargs)
         if resolved_model_class_name != _DEFAULT_HF_MODEL_CLASS_NAME:
             raise primary_error
         fallback_model: PreTrainedModel | None = _maybe_load_condenser_checkpoint(
@@ -493,6 +640,7 @@ def build_masked_lm_model(
 
 
 __all__: list[str] = [
+    "build_pretrained_model",
     "build_masked_lm_model",
     "build_tokenizer",
     "resolve_checkpoint_path",

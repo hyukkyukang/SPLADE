@@ -118,7 +118,7 @@ class EncodingDataItem:
     doc_input_ids: torch.Tensor
     doc_attention_mask: torch.Tensor
     doc_pooling_mask: torch.Tensor
-
+    doc_group_id: str | None = None
 
 @dataclass(frozen=True)
 class TrainingDataItem(RerankingDataItem):
@@ -128,3 +128,7 @@ class TrainingDataItem(RerankingDataItem):
     labels: torch.Tensor
     pos_scores: torch.Tensor | None
     neg_scores: torch.Tensor | None
+    # Shape: (num_slots,)
+    query_slot_target_ids: torch.Tensor | None = None
+    # Shape: (num_docs, num_slots)
+    doc_slot_target_ids: torch.Tensor | None = None

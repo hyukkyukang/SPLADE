@@ -19,6 +19,7 @@ scipy
 scikit-learn
 numba
 faiss-cpu
+mteb
 packaging
 setuptools
 maturin

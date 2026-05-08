@@ -1,0 +1,53 @@
+# Training entrypoint config for pretrained diffusion-backbone SPLADE
+seed: 10
+log_dir_base: "log/train/${model.name}"
+tag: null
+log_dir: ${tagged_log_dir:${log_dir_base},${tag}}
+root_dir_path: "."
+
+defaults:
+  - model: pretrained_diffusion_splade_udlm_lm1b
+  - dataset@train_dataset: msmarco
+  - dataset@val_dataset: msmarco_dev_small_negatives
+  - training: pretrained_diffusion_splade
+  - testing: default
+  - override hydra/job_logging: colorlog_custom
+  - _self_
+
+train_dataset:
+  hf_skip_samples: ${training.val_sample_size}
+  hf_max_samples: null
+  max_query_length: 128
+  max_doc_length: 128
+  max_padding: ${training.max_padding}
+
+val_dataset:
+  hf_max_samples: ${training.val_sample_size}
+  hf_skip_samples: 0
+  max_query_length: 128
+  max_doc_length: 128
+  max_padding: ${training.max_padding}
+
+nanobeir:
+  enabled: true
+  run_every_n_val: 1
+  datasets: [msmarco, nfcorpus, nq]
+  batch_size: ${training.eval_batch_size}
+  max_seq_length: ${train_dataset.max_doc_length}
+  use_cpu: false
+  cache_dir: null
+  save_json: true
+
+hydra:
+  output_subdir: null
+  run:
+    dir: ${log_dir}
+  job_logging:
+    handlers:
+      console:
+        class: logging.StreamHandler
+        formatter: colorlog
+        stream: ext://sys.stdout
+      file:
+        class: logging.FileHandler
+        filename: ${log_dir}/train.log

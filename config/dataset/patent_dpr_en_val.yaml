@@ -1,0 +1,43 @@
+# @package dataset
+defaults:
+  - _base@_here_
+
+name: patent_dpr_en_val
+type: msmarco
+split: train
+
+hf_name: json
+hf_subset: null
+hf_cache_dir: null
+hf_max_samples: null
+hf_skip_samples: 0
+hf_data_files:
+  train: data/patent_dpr_en_val.jsonl
+
+max_query_length: 512
+max_doc_length: 512
+max_padding: true
+num_positives: 1
+num_negatives: 1
+
+negative_sampling:
+  strategy: random
+  top_k: null
+  random_k: null
+  random_pool: null
+
+query_corpus_hf_name: json
+query_hf_data_files:
+  train: data/patent_dpr_en_val.jsonl
+corpus_hf_data_files:
+  train: data/patent_dpr_en_val.jsonl
+
+query_subset_name: null
+query_split_name: train
+query_id_column: query_id
+query_text_column: query
+corpus_subset_name: null
+corpus_split_name: train
+corpus_id_column: query_id
+corpus_text_column: positive
+corpus_title_column: null

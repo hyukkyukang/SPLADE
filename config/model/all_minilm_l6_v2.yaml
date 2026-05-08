@@ -1,0 +1,15 @@
+defaults:
+  - _base
+  - _self_
+
+name: all_minilm_l6_v2
+family: dense
+representation_type: dense
+huggingface_name: sentence-transformers/all-MiniLM-L6-v2
+huggingface_model_class: AutoModel
+query_pooling: mean
+doc_pooling: mean
+query_window_pooling: mean
+doc_window_pooling: mean
+similarity: cosine
+normalize: true

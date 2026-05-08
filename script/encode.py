@@ -7,7 +7,7 @@ from omegaconf import DictConfig
 
 from config.path import ABS_CONFIG_DIR
 from src.data.pl_module import EncodeDataModule
-from src.model.pl_module import SPLADEEncodeModule
+from src.model.pl_module import DenseEncodeModule, SPLADEEncodeModule
 from src.utils.logging import get_logger, log_if_rank_zero
 from src.utils.model_utils import apply_checkpoint_model_config
 from src.utils.script_setup import (
@@ -34,7 +34,11 @@ def main(cfg: DictConfig) -> None:
         logger=logger,
     )
 
-    encode_module: SPLADEEncodeModule = SPLADEEncodeModule(cfg=cfg)
+    model_family: str = str(cfg.model.get("family", "splade")).strip().lower()
+    if model_family == "dense":
+        encode_module = DenseEncodeModule(cfg=cfg)
+    else:
+        encode_module = SPLADEEncodeModule(cfg=cfg)
     data_module: EncodeDataModule = EncodeDataModule(cfg=cfg)
 
     encoding_cfg: DictConfig = cfg.encoding

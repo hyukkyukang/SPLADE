@@ -146,10 +146,14 @@ class TrainDataModule(L.LightningDataModule):
                 if normalized_context and normalized_context not in {"none", "null"}:
                     context_value = normalized_context
             elif os.name == "posix":
-                # Python 3.14 defaults to forkserver, which is expensive for our
-                # heavy HF dataset/tokenizer stack. Use fork on Linux for faster
-                # startup and better page-cache sharing across workers.
-                context_value = "fork"
+                # CUDA training must avoid fork: worker processes can inherit the
+                # parent rank's CUDA context and show up as extra GPU consumers.
+                if pin_memory:
+                    context_value = "spawn"
+                else:
+                    # For CPU-only runs, keep fork for lower startup overhead and
+                    # better page-cache sharing across workers.
+                    context_value = "fork"
             if context_value is not None:
                 dataloader_kwargs["multiprocessing_context"] = context_value
         return DataLoader(**dataloader_kwargs)

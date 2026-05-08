@@ -5,16 +5,22 @@ from typing import Any, Callable, TYPE_CHECKING, TypeVar, cast
 import lightning as L
 import torch
 from omegaconf import DictConfig, OmegaConf
+from torch.nn import functional as F
+from torch.nn.parallel import DistributedDataParallel
 
 from src.model.losses import LossComputer
 from src.model.pl_module.compile_policy import TrainingCompilePolicyManager
-from src.model.pl_module.loss_service import LossRegularizationService
+from src.model.pl_module.loss_service import (
+    LossComputationOutputs,
+    LossRegularizationService,
+)
 from src.model.pl_module.metrics_service import TrainingMetricsService
 from src.model.pl_module.training_runtime_services import (
     BenchmarkRuntimeService,
     CompileRuntimeService,
     ValidationRuntimeService,
 )
+from src.model.pl_module.validation_sparse_probe import ValidationSparseProbeLogger
 from src.model.pl_module.utils import validate_torch_compile_mode
 from src.model.pl_module.validation_service import ValidationMetricsAccumulator
 from src.model.retriever.sparse.neural.splade import SpladeModel
@@ -127,6 +133,14 @@ def _normalize_tri_state_config(value: Any, *, field_name: str) -> str:
     return normalized
 
 
+def _resolve_regularization_type(
+    explicit_type: Any | None, fallback_type: Any
+) -> str:
+    if explicit_type is None:
+        return str(fallback_type).strip().lower()
+    return str(explicit_type).strip().lower()
+
+
 def _optimizer_supports_kwarg(
     optimizer_cls: type[torch.optim.Optimizer], kwarg_name: str
 ) -> bool:
@@ -230,6 +244,73 @@ class SPLADETrainingModule(L.LightningModule):
         self._gradient_norm_monitor_sum: float = 0.0
         self._gradient_norm_monitor_max: float = 0.0
         self._gradient_norm_monitor_max_step: int = -1
+        self._ddp_comm_hook_mode: str = str(
+            cfg.training.get("ddp_comm_hook", "none")
+        ).strip().lower()
+        if self._ddp_comm_hook_mode not in {"none", "bf16", "fp16"}:
+            raise ValueError(
+                "training.ddp_comm_hook must be one of: none, bf16, fp16"
+            )
+        self._ddp_comm_hook_registered: bool = False
+        ordered_mask_slot_cfg: DictConfig | None = cfg.training.get(
+            "ordered_mask_slots"
+        )
+        self._ordered_mask_slot_cfg: DictConfig | None = ordered_mask_slot_cfg
+        self._ordered_mask_slot_enabled: bool = bool(
+            ordered_mask_slot_cfg is not None
+            and bool(ordered_mask_slot_cfg.get("enabled", False))
+            and bool(getattr(self.model, "supports_ordered_mask_slot_loss", False))
+        )
+        self._ordered_mask_query_weight: float = (
+            0.0
+            if ordered_mask_slot_cfg is None
+            else float(ordered_mask_slot_cfg.get("query_term_weight", 0.0))
+        )
+        self._ordered_mask_doc_weight: float = (
+            0.0
+            if ordered_mask_slot_cfg is None
+            else float(ordered_mask_slot_cfg.get("doc_term_weight", 0.0))
+        )
+        self._ordered_mask_ignore_index: int = (
+            -100
+            if ordered_mask_slot_cfg is None
+            else int(ordered_mask_slot_cfg.get("ignore_index", -100))
+        )
+        mdlm_cfg: DictConfig = cfg.training.get("mdlm")
+        self._mdlm_cfg: DictConfig | None = mdlm_cfg
+        self._mdlm_enabled: bool = bool(
+            mdlm_cfg is not None and bool(mdlm_cfg.get("enabled", False))
+        )
+        self._mdlm_weight: float = (
+            0.0 if mdlm_cfg is None else float(mdlm_cfg.get("weight", 0.0))
+        )
+        self._mdlm_eps: float = (
+            1e-3 if mdlm_cfg is None else float(mdlm_cfg.get("eps", 1e-3))
+        )
+        self._mdlm_force_mask_at_least_one: bool = bool(
+            True
+            if mdlm_cfg is None
+            else mdlm_cfg.get("force_mask_at_least_one", True)
+        )
+        self._mdlm_doc_chunk_size: int = max(
+            0,
+            int(0 if mdlm_cfg is None else (mdlm_cfg.get("doc_chunk_size", 0) or 0)),
+        )
+        raw_mdlm_doc_selection: str = str(
+            "all" if mdlm_cfg is None else mdlm_cfg.get("doc_selection", "all")
+        ).strip().lower()
+        if raw_mdlm_doc_selection not in {"all", "positives"}:
+            raise ValueError(
+                "training.mdlm.doc_selection must be one of: all, positives"
+            )
+        self._mdlm_doc_selection: str = raw_mdlm_doc_selection
+        if self._mdlm_enabled and not bool(
+            getattr(self.model, "supports_mdlm_aux_loss", False)
+        ):
+            raise ValueError(
+                "training.mdlm.enabled=true requires a model class that implements "
+                "MDLM auxiliary loss support."
+            )
         # Keep compatibility with existing call sites while service extraction is ongoing.
         self.temperature = self._loss_service.temperature
         self.distill_cfg = self._loss_service.distill_cfg
@@ -239,6 +320,8 @@ class SPLADETrainingModule(L.LightningModule):
         self.validation_loss_type: str = self._loss_service.resolve_validation_loss_type()
         self.reg_query_weight = self._loss_service.reg_query_weight
         self.reg_doc_weight = self._loss_service.reg_doc_weight
+        self.reg_query_type = self._loss_service.reg_query_type
+        self.reg_doc_type = self._loss_service.reg_doc_type
 
         self._eager_train_loss_computer = self._loss_service.build_loss_computer()
         if self.validation_loss_type != self.loss_type:
@@ -246,11 +329,27 @@ class SPLADETrainingModule(L.LightningModule):
                 loss_type=self.validation_loss_type
             )
         self.loss_computer: Any = self._eager_train_loss_computer
+        self._train_compile_policy.finalize_train_core_compile(
+            loss_computer=self._eager_train_loss_computer,
+            mdlm_enabled=bool(self._mdlm_enabled and self._mdlm_weight > 0.0),
+            mdlm_doc_selection=self._mdlm_doc_selection,
+            mdlm_doc_chunk_size=self._mdlm_doc_chunk_size,
+            mdlm_eps=self._mdlm_eps,
+            mdlm_force_mask_at_least_one=self._mdlm_force_mask_at_least_one,
+            mdlm_single_positive_assumption=bool(
+                int(getattr(cfg.train_dataset, "num_positives", 0) or 0) == 1
+            ),
+            ordered_mask_slot_enabled=bool(self._ordered_mask_slot_enabled),
+            ordered_mask_query_weight=self._ordered_mask_query_weight,
+            ordered_mask_doc_weight=self._ordered_mask_doc_weight,
+            ordered_mask_ignore_index=self._ordered_mask_ignore_index,
+        )
         if self._train_compile_policy.torch_compile_enabled and compile_loss:
-            self._compiled_train_loss_computer = torch.compile(
-                self._eager_train_loss_computer,
-                **self._train_compile_policy.loss_compile_mode_kwargs,
-            )
+            if not self._train_compile_policy.compiled_train_core_available():
+                self._compiled_train_loss_computer = torch.compile(
+                    self._eager_train_loss_computer,
+                    **self._train_compile_policy.loss_compile_mode_kwargs,
+                )
         validation_policy: TrainingCompilePolicyManager | None = (
             self._validation_compile_policy
         )
@@ -293,6 +392,40 @@ class SPLADETrainingModule(L.LightningModule):
         )
         if self._validation_doc_encode_chunk_size <= 0:
             self._validation_doc_encode_chunk_size = _VALIDATION_DOC_ENCODE_CHUNK_SIZE
+
+    def _maybe_register_ddp_comm_hook(self) -> None:
+        if self._ddp_comm_hook_registered or self._ddp_comm_hook_mode == "none":
+            return
+        trainer: Any | None = getattr(self, "trainer", None)
+        if trainer is None:
+            return
+        strategy: Any | None = getattr(trainer, "strategy", None)
+        if strategy is None:
+            return
+        wrapped_model: Any | None = getattr(strategy, "model", None)
+        if not isinstance(wrapped_model, DistributedDataParallel):
+            return
+        from torch.distributed.algorithms.ddp_comm_hooks import default_hooks
+
+        hook_name: str = self._ddp_comm_hook_mode
+        if hook_name == "bf16":
+            if bool(self.cfg.training.use_cpu) or not torch.cuda.is_bf16_supported():
+                raise RuntimeError(
+                    "training.ddp_comm_hook=bf16 requires CUDA bf16 support."
+                )
+            hook = default_hooks.bf16_compress_hook
+        else:
+            hook = default_hooks.fp16_compress_hook
+        wrapped_model.register_comm_hook(state=wrapped_model.process_group, hook=hook)
+        self._ddp_comm_hook_registered = True
+        log_if_rank_zero(
+            logger,
+            f"Registered DDP communication hook: {hook_name}.",
+            level="warning",
+        )
+
+    def on_fit_start(self) -> None:
+        self._maybe_register_ddp_comm_hook()
 
     def _resolve_validation_compile_mode(self) -> str:
         mode_value: Any = self.cfg.training.get("torch_compile_validation_mode", "default")
@@ -420,12 +553,41 @@ class SPLADETrainingModule(L.LightningModule):
             metrics_accumulator=self._validation_metrics,
             logger=logger,
         )
+        self._validation_sparse_probe_runtime = ValidationSparseProbeLogger(
+            module=self,
+            cfg=cfg,
+            logger=logger,
+        )
         self._benchmark_runtime = BenchmarkRuntimeService(
             module=self,
             runner=self._nanobeir_runner,
             logger=logger,
             masked_lm_incompatibility_predicate=_is_masked_lm_incompatibility_error,
             cuda_oom_predicate=_is_cuda_oom_error,
+        )
+
+    def _compute_ordered_mask_slot_loss(
+        self,
+        *,
+        slot_logits: torch.Tensor,
+        target_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        if slot_logits.ndim != 3 or target_ids.ndim != 2:
+            raise ValueError(
+                "Ordered mask-slot loss expects logits [B, K, V] and targets [B, K]."
+            )
+        batch_size: int = int(slot_logits.shape[0])
+        num_slots: int = int(slot_logits.shape[1])
+        vocab_size: int = int(slot_logits.shape[2])
+        flattened_logits: torch.Tensor = slot_logits.reshape(
+            batch_size * num_slots,
+            vocab_size,
+        )
+        flattened_targets: torch.Tensor = target_ids.reshape(batch_size * num_slots)
+        return F.cross_entropy(
+            flattened_logits,
+            flattened_targets,
+            ignore_index=self._ordered_mask_ignore_index,
         )
 
     def _compute_rep_magnitude(
@@ -479,6 +641,155 @@ class SPLADETrainingModule(L.LightningModule):
         metrics["q_sparsity_ratio"] = q_sparsity_ratio
         metrics["doc_sparsity_ratio"] = doc_sparsity_ratio
 
+    def _compute_mdlm_auxiliary_metrics(
+        self,
+        *,
+        query_input_ids: torch.Tensor,
+        query_attention_mask: torch.Tensor,
+        flat_doc_input_ids: torch.Tensor,
+        flat_doc_attention_mask: torch.Tensor,
+        pos_mask: torch.Tensor | None = None,
+        doc_mask: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        mdlm_enabled: bool = bool(getattr(self, "_mdlm_enabled", False))
+        mdlm_weight: float = float(getattr(self, "_mdlm_weight", 0.0))
+        mdlm_eps: float = float(getattr(self, "_mdlm_eps", 1e-3))
+        mdlm_force_mask_at_least_one: bool = bool(
+            getattr(self, "_mdlm_force_mask_at_least_one", True)
+        )
+        mdlm_doc_chunk_size: int = max(
+            0,
+            int(getattr(self, "_mdlm_doc_chunk_size", 0) or 0),
+        )
+        mdlm_doc_selection: str = str(
+            getattr(self, "_mdlm_doc_selection", "all")
+        ).strip().lower()
+        if not mdlm_enabled or mdlm_weight <= 0.0:
+            zero: torch.Tensor = query_input_ids.new_zeros((), dtype=torch.float32)
+            return zero, zero, zero
+        mdlm_model: Any = self.model
+        compile_policy: Any | None = getattr(self, "_compile_policy", None)
+        has_compiled_query_mdlm_aux: bool = bool(
+            compile_policy is not None
+            and callable(getattr(compile_policy, "has_compiled_query_mdlm_aux", None))
+            and compile_policy.has_compiled_query_mdlm_aux()
+        )
+        has_compiled_doc_mdlm_aux: bool = bool(
+            compile_policy is not None
+            and callable(getattr(compile_policy, "has_compiled_doc_mdlm_aux", None))
+            and compile_policy.has_compiled_doc_mdlm_aux()
+        )
+        selected_doc_input_ids: torch.Tensor = flat_doc_input_ids
+        selected_doc_attention_mask: torch.Tensor = flat_doc_attention_mask
+        if mdlm_doc_selection == "positives":
+            if pos_mask is None:
+                raise ValueError(
+                    "training.mdlm.doc_selection=positives requires pos_mask."
+                )
+            selected_doc_mask: torch.Tensor = pos_mask.to(
+                device=flat_doc_input_ids.device,
+                dtype=torch.bool,
+            ).reshape(-1)
+            if doc_mask is not None:
+                selected_doc_mask = selected_doc_mask & doc_mask.to(
+                    device=flat_doc_input_ids.device,
+                    dtype=torch.bool,
+                ).reshape(-1)
+            selected_doc_input_ids = flat_doc_input_ids[selected_doc_mask]
+            selected_doc_attention_mask = flat_doc_attention_mask[selected_doc_mask]
+
+        selected_doc_count: int = int(selected_doc_input_ids.shape[0])
+        query_batch_size: int = int(query_input_ids.shape[0])
+        can_fuse_grouped_mdlm: bool = (
+            callable(getattr(mdlm_model, "compute_grouped_mdlm_aux_losses", None))
+            and mdlm_doc_chunk_size <= 0
+            and mdlm_doc_selection == "positives"
+            and selected_doc_count > 0
+            and selected_doc_count <= query_batch_size
+            and int(query_input_ids.shape[1]) == int(selected_doc_input_ids.shape[1])
+        )
+        mdlm_q_loss: torch.Tensor
+        if can_fuse_grouped_mdlm:
+            with torch.autograd.profiler.record_function("splade.compute_mdlm_aux_fused"):
+                mdlm_q_loss, mdlm_d_loss = mdlm_model.compute_grouped_mdlm_aux_losses(
+                    input_id_groups=(query_input_ids, selected_doc_input_ids),
+                    attention_mask_groups=(
+                        query_attention_mask,
+                        selected_doc_attention_mask,
+                    ),
+                    mask_probability_eps=mdlm_eps,
+                    force_mask_at_least_one=mdlm_force_mask_at_least_one,
+                )
+        else:
+            query_record_name: str = (
+                "splade.compute_mdlm_aux_query_compiled"
+                if has_compiled_query_mdlm_aux
+                else "splade.compute_mdlm_aux_query"
+            )
+            with torch.autograd.profiler.record_function(query_record_name):
+                if has_compiled_query_mdlm_aux:
+                    mdlm_q_loss = compile_policy.run_compiled_query_mdlm_aux(
+                        input_ids=query_input_ids,
+                        attention_mask=query_attention_mask,
+                    )
+                else:
+                    mdlm_q_loss = mdlm_model.compute_mdlm_aux_loss(
+                        query_input_ids,
+                        query_attention_mask,
+                        mask_probability_eps=mdlm_eps,
+                        force_mask_at_least_one=mdlm_force_mask_at_least_one,
+                    )
+            if selected_doc_count == 0:
+                mdlm_d_loss = query_input_ids.new_zeros((), dtype=torch.float32)
+            elif mdlm_doc_chunk_size > 0 and selected_doc_count > mdlm_doc_chunk_size:
+                total_docs: int = selected_doc_count
+                mdlm_d_loss = query_input_ids.new_zeros((), dtype=torch.float32)
+                with torch.autograd.profiler.record_function(
+                    "splade.compute_mdlm_aux_docs_chunked"
+                ):
+                    chunk_start: int
+                    for chunk_start in range(0, total_docs, mdlm_doc_chunk_size):
+                        chunk_end: int = min(chunk_start + mdlm_doc_chunk_size, total_docs)
+                        if has_compiled_doc_mdlm_aux:
+                            chunk_loss = compile_policy.run_compiled_doc_mdlm_aux(
+                                input_ids=selected_doc_input_ids[chunk_start:chunk_end],
+                                attention_mask=selected_doc_attention_mask[
+                                    chunk_start:chunk_end
+                                ],
+                            )
+                        else:
+                            chunk_loss = mdlm_model.compute_mdlm_aux_loss(
+                                selected_doc_input_ids[chunk_start:chunk_end],
+                                selected_doc_attention_mask[chunk_start:chunk_end],
+                                mask_probability_eps=mdlm_eps,
+                                force_mask_at_least_one=mdlm_force_mask_at_least_one,
+                            )
+                        chunk_weight: float = float(chunk_end - chunk_start) / float(
+                            total_docs
+                        )
+                        mdlm_d_loss = mdlm_d_loss + (chunk_loss * chunk_weight)
+            else:
+                doc_record_name: str = (
+                    "splade.compute_mdlm_aux_docs_compiled"
+                    if has_compiled_doc_mdlm_aux
+                    else "splade.compute_mdlm_aux_docs"
+                )
+                with torch.autograd.profiler.record_function(doc_record_name):
+                    if has_compiled_doc_mdlm_aux:
+                        mdlm_d_loss = compile_policy.run_compiled_doc_mdlm_aux(
+                            input_ids=selected_doc_input_ids,
+                            attention_mask=selected_doc_attention_mask,
+                        )
+                    else:
+                        mdlm_d_loss = mdlm_model.compute_mdlm_aux_loss(
+                            selected_doc_input_ids,
+                            selected_doc_attention_mask,
+                            mask_probability_eps=mdlm_eps,
+                            force_mask_at_least_one=mdlm_force_mask_at_least_one,
+                        )
+        mdlm_total: torch.Tensor = mdlm_q_loss + mdlm_d_loss
+        return mdlm_q_loss, mdlm_d_loss, mdlm_total
+
     def _training_step_shared(
         self,
         batch: dict[str, torch.Tensor],
@@ -506,11 +817,18 @@ class SPLADETrainingModule(L.LightningModule):
             if doc_pooling_mask is None
             else doc_pooling_mask.view(bsz * doc_count, seq_len)
         )
+        pos_mask: torch.Tensor = batch["pos_mask"]
+        doc_mask: torch.Tensor = batch["doc_mask"]
+        teacher_scores: torch.Tensor = batch["teacher_scores"]
 
         q_reps: torch.Tensor
         flat_doc_reps: torch.Tensor
+        loss_outputs: LossComputationOutputs
         use_compile: bool = bool(
             self._compile_policy.compile_enabled_for_current_stage
+        )
+        use_compiled_train_core: bool = (
+            stage == "train" and self._compile_policy.has_compiled_train_core()
         )
         use_chunked_validation_doc_encoding: bool = (
             stage == "val"
@@ -527,6 +845,23 @@ class SPLADETrainingModule(L.LightningModule):
             and int(batch["query_input_ids"].shape[1]) == int(flat_docs.shape[1])
             and self._compile_policy.can_fuse_query_doc_encoding()
         )
+        ordered_mask_slot_enabled: bool = bool(
+            getattr(self, "_ordered_mask_slot_enabled", False)
+            and batch.get("query_slot_target_ids") is not None
+            and batch.get("doc_slot_target_ids") is not None
+        )
+        if ordered_mask_slot_enabled:
+            use_fused_query_doc_encoding = False
+        compiled_mdlm_q_loss: torch.Tensor | None = None
+        compiled_mdlm_d_loss: torch.Tensor | None = None
+        compiled_mdlm_total_loss: torch.Tensor | None = None
+        compiled_mdlm_applied: bool = False
+        compiled_mdlm_apply_mode: str = "never"
+        compiled_ordered_query_slot_loss: torch.Tensor | None = None
+        compiled_ordered_doc_slot_loss: torch.Tensor | None = None
+        compiled_ordered_total_loss: torch.Tensor | None = None
+        query_slot_logits: torch.Tensor | None = None
+        flat_doc_slot_logits: torch.Tensor | None = None
         if use_chunked_validation_doc_encoding:
             with torch.autograd.profiler.record_function("splade.encode_queries"):
                 if use_compile:
@@ -563,6 +898,138 @@ class SPLADETrainingModule(L.LightningModule):
                     query_pooling_mask=query_pooling_mask,
                     doc_pooling_mask=flat_doc_pooling_masks,
                 )
+        elif use_compiled_train_core:
+            compiled_mdlm_apply_mode = (
+                self._compile_policy.compiled_train_core_mdlm_apply_mode(
+                    query_seq_len=int(batch["query_input_ids"].shape[1]),
+                    doc_seq_len=int(flat_docs.shape[1]),
+                )
+            )
+            lambda_scale_value: float = self._loss_service.lambda_schedule_multiplier(
+                int(self.global_step)
+            )
+            lambda_scale: torch.Tensor = teacher_scores.new_tensor(
+                lambda_scale_value, dtype=torch.float32
+            )
+            with torch.autograd.profiler.record_function("splade.train_core_compiled"):
+                if use_compile:
+                    self._compile_policy.maybe_mark_step()
+                compiled_outputs: tuple[torch.Tensor, ...] = (
+                    self._compile_policy.run_compiled_train_core(
+                        query_input_ids=batch["query_input_ids"],
+                        query_attention_mask=batch["query_attention_mask"],
+                        doc_input_ids=flat_docs,
+                        doc_attention_mask=flat_masks,
+                        pos_mask=pos_mask,
+                        doc_mask=doc_mask,
+                        teacher_scores=teacher_scores,
+                        lambda_scale=lambda_scale,
+                        query_pooling_mask=query_pooling_mask,
+                        doc_pooling_mask=flat_doc_pooling_masks,
+                        query_slot_target_ids=batch.get("query_slot_target_ids"),
+                        doc_slot_target_ids=batch.get("doc_slot_target_ids"),
+                    )
+                )
+            if len(compiled_outputs) == 24:
+                (
+                    q_reps,
+                    flat_doc_reps,
+                    loss,
+                    pairwise_scores,
+                    pairwise_loss,
+                    in_batch_loss,
+                    distill_loss,
+                    distill_mse_loss,
+                    distill_kl_loss,
+                    distill_margin_mse_loss,
+                    q_reg,
+                    d_reg,
+                    sigmoid_pos_loss,
+                    sigmoid_neg_loss,
+                    sigmoid_logit_scale,
+                    sigmoid_bias,
+                    sigmoid_pos_score_mean,
+                    sigmoid_neg_score_mean,
+                    sigmoid_pos_margin_mean,
+                    sigmoid_neg_margin_mean,
+                    compiled_mdlm_q_loss,
+                    compiled_mdlm_d_loss,
+                    compiled_mdlm_total_loss,
+                    compiled_mdlm_applied_flag,
+                ) = compiled_outputs
+            elif len(compiled_outputs) == 27:
+                (
+                    q_reps,
+                    flat_doc_reps,
+                    loss,
+                    pairwise_scores,
+                    pairwise_loss,
+                    in_batch_loss,
+                    distill_loss,
+                    distill_mse_loss,
+                    distill_kl_loss,
+                    distill_margin_mse_loss,
+                    q_reg,
+                    d_reg,
+                    sigmoid_pos_loss,
+                    sigmoid_neg_loss,
+                    sigmoid_logit_scale,
+                    sigmoid_bias,
+                    sigmoid_pos_score_mean,
+                    sigmoid_neg_score_mean,
+                    sigmoid_pos_margin_mean,
+                    sigmoid_neg_margin_mean,
+                    compiled_ordered_query_slot_loss,
+                    compiled_ordered_doc_slot_loss,
+                    compiled_ordered_total_loss,
+                    compiled_mdlm_q_loss,
+                    compiled_mdlm_d_loss,
+                    compiled_mdlm_total_loss,
+                    compiled_mdlm_applied_flag,
+                ) = compiled_outputs
+            else:
+                raise ValueError(
+                    "Compiled train-core returned an unexpected output tuple size: "
+                    f"{len(compiled_outputs)}"
+                )
+            if compiled_mdlm_apply_mode == "always":
+                compiled_mdlm_applied = True
+            elif compiled_mdlm_apply_mode == "runtime_flag":
+                compiled_mdlm_applied = bool(
+                    bool(compiled_mdlm_applied_flag is not None)
+                    and float(compiled_mdlm_applied_flag.item()) > 0.0
+                )
+            lambda_scale = lambda_scale.to(dtype=q_reps.dtype, device=q_reps.device)
+            reg_query_lambda: torch.Tensor = lambda_scale * float(
+                getattr(self, "reg_query_weight", self.reg_cfg.query_weight)
+            )
+            reg_doc_lambda: torch.Tensor = lambda_scale * float(
+                getattr(self, "reg_doc_weight", self.reg_cfg.doc_weight)
+            )
+            loss_outputs = LossComputationOutputs(
+                loss=loss,
+                pairwise_scores=pairwise_scores,
+                pairwise_loss=pairwise_loss,
+                in_batch_loss=in_batch_loss,
+                distill_loss=distill_loss,
+                distill_mse_loss=distill_mse_loss,
+                distill_kl_loss=distill_kl_loss,
+                distill_margin_mse_loss=distill_margin_mse_loss,
+                q_reg=q_reg,
+                d_reg=d_reg,
+                lambda_scale_value=lambda_scale_value,
+                lambda_scale=lambda_scale,
+                reg_query_lambda=reg_query_lambda,
+                reg_doc_lambda=reg_doc_lambda,
+                sigmoid_pos_loss=sigmoid_pos_loss,
+                sigmoid_neg_loss=sigmoid_neg_loss,
+                sigmoid_logit_scale=sigmoid_logit_scale,
+                sigmoid_bias=sigmoid_bias,
+                sigmoid_pos_score_mean=sigmoid_pos_score_mean,
+                sigmoid_neg_score_mean=sigmoid_neg_score_mean,
+                sigmoid_pos_margin_mean=sigmoid_pos_margin_mean,
+                sigmoid_neg_margin_mean=sigmoid_neg_margin_mean,
+            )
         elif use_fused_query_doc_encoding:
             with torch.autograd.profiler.record_function(
                 "splade.encode_queries_docs_fused"
@@ -576,6 +1043,29 @@ class SPLADETrainingModule(L.LightningModule):
                     doc_attention_mask=flat_masks,
                     query_pooling_mask=query_pooling_mask,
                     doc_pooling_mask=flat_doc_pooling_masks,
+                )
+        elif ordered_mask_slot_enabled:
+            with torch.autograd.profiler.record_function(
+                "splade.encode_queries_with_slots"
+            ):
+                if use_compile:
+                    self._compile_policy.maybe_mark_step()
+                q_reps, query_slot_logits = self.model.encode_queries_with_slot_logits(
+                    batch["query_input_ids"],
+                    batch["query_attention_mask"],
+                    pooling_mask=query_pooling_mask,
+                )
+            with torch.autograd.profiler.record_function(
+                "splade.encode_docs_with_slots"
+            ):
+                if use_compile:
+                    self._compile_policy.maybe_mark_step()
+                flat_doc_reps, flat_doc_slot_logits = (
+                    self.model.encode_docs_with_slot_logits(
+                        flat_docs,
+                        flat_masks,
+                        pooling_mask=flat_doc_pooling_masks,
+                    )
                 )
         else:
             with torch.autograd.profiler.record_function("splade.encode_queries"):
@@ -597,9 +1087,6 @@ class SPLADETrainingModule(L.LightningModule):
 
         doc_reps: torch.Tensor = flat_doc_reps.view(bsz, doc_count, -1)
 
-        pos_mask: torch.Tensor = batch["pos_mask"]
-        doc_mask: torch.Tensor = batch["doc_mask"]
-        teacher_scores: torch.Tensor = batch["teacher_scores"]
         should_compute_expensive_metrics: bool
         if stage == "train":
             should_compute_expensive_metrics = (
@@ -613,16 +1100,17 @@ class SPLADETrainingModule(L.LightningModule):
             )
         else:
             should_compute_expensive_metrics = True
-        with torch.autograd.profiler.record_function("splade.compute_loss"):
-            loss_outputs = self._loss_service.compute_loss(
-                loss_computer=self.loss_computer,
-                q_reps=q_reps,
-                doc_reps=doc_reps,
-                pos_mask=pos_mask,
-                doc_mask=doc_mask,
-                teacher_scores=teacher_scores,
-                global_step=int(self.global_step),
-            )
+        if not use_compiled_train_core:
+            with torch.autograd.profiler.record_function("splade.compute_loss"):
+                loss_outputs = self._loss_service.compute_loss(
+                    loss_computer=self.loss_computer,
+                    q_reps=q_reps,
+                    doc_reps=doc_reps,
+                    pos_mask=pos_mask,
+                    doc_mask=doc_mask,
+                    teacher_scores=teacher_scores,
+                    global_step=int(self.global_step),
+                )
         loss: torch.Tensor
         pairwise_loss: torch.Tensor
         in_batch_loss: torch.Tensor
@@ -638,6 +1126,70 @@ class SPLADETrainingModule(L.LightningModule):
         d_reg = loss_outputs.d_reg
         reg_query_lambda: torch.Tensor = loss_outputs.reg_query_lambda
         reg_doc_lambda: torch.Tensor = loss_outputs.reg_doc_lambda
+        mdlm_enabled: bool = bool(getattr(self, "_mdlm_enabled", False))
+        mdlm_weight: float = float(getattr(self, "_mdlm_weight", 0.0))
+        mdlm_q_loss: torch.Tensor | None = None
+        mdlm_d_loss: torch.Tensor | None = None
+        mdlm_total_loss: torch.Tensor | None = None
+        if stage == "train" and mdlm_enabled and mdlm_weight > 0.0:
+            if (
+                use_compiled_train_core
+                and compiled_mdlm_applied
+                and compiled_mdlm_q_loss is not None
+                and compiled_mdlm_d_loss is not None
+                and compiled_mdlm_total_loss is not None
+            ):
+                mdlm_q_loss = compiled_mdlm_q_loss
+                mdlm_d_loss = compiled_mdlm_d_loss
+                mdlm_total_loss = compiled_mdlm_total_loss
+            else:
+                mdlm_q_loss, mdlm_d_loss, mdlm_total_loss = (
+                    self._compute_mdlm_auxiliary_metrics(
+                        query_input_ids=batch["query_input_ids"],
+                        query_attention_mask=batch["query_attention_mask"],
+                        flat_doc_input_ids=flat_docs,
+                        flat_doc_attention_mask=flat_masks,
+                        pos_mask=pos_mask,
+                        doc_mask=doc_mask,
+                    )
+                )
+            loss = loss + (mdlm_weight * mdlm_total_loss)
+
+        ordered_query_slot_loss: torch.Tensor | None = None
+        ordered_doc_slot_loss: torch.Tensor | None = None
+        ordered_mask_slot_loss: torch.Tensor | None = None
+        if ordered_mask_slot_enabled:
+            if (
+                use_compiled_train_core
+                and compiled_ordered_query_slot_loss is not None
+                and compiled_ordered_doc_slot_loss is not None
+                and compiled_ordered_total_loss is not None
+            ):
+                ordered_query_slot_loss = compiled_ordered_query_slot_loss
+                ordered_doc_slot_loss = compiled_ordered_doc_slot_loss
+                ordered_mask_slot_loss = compiled_ordered_total_loss
+            elif query_slot_logits is not None and flat_doc_slot_logits is not None:
+                query_slot_target_ids: torch.Tensor = batch["query_slot_target_ids"]
+                doc_slot_target_ids: torch.Tensor = batch["doc_slot_target_ids"]
+                ordered_query_slot_loss = self._compute_ordered_mask_slot_loss(
+                    slot_logits=query_slot_logits,
+                    target_ids=query_slot_target_ids,
+                )
+                ordered_doc_slot_loss = self._compute_ordered_mask_slot_loss(
+                    slot_logits=flat_doc_slot_logits,
+                    target_ids=doc_slot_target_ids.view(bsz * doc_count, -1),
+                )
+                ordered_mask_slot_loss = (
+                    (
+                        float(getattr(self, "_ordered_mask_query_weight", 0.0))
+                        * ordered_query_slot_loss
+                    )
+                    + (
+                        float(getattr(self, "_ordered_mask_doc_weight", 0.0))
+                        * ordered_doc_slot_loss
+                    )
+                )
+                loss = loss + ordered_mask_slot_loss
 
         metrics: dict[str, torch.Tensor] = {
             "loss": loss,
@@ -679,6 +1231,23 @@ class SPLADETrainingModule(L.LightningModule):
             metrics["q_reg"] = q_reg
         if float(getattr(self, "reg_doc_weight", self.reg_cfg.doc_weight)) > 0:
             metrics["d_reg"] = d_reg
+        if mdlm_total_loss is not None:
+            metrics["mdlm_q_loss"] = mdlm_q_loss
+            metrics["mdlm_d_loss"] = mdlm_d_loss
+            metrics["mdlm_loss"] = mdlm_total_loss
+            metrics["mdlm_weight"] = loss.new_tensor(mdlm_weight, dtype=torch.float32)
+        if ordered_mask_slot_loss is not None:
+            metrics["ordered_query_slot_loss"] = ordered_query_slot_loss
+            metrics["ordered_doc_slot_loss"] = ordered_doc_slot_loss
+            metrics["ordered_mask_slot_loss"] = ordered_mask_slot_loss
+            metrics["ordered_query_slot_weight"] = loss.new_tensor(
+                float(getattr(self, "_ordered_mask_query_weight", 0.0)),
+                dtype=torch.float32,
+            )
+            metrics["ordered_doc_slot_weight"] = loss.new_tensor(
+                float(getattr(self, "_ordered_mask_doc_weight", 0.0)),
+                dtype=torch.float32,
+            )
 
         if stage == "train" and should_compute_expensive_metrics:
             with torch.no_grad():
@@ -711,6 +1280,22 @@ class SPLADETrainingModule(L.LightningModule):
                     d_reg_sum_equiv = d_reg_fp32 * vocab_dim_tensor
                     q_reg_mean_equiv = q_reg_fp32
                     d_reg_mean_equiv = d_reg_fp32
+                reg_query_type: str = _resolve_regularization_type(
+                    getattr(
+                        self,
+                        "reg_query_type",
+                        getattr(self.reg_cfg, "query_type", None),
+                    ),
+                    getattr(self.reg_cfg, "type", "l1"),
+                )
+                reg_doc_type: str = _resolve_regularization_type(
+                    getattr(
+                        self,
+                        "reg_doc_type",
+                        getattr(self.reg_cfg, "doc_type", None),
+                    ),
+                    getattr(self.reg_cfg, "type", "l1"),
+                )
                 metrics["reg_lambda_scale"] = q_reps.new_tensor(
                     lambda_scale_value, dtype=torch.float32
                 )
@@ -727,10 +1312,11 @@ class SPLADETrainingModule(L.LightningModule):
                     flat_doc_reps=flat_doc_reps_for_metrics,
                     flat_doc_mask=flat_doc_mask_for_metrics,
                 )
-                if str(self.reg_cfg.type).lower() == "flops":
+                if reg_query_type == "flops":
                     metrics["q_flops_proxy_sum_equiv"] = q_reg_sum_equiv
-                    metrics["d_flops_proxy_sum_equiv"] = d_reg_sum_equiv
                     metrics["q_flops_proxy_mean_equiv"] = q_reg_mean_equiv
+                if reg_doc_type == "flops":
+                    metrics["d_flops_proxy_sum_equiv"] = d_reg_sum_equiv
                     metrics["d_flops_proxy_mean_equiv"] = d_reg_mean_equiv
         elif stage == "val" and should_compute_expensive_metrics:
             flat_doc_reps_for_metrics = doc_reps.view(-1, doc_reps.shape[-1])
@@ -902,6 +1488,7 @@ class SPLADETrainingModule(L.LightningModule):
 
     def on_validation_epoch_end(self) -> None:
         self._validation_runtime.finalize_epoch()
+        self._validation_sparse_probe_runtime.run_validation_epoch_end()
         self._benchmark_runtime.run_validation_epoch_end()
 
     def optimizer_step(

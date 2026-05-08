@@ -4,6 +4,8 @@ from importlib import import_module
 from typing import Any
 
 __all__: list[str] = [
+    "DenseEncodeModule",
+    "DenseRetrievalEvalLightningModule",
     "SPLADEEncodeModule",
     "RetrievalEvalLightningModule",
     "RetrievalSearchLightningModule",
@@ -14,6 +16,11 @@ __all__: list[str] = [
 ]
 
 _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
+    "DenseEncodeModule": ("src.model.pl_module.dense_encode", "DenseEncodeModule"),
+    "DenseRetrievalEvalLightningModule": (
+        "src.model.pl_module.dense_eval",
+        "DenseRetrievalEvalLightningModule",
+    ),
     "SPLADEEncodeModule": ("src.model.pl_module.encode", "SPLADEEncodeModule"),
     "RetrievalEvalLightningModule": (
         "src.model.pl_module.eval",

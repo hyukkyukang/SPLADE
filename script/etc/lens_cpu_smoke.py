@@ -170,6 +170,7 @@ def _build_model_cfg(clustered_dir: Path, log_dir: Path) -> DictConfig:
     training_cfg.grad_accumulation = 1
     training_cfg.max_steps = 1
     training_cfg.val_check_interval = 1
+    training_cfg.val_check_interval_optimizer_steps = 1
     training_cfg.log_every_n_steps = 1
     training_cfg.limit_val_batches = 1.0
 

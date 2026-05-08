@@ -1,0 +1,39 @@
+# Hydra top-level for the paper-faithful LENS reproduction run.
+#
+# Usage:
+#   source config/env/lens.env.sh
+#   bash script/etc/launch_lens.sh train_lens_official \
+#     training.tag=lens_d4000_run01
+seed: 10
+log_dir_base: "${oc.env:LENS_LOGS,log/train}/${model.name}"
+tag: null
+log_dir: ${tagged_log_dir:${log_dir_base},${tag}}
+root_dir_path: "."
+
+defaults:
+  - model: lens_mistral_cluster4k
+  - dataset@train_dataset: bge_full_data
+  - training: lens_official
+  - testing: default
+  - override hydra/job_logging: colorlog_custom
+  - _self_
+
+val_dataset: null
+
+# LENS in the paper uses no intra-training validation (single-epoch schedule).
+nanobeir:
+  enabled: false
+
+hydra:
+  output_subdir: null
+  run:
+    dir: ${log_dir}
+  job_logging:
+    handlers:
+      console:
+        class: logging.StreamHandler
+        formatter: colorlog
+        stream: ext://sys.stdout
+      file:
+        class: logging.FileHandler
+        filename: ${log_dir}/train.log

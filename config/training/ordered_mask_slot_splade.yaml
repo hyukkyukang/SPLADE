@@ -1,0 +1,25 @@
+# @package training
+defaults:
+  - splade_v2
+
+name: ordered_mask_slot_splade
+torch_compile_mode: default
+torch_compile_ddp_safe_mode: true
+torch_compile_train_core_when_possible: true
+static_graph: false
+find_unused_parameters: false
+fuse_query_doc_encoding_when_possible: false
+
+ordered_mask_slots:
+  enabled: true
+  query_term_weight: 0.1
+  doc_term_weight: 0.1
+  ignore_index: -100
+
+validation_sparse_probe:
+  enabled: true
+  num_pairs: 10
+  top_k_sparse: 20
+  top_k_slot: 10
+  include_slot_logits: true
+  log_every_n_val: 1

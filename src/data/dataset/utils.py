@@ -20,7 +20,7 @@ def require_cfg_str(cfg: DictConfig, key: str) -> str:
 
 def optional_cfg_str(cfg: DictConfig, key: str) -> str | None:
     if key not in cfg:
-        raise ValueError(f"Missing required dataset config key: {key}")
+        return None
     value: object | None = cfg.get(key)
     if value is None:
         return None

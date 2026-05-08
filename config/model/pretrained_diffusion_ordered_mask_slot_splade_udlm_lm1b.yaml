@@ -1,0 +1,29 @@
+# @package model
+defaults:
+  - _base
+
+name: pretrained_diffusion_ordered_mask_slot_splade_udlm_lm1b
+family: pretrained_diffusion_ordered_mask_slot_splade
+backbone_pretraining_type: diffusion
+huggingface_name: kuleshov-group/udlm-lm1b
+tokenizer_name: bert-base-uncased
+huggingface_model_class: UDLMForMaskedLMCompat
+trust_remote_code: false
+attn_implementation: eager
+model_revision: 00dfee2a0578719ea93739884173d4393906a8fd
+benchmark_adapter: native
+enforce_same_tokenizer_as_baseline: true
+baseline_tokenizer_name: distilbert-base-uncased
+query_pooling: max
+doc_pooling: max
+sparse_activation: log1p_relu
+num_mask_slots: 8
+mask_token_id: 103
+exclude_token_ids: [0, 100, 101, 102, 103]
+ordered_mask_slots:
+  idf_cache_dir: null
+  idf_batch_size: 2048
+  idf_log_interval: 100000
+  idf_cache_wait_timeout_seconds: 14400
+  idf_num_workers: 0
+  idf_shards_per_worker: 4

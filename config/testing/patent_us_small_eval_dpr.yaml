@@ -1,0 +1,15 @@
+# @package testing
+defaults:
+  - _base
+
+name: patent_us_small_eval_dpr
+
+batch_size: 32
+num_workers: 8
+torch_compile: false
+max_windows_per_forward: null
+exclude_self_match: true
+result_group_key: group_id
+group_candidate_pool: 4096
+k_list: [1, 5, 10, 16, 32, 63, 150, 300]
+metric_families: [MRR, Recall]

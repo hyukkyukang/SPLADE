@@ -22,7 +22,9 @@ from src.data.dataset.utils import (
     require_cfg_str,
     sample_items,
 )
+from src.data.patent_text import format_named_text_template
 from src.data.utils import id_to_idx, resolve_dataset_column
+from src.utils.huggingface import resolve_hf_token
 from src.utils.logging import get_logger, loading_status
 
 logger = get_logger("BaseDataset")
@@ -34,6 +36,7 @@ QUERY_TEXT_COLUMN_KEY: str = "query_text_column"
 CORPUS_SUBSET_NAME_KEY: str = "corpus_subset_name"
 CORPUS_SPLIT_NAME_KEY: str = "corpus_split_name"
 CORPUS_ID_COLUMN_KEY: str = "corpus_id_column"
+CORPUS_GROUP_ID_COLUMN_KEY: str = "corpus_group_id_column"
 CORPUS_TEXT_COLUMN_KEY: str = "corpus_text_column"
 CORPUS_TITLE_COLUMN_KEY: str = "corpus_title_column"
 CORPUS_ADDITIONAL_TEXT_COLUMNS_KEY: str = "corpus_additional_text_columns"
@@ -61,7 +64,7 @@ class BaseDataset(abc.ABC):
 
         self.hf_name: str | None = normalize_optional_str(self.cfg.hf_name)
         self.hf_subset: str | None = normalize_optional_str(self.cfg.hf_subset)
-        self.hf_split: str = str(self.cfg.split)
+        self.hf_split: str = str(self.cfg.get("hf_split", self.cfg.split))
         self.hf_cache_dir: str | None = normalize_optional_str(self.cfg.hf_cache_dir)
         self.hf_max_samples: int | None = (
             None if self.cfg.hf_max_samples is None else int(self.cfg.hf_max_samples)
@@ -104,6 +107,9 @@ class BaseDataset(abc.ABC):
         self.query_lookup_text_column: str = str(
             self.cfg.get("query_lookup_text_column", "text")
         )
+        self.corpus_text_template: str | None = normalize_optional_str(
+            self.cfg.get("corpus_text_template")
+        )
         self.use_hf: bool = bool(
             self.hf_name is not None or self.query_corpus_hf_name is not None
         )
@@ -141,13 +147,16 @@ class BaseDataset(abc.ABC):
                 f"topk_plus_random. Got: {self.negative_sampling_strategy}"
             )
 
-        query_subset_name: str = require_cfg_str(self.cfg, "query_subset_name")
+        query_subset_name: str | None = optional_cfg_str(self.cfg, "query_subset_name")
         query_split_name: str = require_cfg_str(self.cfg, "query_split_name")
         query_id_column: str = require_cfg_str(self.cfg, "query_id_column")
         query_text_column: str = require_cfg_str(self.cfg, "query_text_column")
-        corpus_subset_name: str = require_cfg_str(self.cfg, "corpus_subset_name")
+        corpus_subset_name: str | None = optional_cfg_str(self.cfg, "corpus_subset_name")
         corpus_split_name: str = require_cfg_str(self.cfg, "corpus_split_name")
         corpus_id_column: str = require_cfg_str(self.cfg, "corpus_id_column")
+        corpus_group_id_column: str | None = optional_cfg_str(
+            self.cfg, "corpus_group_id_column"
+        )
         corpus_text_column: str = require_cfg_str(self.cfg, "corpus_text_column")
         corpus_title_column: str | None = optional_cfg_str(
             self.cfg, "corpus_title_column"
@@ -168,7 +177,7 @@ class BaseDataset(abc.ABC):
             if column_name:
                 corpus_additional_text_columns.append(column_name)
 
-        self.query_column_names: dict[str, str] = {
+        self.query_column_names: dict[str, str | None] = {
             QUERY_SUBSET_NAME_KEY: query_subset_name,
             QUERY_SPLIT_NAME_KEY: query_split_name,
             QUERY_ID_COLUMN_KEY: query_id_column,
@@ -180,6 +189,8 @@ class BaseDataset(abc.ABC):
             CORPUS_ID_COLUMN_KEY: corpus_id_column,
             CORPUS_TEXT_COLUMN_KEY: corpus_text_column,
         }
+        if corpus_group_id_column is not None:
+            self.corpus_column_names[CORPUS_GROUP_ID_COLUMN_KEY] = corpus_group_id_column
         if corpus_title_column is not None:
             self.corpus_column_names[CORPUS_TITLE_COLUMN_KEY] = corpus_title_column
         self.corpus_column_names[CORPUS_ADDITIONAL_TEXT_COLUMNS_KEY] = (
@@ -237,7 +248,7 @@ class BaseDataset(abc.ABC):
         with self._loading(
             logger, f"query dataset for {self.huggingface_name}", only_once=True
         ):
-            subset_name: str = self.query_column_names[QUERY_SUBSET_NAME_KEY]
+            subset_name: str | None = self.query_column_names[QUERY_SUBSET_NAME_KEY]
             split_name: str = self.query_column_names[QUERY_SPLIT_NAME_KEY]
             text_cache_dir: str | None = (
                 self.query_corpus_hf_cache_dir
@@ -264,7 +275,7 @@ class BaseDataset(abc.ABC):
         with self._loading(
             logger, f"corpus dataset for {self.huggingface_name}", only_once=True
         ):
-            subset_name: str = self.corpus_column_names[CORPUS_SUBSET_NAME_KEY]
+            subset_name: str | None = self.corpus_column_names[CORPUS_SUBSET_NAME_KEY]
             split_name: str = self.corpus_column_names[CORPUS_SPLIT_NAME_KEY]
             text_cache_dir: str | None = (
                 self.query_corpus_hf_cache_dir
@@ -318,6 +329,11 @@ class BaseDataset(abc.ABC):
         return self.corpus_column_names[CORPUS_ID_COLUMN_KEY]
 
     @property
+    def corpus_group_id_column_name(self) -> str | None:
+        """Return the optional column name used to group corpus ids at retrieval time."""
+        return self.corpus_column_names.get(CORPUS_GROUP_ID_COLUMN_KEY)
+
+    @property
     def corpus_title_column_name(self) -> str | None:
         """Return the column name for document titles, if available."""
         return self.corpus_column_names.get(CORPUS_TITLE_COLUMN_KEY)
@@ -344,6 +360,9 @@ class BaseDataset(abc.ABC):
     def required_corpus_columns(self) -> list[str]:
         """Get the minimal set of corpus columns needed by this dataset config."""
         columns: list[str] = [self.corpus_id_column_name, self.corpus_text_column_name]
+        group_id_column_name: str | None = self.corpus_group_id_column_name
+        if group_id_column_name is not None:
+            columns.append(group_id_column_name)
         title_column_name: str | None = self.corpus_title_column_name
         if title_column_name is not None:
             columns.append(title_column_name)
@@ -402,6 +421,7 @@ class BaseDataset(abc.ABC):
         cache_dir: str | None,
         data_files: Mapping[str, Any] | None,
     ) -> Dataset:
+        token: str | None = resolve_hf_token()
         if data_files:
             return load_dataset(
                 hf_name,
@@ -409,12 +429,14 @@ class BaseDataset(abc.ABC):
                 split=split,
                 cache_dir=cache_dir,
                 data_files=dict(data_files),
+                token=token,
             )
         return load_dataset(
             hf_name,
             name=hf_subset,
             split=split,
             cache_dir=cache_dir,
+            token=token,
         )
 
     def _apply_hf_sample_window(self, dataset: Dataset) -> Dataset:
@@ -874,6 +896,8 @@ class BaseDataset(abc.ABC):
 
     def _corpus_text_from_row(self, row: Mapping[str, Any]) -> str:
         """Compose corpus text from a projected row mapping."""
+        if self.corpus_text_template is not None:
+            return format_named_text_template(self.corpus_text_template, row)
         title_column_name: str | None = self.corpus_title_column_name
         title_value: Any | None = (
             row.get(title_column_name)
@@ -902,4 +926,8 @@ class BaseDataset(abc.ABC):
 
     def download_data(self) -> None:
         """Download the dataset from HuggingFace Hub."""
-        snapshot_download(repo_id=self.huggingface_name, repo_type="dataset")
+        snapshot_download(
+            repo_id=self.huggingface_name,
+            repo_type="dataset",
+            token=resolve_hf_token(),
+        )

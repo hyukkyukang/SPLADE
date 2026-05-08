@@ -9,6 +9,7 @@ from sentence_transformers.models import Normalize
 from sentence_transformers.sparse_encoder.models import MLMTransformer, SpladePooling
 from transformers import PreTrainedTokenizerBase
 
+from src.data.pl_module.common import build_model_tokenizer
 from src.data.lens_formatting import (
     build_doc_pooling_mask,
     build_query_pooling_mask,
@@ -16,12 +17,17 @@ from src.data.lens_formatting import (
     resolve_instruction_text,
     validate_lens_tokenizer,
 )
+from src.data.pd_module.utils import (
+    resolve_num_mask_slots,
+    tokenize_docs_with_mask_slots,
+    uses_ordered_mask_slot_pooling,
+)
 from src.utils.logging import get_logger
 from src.utils.lens_instructions import resolve_benchmark_instruction
 from src.utils.model_utils import resolve_model_dtype
 from src.utils.normalize import normalize_optional_str
 from src.utils.peft import is_peft_enabled
-from src.utils.transformers import build_tokenizer, resolve_model_name_or_path
+from src.utils.transformers import resolve_model_name_or_path
 
 logger = get_logger("src.utils.sparse_encoder")
 _VALID_BENCHMARK_ADAPTERS: set[str] = {
@@ -290,28 +296,45 @@ class NativeSparseEncoderAdapter:
                     batch_texts = [
                         format_query_text(text, query_model_cfg) for text in batch
                     ]
-                tokens: dict[str, torch.Tensor] = self.tokenizer(
-                    batch_texts,
-                    padding=True,
-                    truncation=True,
-                    max_length=int(max_length),
-                    return_tensors="pt",
-                )
-                input_ids: torch.Tensor = tokens["input_ids"].to(self.device)
-                attention_mask: torch.Tensor = tokens["attention_mask"].to(self.device)
+                input_ids: torch.Tensor
+                attention_mask: torch.Tensor
                 pooling_mask: torch.Tensor
-                if is_query:
-                    pooling_mask = build_query_pooling_mask(
-                        input_ids=input_ids,
-                        attention_mask=attention_mask,
-                        tokenizer=self.tokenizer,
-                        model_cfg=query_model_cfg,
-                    ).to(self.device)
+                if uses_ordered_mask_slot_pooling(self.model_cfg):
+                    input_ids, attention_mask, pooling_mask = (
+                        tokenize_docs_with_mask_slots(
+                            self.tokenizer,
+                            batch_texts,
+                            max_length=int(max_length),
+                            num_mask_slots=resolve_num_mask_slots(self.model_cfg),
+                            max_padding=False,
+                            model_cfg=self.model_cfg,
+                        )
+                    )
+                    input_ids = input_ids.to(self.device)
+                    attention_mask = attention_mask.to(self.device)
+                    pooling_mask = pooling_mask.to(self.device)
                 else:
-                    pooling_mask = build_doc_pooling_mask(
-                        attention_mask=attention_mask,
-                        model_cfg=self.model_cfg,
-                    ).to(self.device)
+                    tokens: dict[str, torch.Tensor] = self.tokenizer(
+                        batch_texts,
+                        padding=True,
+                        truncation=True,
+                        max_length=int(max_length),
+                        return_tensors="pt",
+                    )
+                    input_ids = tokens["input_ids"].to(self.device)
+                    attention_mask = tokens["attention_mask"].to(self.device)
+                    if is_query:
+                        pooling_mask = build_query_pooling_mask(
+                            input_ids=input_ids,
+                            attention_mask=attention_mask,
+                            tokenizer=self.tokenizer,
+                            model_cfg=query_model_cfg,
+                        ).to(self.device)
+                    else:
+                        pooling_mask = build_doc_pooling_mask(
+                            attention_mask=attention_mask,
+                            model_cfg=self.model_cfg,
+                        ).to(self.device)
                 batch_reps: torch.Tensor = encode_fn(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
@@ -447,8 +470,16 @@ def resolve_nanobeir_backend(
     )
     if bool(doc_only_enabled) or bool(model_cfg.get("doc_only", False)):
         return "native", "model.doc_only requires native sparse query encoding."
-    if family == "lens":
-        return "native", "model.family=lens requires the native benchmark adapter."
+    if family in {
+        "lens",
+        "pretrained_diffusion_splade",
+        "ordered_mask_slot_splade",
+        "pretrained_diffusion_ordered_mask_slot_splade",
+    }:
+        return (
+            "native",
+            f"model.family={family} requires the native benchmark adapter.",
+        )
     if is_peft_enabled(peft_cfg):
         return "native", "PEFT-wrapped models require the native benchmark adapter."
 
@@ -471,12 +502,7 @@ def build_native_sparse_encoder_adapter(
     batch_size: int,
 ) -> NativeSparseEncoderAdapter:
     """Build a native sparse adapter for models not served by MLMTransformer."""
-    tokenizer: PreTrainedTokenizerBase = build_tokenizer(
-        str(cfg.model.huggingface_name),
-        use_fast_tokenizer=bool(cfg.model.use_fast_tokenizer),
-        trust_remote_code=bool(cfg.model.trust_remote_code),
-        require_fast_tokenizer=bool(cfg.model.require_fast_tokenizer),
-    )
+    tokenizer: PreTrainedTokenizerBase = build_model_tokenizer(cfg.model)
     validate_lens_tokenizer(tokenizer, cfg.model)
     max_length: int = int(cfg.nanobeir.max_seq_length)
     return NativeSparseEncoderAdapter(

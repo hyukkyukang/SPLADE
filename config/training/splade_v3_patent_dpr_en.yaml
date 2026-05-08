@@ -1,0 +1,38 @@
+# @package training
+defaults:
+  - splade_v2_pp
+
+name: splade_v3_patent_dpr_en
+
+# 825,568 train examples across 8× A100-40GB.
+# Per-GPU batch=32, grad_accumulation=1 → effective batch = 32 × 8 = 256.
+# Steps/epoch ≈ 825568 / 256 ≈ 3225.
+# 20,000 steps ≈ 6.2 epochs.
+max_steps: 20000
+batch_size: 32
+eval_batch_size: 16
+grad_accumulation: 1
+warmup_steps: 1000
+num_workers: 4
+prefetch_factor: 4
+val_check_interval_optimizer_steps: 500
+log_every_n_steps: 50
+val_sample_size: 2048
+
+loss:
+  type: in_batch_plus_pairwise
+  in_batch_weight: 1.0
+  pairwise_weight: 1.0
+
+distill:
+  enabled: false
+  include_main_loss: false
+
+regularization:
+  query_weight: 0.01
+  doc_weight: 0.02
+  type: flops
+  query_type: l1
+  doc_type: flops
+  paper_faithful: true
+  schedule_steps: 20000

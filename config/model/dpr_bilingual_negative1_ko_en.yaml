@@ -1,0 +1,33 @@
+defaults:
+  - _base
+  - _self_
+
+name: dpr_bilingual_negative1_ko_en
+family: dense
+representation_type: dense
+dense_architecture: dpr_biencoder
+huggingface_name: data/model/dpr_biencoder_negative1_ko_en_20251202_filtered/dpr_biencoder.9.146
+tokenizer_name: data/model/bilingual_patent_checkpoint_28164
+huggingface_model_class: BertModel
+query_pooling: cls
+doc_pooling: cls
+query_window_pooling: mean
+doc_window_pooling: mean
+similarity: dot
+normalize: false
+use_fast_tokenizer: true
+require_fast_tokenizer: false
+local_files_only: true
+
+bert_config:
+  vocab_size: 137442
+  hidden_size: 768
+  num_hidden_layers: 12
+  num_attention_heads: 12
+  intermediate_size: 3072
+  max_position_embeddings: 512
+  type_vocab_size: 2
+  hidden_dropout_prob: 0.1
+  attention_probs_dropout_prob: 0.1
+  layer_norm_eps: 1.0e-12
+  pad_token_id: 0

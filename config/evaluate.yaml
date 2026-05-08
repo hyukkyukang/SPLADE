@@ -25,7 +25,7 @@ evaluation:
 mlflow:
   enabled: true
   experiment_name: Eval-MSMARCO
-  tracking_uri: ${oc.env:MLFLOW_TRACKING_URI,null}
+  tracking_uri: ${oc.env:MLFLOW_TRACKING_URI,https://mlflow.hyukkyu.com}
   run_name: ${oc.env:MLFLOW_RUN_NAME,null}
   artifact_location: ${oc.env:MLFLOW_ARTIFACT_LOCATION,null}
   insecure_tls: ${oc.decode:${oc.env:MLFLOW_TRACKING_INSECURE_TLS,true}}

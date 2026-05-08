@@ -1,0 +1,14 @@
+# @package model
+defaults:
+  - _base
+
+name: mdlm_splade_distilbert
+family: mdlm_splade
+huggingface_name: distilbert-base-uncased
+huggingface_model_class: AutoModelForMaskedLM
+query_pooling: max
+doc_pooling: max
+sparse_activation: log1p_relu
+benchmark_adapter: native
+mask_token_id: 103
+exclude_token_ids: [0, 100, 101, 102, 103]

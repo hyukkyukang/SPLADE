@@ -22,7 +22,7 @@ nanobeir:
 mlflow:
   enabled: true
   experiment_name: NanoBEIR
-  tracking_uri: ${oc.env:MLFLOW_TRACKING_URI,null}
+  tracking_uri: ${oc.env:MLFLOW_TRACKING_URI,https://mlflow.hyukkyu.com}
   run_name: ${oc.env:MLFLOW_RUN_NAME,null}
   tags: {}
 

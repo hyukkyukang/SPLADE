@@ -11,6 +11,8 @@ from src.data.dataset import (
     MSMARCODistillScoresDataset,
     MSMARCOHardNegativesDataset,
     MSMARCOTripletScoresDataset,
+    Patent10KHardNegativesDataset,
+    PatentUsInBatchDataset,
 )
 
 DatasetBuilder = Callable[[DictConfig], BaseDataset]
@@ -24,6 +26,8 @@ _DATASET_BUILDERS: dict[str, DatasetBuilder] = {
     "msmarco_dev_small_negatives": MSMARCODevSmallNegativesDataset,
     "msmarco_distill_scores": MSMARCODistillScoresDataset,
     "msmarco_triplet_scores": MSMARCOTripletScoresDataset,
+    "patent_10k_hard_negatives": Patent10KHardNegativesDataset,
+    "patent_us_in_batch": PatentUsInBatchDataset,
     "beir": BEIRDataset,
 }
 

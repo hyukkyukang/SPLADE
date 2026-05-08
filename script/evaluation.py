@@ -8,7 +8,7 @@ import hydra
 import lightning as L
 import mlflow
 from mlflow.tracking import MlflowClient
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 
 from config.path import ABS_CONFIG_DIR
 from src.utils import log_if_rank_zero
@@ -80,22 +80,111 @@ def _resolve_mlflow_run_name(cfg: DictConfig) -> str:
     return f"{str(cfg.model.name)}-{str(cfg.dataset.name)}"
 
 
+def _resolve_first_local_data_file_path(data_files_cfg: Any) -> Path | None:
+    """Return the first local dataset data file path from a Hydra mapping/string."""
+    if data_files_cfg is None:
+        return None
+
+    resolved_data_files: Any = (
+        OmegaConf.to_container(data_files_cfg, resolve=True)
+        if OmegaConf.is_config(data_files_cfg)
+        else data_files_cfg
+    )
+    if isinstance(resolved_data_files, str):
+        candidate: str | None = normalize_optional_str(resolved_data_files)
+        if candidate is None or "://" in candidate:
+            return None
+        return Path(candidate)
+    if not isinstance(resolved_data_files, dict):
+        return None
+
+    split_name: str
+    for split_name in ("test", "validation", "dev", "train"):
+        candidate = normalize_optional_str(resolved_data_files.get(split_name))
+        if candidate is not None and "://" not in candidate:
+            return Path(candidate)
+
+    value: Any
+    for value in resolved_data_files.values():
+        candidate = normalize_optional_str(value)
+        if candidate is not None and "://" not in candidate:
+            return Path(candidate)
+    return None
+
+
+def _load_local_eval_artifact_metadata(
+    dataset_cfg: DictConfig | None,
+) -> tuple[dict[str, Any], Path | None]:
+    """Load local eval artifact metadata.json next to parquet query/qrels files."""
+    if not isinstance(dataset_cfg, DictConfig):
+        return {}, None
+
+    data_files_field_name: str
+    for data_files_field_name in ("query_hf_data_files", "qrels_hf_data_files"):
+        data_file_path: Path | None = _resolve_first_local_data_file_path(
+            dataset_cfg.get(data_files_field_name)
+        )
+        if data_file_path is None:
+            continue
+        metadata_path: Path = data_file_path.parent / "metadata.json"
+        if not metadata_path.is_file():
+            continue
+        try:
+            with metadata_path.open("r", encoding="utf-8") as metadata_file:
+                metadata: dict[str, Any] = json.load(metadata_file)
+        except (OSError, json.JSONDecodeError):
+            return {}, None
+        return metadata, metadata_path
+    return {}, None
+
+
 def _build_mlflow_tags(
-    cfg: DictConfig, *, model_source_kind: str
+    cfg: DictConfig,
+    *,
+    model_source_kind: str,
+    eval_artifact_metadata: dict[str, Any] | None = None,
 ) -> dict[str, str]:
     """Build MLflow tags for retrieval evaluation runs."""
     tags: dict[str, str] = resolve_mlflow_tags(
         cfg.mlflow.get("tags"), field_name="mlflow.tags"
     )
+    dataset_name: str = str(cfg.dataset.name)
     tags.setdefault("evaluation_type", str(cfg.evaluation.type))
     tags.setdefault("evaluation_mode", "retrieval_index_based")
-    tags.setdefault("dataset_name", str(cfg.dataset.name))
+    tags.setdefault("dataset_name", dataset_name)
     tags.setdefault("model_name", str(cfg.model.name))
     tags.setdefault("model_source_kind", model_source_kind)
     tags.setdefault("log_dir", str(cfg.log_dir))
     tag_value: str | None = normalize_tag(cfg.get("tag"))
     if tag_value is not None:
         tags.setdefault("tag", tag_value)
+    if dataset_name.startswith("patent_"):
+        tags.setdefault("domain", "patent")
+        tags.setdefault("task", "patent_document_retrieval")
+        result_group_key: str | None = normalize_optional_str(
+            cfg.testing.get("result_group_key")
+        )
+        tags.setdefault(
+            "retrieval_unit",
+            "grouped_passage_to_doc"
+            if result_group_key not in (None, "none")
+            else "document",
+        )
+        if dataset_name.endswith("_gcdpr"):
+            tags.setdefault("protocol", "gcdpr_proxy")
+        query_text_template: str | None = normalize_optional_str(
+            (eval_artifact_metadata or {}).get("query_text_template")
+        )
+        if query_text_template is not None:
+            tags.setdefault("query_text_template", query_text_template)
+        benchmark_source: str | None = normalize_optional_str(
+            (eval_artifact_metadata or {}).get("benchmark_source")
+        )
+        if benchmark_source is not None:
+            tags.setdefault(
+                "query_source_kind",
+                "hf_proxy" if benchmark_source == "hf_dataset" else benchmark_source,
+            )
     return tags
 
 
@@ -225,6 +314,7 @@ def _build_mlflow_params(
     model_source: str,
     model_source_kind: str,
     index_path: Path,
+    eval_artifact_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a compact MLflow parameter block for retrieval evaluation."""
     params: dict[str, Any] = {
@@ -253,6 +343,21 @@ def _build_mlflow_params(
     _set_if_present("dataset.hf_subset", normalize_optional_str(cfg.dataset.get("hf_subset")))
     _set_if_present("dataset.hf_split", normalize_optional_str(cfg.dataset.get("hf_split")))
     _set_if_present(
+        "dataset.query_corpus_hf_name",
+        normalize_optional_str(cfg.dataset.get("query_corpus_hf_name")),
+    )
+    _set_if_present(
+        "dataset.query_subset_name",
+        normalize_optional_str(cfg.dataset.get("query_subset_name")),
+    )
+    _set_if_present(
+        "dataset.corpus_subset_name",
+        normalize_optional_str(cfg.dataset.get("corpus_subset_name")),
+    )
+    _set_if_present(
+        "dataset.corpus_split", normalize_optional_str(cfg.dataset.get("corpus_split"))
+    )
+    _set_if_present(
         "dataset.beir_dataset", normalize_optional_str(cfg.dataset.get("beir_dataset"))
     )
     _set_if_present(
@@ -267,6 +372,18 @@ def _build_mlflow_params(
         normalize_optional_str(cfg.dataset.get("qrels_hf_split")),
     )
     _set_if_present(
+        "dataset.query_hf_data_file",
+        _resolve_first_local_data_file_path(cfg.dataset.get("query_hf_data_files")),
+    )
+    _set_if_present(
+        "dataset.qrels_hf_data_file",
+        _resolve_first_local_data_file_path(cfg.dataset.get("qrels_hf_data_files")),
+    )
+    _set_if_present(
+        "dataset.corpus_hf_data_file",
+        _resolve_first_local_data_file_path(cfg.dataset.get("corpus_hf_data_files")),
+    )
+    _set_if_present(
         "testing.checkpoint_path",
         normalize_optional_str(cfg.testing.get("checkpoint_path")),
     )
@@ -277,6 +394,7 @@ def _build_mlflow_params(
     _set_if_present("testing.batch_size", cfg.testing.get("batch_size"))
     _set_if_present("testing.precision", normalize_optional_str(cfg.testing.get("precision")))
     _set_if_present("testing.num_devices", cfg.testing.get("num_devices"))
+    _set_if_present("testing.strategy", normalize_optional_str(cfg.testing.get("strategy")))
     _set_if_present(
         "testing.scoring_method", normalize_optional_str(cfg.testing.get("scoring_method"))
     )
@@ -285,15 +403,40 @@ def _build_mlflow_params(
         normalize_optional_str(cfg.testing.get("scoring_backend")),
     )
     _set_if_present("testing.wand_block_size", cfg.testing.get("wand_block_size"))
+    _set_if_present("testing.exclude_self_match", cfg.testing.get("exclude_self_match"))
+    _set_if_present("testing.faiss_use_gpu", cfg.testing.get("faiss_use_gpu"))
+    _set_if_present("testing.faiss_gpu_shard", cfg.testing.get("faiss_gpu_shard"))
+    _set_if_present("testing.faiss_use_float16", cfg.testing.get("faiss_use_float16"))
+    _set_if_present(
+        "testing.result_group_key", normalize_optional_str(cfg.testing.get("result_group_key"))
+    )
+    _set_if_present(
+        "testing.group_candidate_pool", cfg.testing.get("group_candidate_pool")
+    )
+    _set_if_present("testing.search_top_k", cfg.testing.get("search_top_k"))
     _set_if_present("testing.sparse_top_k", cfg.testing.get("sparse_top_k"))
     _set_if_present("testing.sparse_min_weight", cfg.testing.get("sparse_min_weight"))
+    _set_if_present("testing.k_list", cfg.testing.get("k_list"))
+    _set_if_present("testing.metric_families", cfg.testing.get("metric_families"))
     _set_if_present("encoding.index_tag", normalize_optional_str(cfg.encoding.get("index_tag")))
+
+    metadata_key: str
+    for metadata_key in (
+        "benchmark_source",
+        "benchmark_repo",
+        "query_text_template",
+        "query_count",
+        "qrels_count",
+    ):
+        _set_if_present(
+            f"artifact.{metadata_key}",
+            (eval_artifact_metadata or {}).get(metadata_key),
+        )
 
     metadata_path: Path = index_path / "metadata.json"
     if metadata_path.is_file():
         with metadata_path.open("r", encoding="utf-8") as metadata_file:
             metadata: dict[str, Any] = json.load(metadata_file)
-        metadata_key: str
         for metadata_key in (
             "doc_count",
             "nnz",
@@ -412,14 +555,22 @@ def _log_to_mlflow(
     if system_metrics_enabled is not None:
         run_kwargs["log_system_metrics"] = bool(system_metrics_enabled)
 
+    eval_artifact_metadata: dict[str, Any]
+    eval_artifact_metadata_path: Path | None
+    eval_artifact_metadata, eval_artifact_metadata_path = _load_local_eval_artifact_metadata(
+        cfg.get("dataset")
+    )
     tags: dict[str, str] = _build_mlflow_tags(
-        cfg, model_source_kind=model_source_kind
+        cfg,
+        model_source_kind=model_source_kind,
+        eval_artifact_metadata=eval_artifact_metadata,
     )
     params: dict[str, Any] = _build_mlflow_params(
         cfg,
         model_source=model_source,
         model_source_kind=model_source_kind,
         index_path=index_path,
+        eval_artifact_metadata=eval_artifact_metadata,
     )
     sanitized_metrics: dict[str, float] = {
         sanitize_mlflow_metric_name(metric_name): float(metric_value)
@@ -460,6 +611,10 @@ def _log_to_mlflow(
             metadata_path: Path = index_path / "metadata.json"
             if metadata_path.is_file():
                 mlflow.log_artifact(metadata_path.as_posix(), artifact_path="index")
+            if eval_artifact_metadata_path is not None:
+                mlflow.log_artifact(
+                    eval_artifact_metadata_path.as_posix(), artifact_path="dataset"
+                )
 
         log_if_rank_zero(
             logger,
@@ -484,9 +639,16 @@ def main(cfg: DictConfig) -> None:
     log_if_rank_zero(logger, f"Using retrieval index: {index_path}")
 
     from src.data.pl_module import RetrievalDataModule
-    from src.model.pl_module import RetrievalEvalLightningModule
+    from src.model.pl_module import (
+        DenseRetrievalEvalLightningModule,
+        RetrievalEvalLightningModule,
+    )
 
-    eval_module: RetrievalEvalLightningModule = RetrievalEvalLightningModule(cfg=cfg)
+    model_family: str = str(cfg.model.get("family", "splade")).strip().lower()
+    if model_family == "dense":
+        eval_module = DenseRetrievalEvalLightningModule(cfg=cfg)
+    else:
+        eval_module = RetrievalEvalLightningModule(cfg=cfg)
     data_module: RetrievalDataModule = RetrievalDataModule(cfg=cfg)
     eval_module.eval()
 

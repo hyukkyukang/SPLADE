@@ -1,0 +1,34 @@
+# @package model
+defaults:
+  - _base
+
+name: lens_official_d4000
+family: lens
+huggingface_name: yibinlei/LENS-d4000
+huggingface_model_class: MistralBiForCausalLM
+trust_remote_code: false
+# Reproduction parity with yibinlei/LENS-d4000: slow tokenizer, left-pad,
+# add_eos_token=True, unk->eos pad fallback. Keep use_fast=False to honor the
+# add_eos_token flag (ignored by fast tokenizers).
+use_fast_tokenizer: false
+require_fast_tokenizer: false
+strict_official_lens_tokenizer: true
+load_official_lens: true
+
+dtype: float32
+attn_implementation: sdpa
+tie_word_embeddings: false
+freeze_backbone: false
+bidirectional: true
+
+query_pooling: max
+doc_pooling: max
+sparse_activation: log1p_relu
+normalize: true
+doc_only: false
+benchmark_adapter: native
+instruction_text: "Given a web search query, retrieve relevant passages that answer the query."
+doc_trim_last_tokens: 2
+
+peft:
+  enabled: false

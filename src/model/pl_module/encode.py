@@ -6,6 +6,7 @@ import torch
 from omegaconf import DictConfig, OmegaConf
 from transformers import PreTrainedTokenizerBase
 
+from src.data.pl_module.common import build_model_tokenizer
 from src.index.async_writer import AsyncSparseWriter, SparseWriterConfig
 from src.index.sparse import (
     SparseShardWriter,
@@ -27,7 +28,6 @@ from src.utils import is_rank_zero, log_if_rank_zero, maybe_barrier
 from src.utils.logging import get_logger
 from src.utils.model_utils import resolve_tagged_output_dir
 from src.utils.output_space import OutputSpaceSpec
-from src.utils.transformers import build_tokenizer
 from src.utils.windowed_encoding import encode_and_aggregate_windows
 
 logger = get_logger("SPLADEEncodeModule")
@@ -41,18 +41,15 @@ class SPLADEEncodeModule(L.LightningModule):
         super().__init__()
         self.cfg: DictConfig = cfg
         self.model: SpladeModel = self._load_model()
-        self._tokenizer: PreTrainedTokenizerBase = build_tokenizer(
-            str(self.cfg.model.huggingface_name),
-            use_fast_tokenizer=bool(self.cfg.model.use_fast_tokenizer),
-            trust_remote_code=bool(self.cfg.model.trust_remote_code),
-            require_fast_tokenizer=bool(self.cfg.model.require_fast_tokenizer),
+        self._tokenizer: PreTrainedTokenizerBase = build_model_tokenizer(
+            self.cfg.model
         )
         if bool(self.cfg.model.require_fast_tokenizer) and not bool(
             self._tokenizer.is_fast
         ):
             raise ValueError(
                 "Fast tokenizer is required but a slow tokenizer was loaded: "
-                f"{self.cfg.model.huggingface_name}"
+                f"{self.cfg.model.get('tokenizer_name') or self.cfg.model.huggingface_name}"
             )
         if self._tokenizer.pad_token is None:
             self._tokenizer.pad_token = (
@@ -331,6 +328,7 @@ class SPLADEEncodeModule(L.LightningModule):
         if not self._async_write_enabled and self._writer is None:
             raise RuntimeError("Writer is not initialized.")
         doc_ids: list[str] = list(batch["doc_ids"])
+        doc_group_ids: list[str | None] | None = batch.get("doc_group_ids")
         doc_input_ids: torch.Tensor = batch["doc_input_ids"]
         doc_attention_mask: torch.Tensor = batch["doc_attention_mask"]
         doc_pooling_mask: torch.Tensor | None = batch.get("doc_pooling_mask")
@@ -362,6 +360,18 @@ class SPLADEEncodeModule(L.LightningModule):
             indptr.share_memory_()
             indices.share_memory_()
             values.share_memory_()
-            self._async_writer.write(doc_ids, indptr, indices, values)
+            self._async_writer.write(
+                doc_ids,
+                indptr,
+                indices,
+                values,
+                doc_group_ids,
+            )
         elif self._writer is not None:
-            self._writer.write_sparse_csr_batch(doc_ids, indptr, indices, values)
+            self._writer.write_sparse_csr_batch(
+                doc_ids,
+                indptr,
+                indices,
+                values,
+                doc_group_ids=doc_group_ids,
+            )

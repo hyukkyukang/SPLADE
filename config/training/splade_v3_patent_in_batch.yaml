@@ -1,0 +1,32 @@
+# @package training
+defaults:
+  - splade_v2_pp
+
+name: splade_v3_patent_in_batch
+
+max_steps: 20000
+batch_size: 32
+eval_batch_size: 32
+grad_accumulation: 1
+warmup_steps: 1000
+val_check_interval_optimizer_steps: 500
+log_every_n_steps: 50
+val_sample_size: 512
+
+loss:
+  type: in_batch
+  in_batch_weight: 1.0
+  pairwise_weight: 0.0
+
+distill:
+  enabled: false
+  include_main_loss: false
+
+regularization:
+  query_weight: 0.01
+  doc_weight: 0.02
+  type: flops
+  query_type: l1
+  doc_type: flops
+  paper_faithful: true
+  schedule_steps: 20000

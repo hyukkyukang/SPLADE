@@ -1,0 +1,20 @@
+# @package training
+defaults:
+  - pretrained_diffusion_splade
+
+name: pretrained_diffusion_mdlm_splade
+torch_compile_mode: default
+torch_compile_ddp_safe_mode: true
+torch_compile_large_vocab_threshold: 30000
+torch_compile_train_core_when_possible: true
+static_graph: false
+find_unused_parameters: true
+fuse_query_doc_encoding_when_possible: true
+
+mdlm:
+  enabled: true
+  weight: 0.01
+  eps: 0.001
+  force_mask_at_least_one: true
+  doc_selection: positives
+  doc_chunk_size: 0

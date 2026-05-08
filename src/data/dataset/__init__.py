@@ -12,6 +12,8 @@ __all__ = [
     "MSMARCOHardNegativesDataset",
     "MSMARCODistillScoresDataset",
     "MSMARCOTripletScoresDataset",
+    "Patent10KHardNegativesDataset",
+    "PatentUsInBatchDataset",
 ]
 
 _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
@@ -34,6 +36,14 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "MSMARCOTripletScoresDataset": (
         "src.data.dataset.msmarco_triplet_scores",
         "MSMARCOTripletScoresDataset",
+    ),
+    "Patent10KHardNegativesDataset": (
+        "src.data.dataset.patent_10k_hard_negatives",
+        "Patent10KHardNegativesDataset",
+    ),
+    "PatentUsInBatchDataset": (
+        "src.data.dataset.patent_us_in_batch",
+        "PatentUsInBatchDataset",
     ),
 }
 

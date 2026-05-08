@@ -85,6 +85,56 @@ class _DummyModel(torch.nn.Module):
         self.peft_enabled = bool(peft_enabled)
 
 
+class _DummyMDLMModel(_DummyModel):
+    supports_mdlm_aux_loss: bool = True
+
+    def compute_mdlm_aux_loss(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        *,
+        mask_probability_eps: float,
+        force_mask_at_least_one: bool,
+    ) -> torch.Tensor:
+        _ = attention_mask, mask_probability_eps, force_mask_at_least_one
+        return input_ids[:, 0].float().mean()
+
+
+class _DummyOrderedMaskSlotModel(_DummyModel):
+    supports_ordered_mask_slot_loss: bool = True
+
+    def __init__(self, *, freeze_backbone: bool, vocab_size: int = 8) -> None:
+        super().__init__(freeze_backbone=freeze_backbone, vocab_size=vocab_size)
+
+    def encode_queries_with_slot_logits(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        pooling_mask: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        _ = attention_mask, pooling_mask
+        q_reps = input_ids.float()
+        slot_logits = torch.nn.functional.one_hot(
+            input_ids[:, -2:],
+            num_classes=int(self.encoder.vocab_size),
+        ).to(dtype=torch.float32) * 5.0
+        return q_reps, slot_logits
+
+    def encode_docs_with_slot_logits(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        pooling_mask: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        _ = attention_mask, pooling_mask
+        doc_reps = input_ids.float()
+        slot_logits = torch.nn.functional.one_hot(
+            input_ids[:, -2:],
+            num_classes=int(self.encoder.vocab_size),
+        ).to(dtype=torch.float32) * 5.0
+        return doc_reps, slot_logits
+
+
 class _DeviceTrackingModule(torch.nn.Module):
     def __init__(self) -> None:
         super().__init__()
@@ -99,12 +149,48 @@ class _DeviceTrackingModule(torch.nn.Module):
         return super().to(*args, **kwargs)
 
 
+class _DummyLossComputer(torch.nn.Module):
+    def forward(
+        self,
+        *,
+        q_reps: torch.Tensor,
+        doc_reps: torch.Tensor,
+        pos_mask: torch.Tensor,
+        doc_mask: torch.Tensor,
+        teacher_scores: torch.Tensor,
+        lambda_scale: torch.Tensor,
+    ) -> tuple[torch.Tensor, ...]:
+        _ = q_reps, doc_reps, pos_mask, doc_mask, teacher_scores
+        zero = lambda_scale.new_zeros(())
+        return (
+            zero,
+            zero.expand(1, 1),
+            zero,
+            zero,
+            zero,
+            zero,
+            zero,
+            zero,
+            zero,
+            zero,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+
+
 def _build_training_cfg(**overrides: object):
     base = {
         "training": {
             "torch_compile": True,
             "disable_compile_for_validation": False,
             "torch_compile_mode": "default",
+            "torch_compile_train_core_when_possible": False,
             "strategy": "ddp",
             "num_devices": 4,
             "use_cpu": True,
@@ -140,6 +226,150 @@ class CompilePolicyManagerTest(unittest.TestCase):
         self.assertIsNotNone(manager._compiled_query_encoder_fn)
         self.assertIsNotNone(manager._compiled_doc_encoder_fn)
         self.assertEqual(manager.loss_compile_mode_kwargs.get("mode"), "max-autotune")
+
+    def test_unfrozen_ddp_can_defer_to_compiled_train_core(self) -> None:
+        model = _DummyModel(freeze_backbone=False, vocab_size=30522)
+        manager = TrainingCompilePolicyManager(
+            model=model,
+            logger=get_logger("test.compile_policy.unfrozen_train_core"),
+        )
+        cfg = _build_training_cfg(
+            torch_compile_mode="default",
+            torch_compile_train_core_when_possible=True,
+        )
+
+        with patch("torch.compile", side_effect=lambda module, **kwargs: module) as compile_mock:
+            manager.setup(cfg)
+            self.assertTrue(manager.torch_compile_enabled)
+            self.assertFalse(manager.compile_enabled_for_current_stage)
+            self.assertTrue(manager._defer_train_core_compile)
+            self.assertEqual(compile_mock.call_count, 0)
+            manager.finalize_train_core_compile(loss_computer=_DummyLossComputer())
+
+        self.assertEqual(compile_mock.call_count, 1)
+        self.assertTrue(manager.compiled_train_core_available())
+        self.assertIsNone(manager._compiled_shared_encoder_module)
+        manager.set_train_core_active(True)
+        manager.set_compile_state(use_compiled=True)
+        self.assertTrue(manager.compile_enabled_for_current_stage)
+        manager.set_train_core_active(False)
+        manager.set_compile_state(use_compiled=True)
+        self.assertFalse(manager.compile_enabled_for_current_stage)
+
+    def test_unfrozen_ddp_can_compile_query_and_doc_mdlm_aux_modules(self) -> None:
+        model = _DummyMDLMModel(freeze_backbone=False, vocab_size=30522)
+        manager = TrainingCompilePolicyManager(
+            model=model,
+            logger=get_logger("test.compile_policy.unfrozen_mdlm_aux"),
+        )
+        cfg = _build_training_cfg(
+            torch_compile_mode="default",
+            torch_compile_train_core_when_possible=True,
+        )
+
+        with patch("torch.compile", side_effect=lambda module, **kwargs: module) as compile_mock:
+            manager.setup(cfg)
+            manager.finalize_train_core_compile(
+                loss_computer=_DummyLossComputer(),
+                mdlm_enabled=True,
+            )
+
+        self.assertEqual(compile_mock.call_count, 3)
+        self.assertTrue(manager.compiled_train_core_available())
+        self.assertIsNotNone(manager._compiled_query_mdlm_aux_module)
+        self.assertIsNotNone(manager._compiled_doc_mdlm_aux_module)
+        manager.set_train_core_active(True)
+        manager.set_compile_state(use_compiled=True)
+        self.assertTrue(manager.has_compiled_query_mdlm_aux())
+        self.assertTrue(manager.has_compiled_doc_mdlm_aux())
+
+    def test_compiled_train_core_mdlm_apply_mode_can_be_static(self) -> None:
+        model = _DummyMDLMModel(freeze_backbone=False, vocab_size=30522)
+        model._doc_pooling_mode = model._query_pooling_mode.clone()
+        model.compute_grouped_mdlm_aux_losses = lambda **kwargs: (
+            kwargs["input_id_groups"][0][:, 0].float().mean(),
+            kwargs["input_id_groups"][1][:, 0].float().mean(),
+        )
+        manager = TrainingCompilePolicyManager(
+            model=model,
+            logger=get_logger("test.compile_policy.mdlm_apply_mode"),
+        )
+        cfg = _build_training_cfg(
+            torch_compile_mode="default",
+            torch_compile_train_core_when_possible=True,
+        )
+
+        with patch("torch.compile", side_effect=lambda module, **kwargs: module):
+            manager.setup(cfg)
+            manager.finalize_train_core_compile(
+                loss_computer=_DummyLossComputer(),
+                mdlm_enabled=True,
+                mdlm_doc_selection="positives",
+                mdlm_doc_chunk_size=0,
+                mdlm_single_positive_assumption=True,
+            )
+
+        self.assertEqual(
+            manager.compiled_train_core_mdlm_apply_mode(
+                query_seq_len=128,
+                doc_seq_len=128,
+            ),
+            "always",
+        )
+        self.assertEqual(
+            manager.compiled_train_core_mdlm_apply_mode(
+                query_seq_len=128,
+                doc_seq_len=256,
+            ),
+            "never",
+        )
+
+    def test_unfrozen_ddp_compiled_train_core_can_include_ordered_mask_slot_losses(self) -> None:
+        model = _DummyOrderedMaskSlotModel(freeze_backbone=False, vocab_size=8)
+        manager = TrainingCompilePolicyManager(
+            model=model,
+            logger=get_logger("test.compile_policy.ordered_mask_slot"),
+        )
+        cfg = _build_training_cfg(
+            torch_compile_mode="default",
+            torch_compile_train_core_when_possible=True,
+        )
+
+        with patch("torch.compile", side_effect=lambda module, **kwargs: module):
+            manager.setup(cfg)
+            manager.finalize_train_core_compile(
+                loss_computer=_DummyLossComputer(),
+                ordered_mask_slot_enabled=True,
+                ordered_mask_query_weight=0.3,
+                ordered_mask_doc_weight=0.2,
+                ordered_mask_ignore_index=-100,
+            )
+
+        self.assertTrue(manager.compiled_train_core_available())
+        outputs = manager.run_compiled_train_core(
+            query_input_ids=torch.tensor([[1, 2, 3], [4, 5, 6]], dtype=torch.long),
+            query_attention_mask=torch.ones((2, 3), dtype=torch.long),
+            doc_input_ids=torch.tensor(
+                [[1, 2, 3], [6, 5, 4], [4, 5, 6], [3, 2, 1]],
+                dtype=torch.long,
+            ),
+            doc_attention_mask=torch.ones((4, 3), dtype=torch.long),
+            pos_mask=torch.tensor([[True, False], [True, False]], dtype=torch.bool),
+            doc_mask=torch.tensor([[True, True], [True, True]], dtype=torch.bool),
+            teacher_scores=torch.zeros((2, 2), dtype=torch.float32),
+            lambda_scale=torch.tensor(1.0, dtype=torch.float32),
+            query_slot_target_ids=torch.tensor([[2, 3], [5, 6]], dtype=torch.long),
+            doc_slot_target_ids=torch.tensor(
+                [[[2, 3], [-100, -100]], [[5, 6], [-100, -100]]],
+                dtype=torch.long,
+            ),
+        )
+
+        self.assertEqual(len(outputs), 27)
+        self.assertGreater(float(outputs[2].item()), 0.0)
+        self.assertGreater(float(outputs[20].item()), 0.0)
+        self.assertGreater(float(outputs[21].item()), 0.0)
+        self.assertGreater(float(outputs[22].item()), 0.0)
 
     def test_unfrozen_ddp_applies_large_vocab_aten_gemm_safety(self) -> None:
         model = _DummyModel(freeze_backbone=False, vocab_size=30522)

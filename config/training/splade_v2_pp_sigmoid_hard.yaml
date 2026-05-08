@@ -8,6 +8,7 @@ name: splade_v2_pp_sigmoid_hard
 # base integer interval (5000 batches) can exceed the per-epoch batch count and
 # fail Lightning setup. Validate once per epoch by default for this config.
 val_check_interval: 1.0
+val_check_interval_optimizer_steps: null
 
 loss:
   type: sigmoid_pairwise_hard

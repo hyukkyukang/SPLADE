@@ -1,0 +1,14 @@
+# @package training
+defaults:
+  - splade_v2
+
+name: pretrained_diffusion_splade
+torch_compile_mode: default
+torch_compile_validation_mode: default
+torch_compile_large_vocab_threshold: 30000
+
+mdlm:
+  enabled: false
+  weight: 0.0
+  eps: 0.001
+  force_mask_at_least_one: true

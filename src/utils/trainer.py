@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any
+from typing import Any, cast
 
 import torch
 from lightning.pytorch.strategies import DDPStrategy, DeepSpeedStrategy, FSDPStrategy
@@ -45,6 +45,7 @@ def _compile_safe_mode_requests_dynamic_ddp(cfg_section: DictConfig) -> bool:
     compile_mode_normalized: str = compile_mode.strip().lower()
     compile_safe_modes: set[str] = {
         "max-autotune",
+        "max-autotune-no-cudagraphs",
         "reduce-overhead",
     }
     compile_ddp_safe_mode: bool = bool(
@@ -236,3 +237,26 @@ def resolve_precision(cfg_section: DictConfig) -> str:
     ):
         return "16-mixed"
     return precision
+
+
+def resolve_validation_check_interval(cfg_section: DictConfig) -> int | float:
+    """Resolve Lightning's batch-based val_check_interval.
+
+    When `val_check_interval_optimizer_steps` is set, we convert it into the
+    batch-based interval expected by Lightning using `grad_accumulation`.
+    Otherwise, we preserve the configured `val_check_interval` verbatim so
+    float-per-epoch schedules continue to work.
+    """
+    optimizer_step_interval: Any = cfg_section.get("val_check_interval_optimizer_steps")
+    if optimizer_step_interval is None:
+        return cast(int | float, cfg_section.get("val_check_interval"))
+
+    resolved_optimizer_step_interval: int = int(optimizer_step_interval)
+    if resolved_optimizer_step_interval <= 0:
+        raise ValueError(
+            "training.val_check_interval_optimizer_steps must be a positive integer."
+        )
+    grad_accumulation: int = int(cfg_section.get("grad_accumulation", 1))
+    if grad_accumulation <= 0:
+        raise ValueError("training.grad_accumulation must be >= 1.")
+    return resolved_optimizer_step_interval * grad_accumulation

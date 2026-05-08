@@ -15,6 +15,10 @@ _SPARSE_TRAINING_METRIC_NAMES: tuple[tuple[str, str], ...] = (
     ("in_batch_loss", "train_in_batch_loss"),
     ("q_reg", "train_q_reg"),
     ("d_reg", "train_d_reg"),
+    ("mdlm_q_loss", "train_mdlm_q_loss"),
+    ("mdlm_d_loss", "train_mdlm_d_loss"),
+    ("mdlm_loss", "train_mdlm_loss"),
+    ("mdlm_weight", "train_mdlm_weight"),
     ("reg_query_lambda", "train_reg_query_lambda"),
     ("reg_doc_lambda", "train_reg_doc_lambda"),
     ("q_rep_magnitude", "train_q_rep_magnitude"),
@@ -114,15 +118,16 @@ class TrainingMetricsService:
     def log_training_metrics(
         self, module: L.LightningModule, metrics: dict[str, torch.Tensor]
     ) -> None:
+        should_log_step_only: bool = self.should_compute_step_only_metrics(module)
+        if not should_log_step_only:
+            return
         module.log(
             "train_loss",
             metrics["loss"].detach(),
             on_step=True,
-            on_epoch=True,
-            prog_bar=True,
+            on_epoch=False,
+            prog_bar=False,
         )
-        if not self.should_compute_step_only_metrics(module):
-            return
 
         metric_name: str
         log_name: str

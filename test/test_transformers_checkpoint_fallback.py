@@ -255,5 +255,25 @@ class TransformersCheckpointFallbackTest(unittest.TestCase):
             )
 
 
+    def test_build_masked_lm_model_retries_official_lens_checkpoint_with_ignore_mismatch(self) -> None:
+        dummy_model = _build_tiny_bert()
+        with patch(
+            "src.utils.transformers.MistralBiForCausalLM.from_pretrained",
+            side_effect=[RuntimeError("size mismatch"), dummy_model],
+        ) as mocked_bi_loader, patch(
+            "src.utils.transformers._has_official_lens_lm_head_artifact",
+            return_value=True,
+        ):
+            loaded_model = build_masked_lm_model(
+                "yibinlei/LENS-d4000",
+                model_class_name="MistralBiForCausalLM",
+            )
+
+        self.assertIs(loaded_model, dummy_model)
+        self.assertEqual(mocked_bi_loader.call_count, 2)
+        self.assertNotIn("ignore_mismatched_sizes", mocked_bi_loader.call_args_list[0].kwargs)
+        self.assertTrue(mocked_bi_loader.call_args_list[1].kwargs["ignore_mismatched_sizes"])
+
+
 if __name__ == "__main__":
     unittest.main()

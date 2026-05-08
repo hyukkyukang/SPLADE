@@ -40,6 +40,20 @@ class EvaluateBenchmarkRoutingTest(unittest.TestCase):
             ["script/evaluate.py", "nanobeir.datasets=[msmarco]"],
         )
 
+    def test_extracts_true_mteb_benchmark_argument(self) -> None:
+        benchmark_name, forwarded_argv = _extract_benchmark_argument(
+            [
+                "script/evaluate.py",
+                "--benchmark=true_mteb",
+                "mteb.tasks=[NFCorpus,SciFact]",
+            ]
+        )
+        self.assertEqual(benchmark_name, "true_mteb")
+        self.assertEqual(
+            forwarded_argv,
+            ["script/evaluate.py", "mteb.tasks=[NFCorpus,SciFact]"],
+        )
+
     def test_raises_on_missing_benchmark_value(self) -> None:
         with self.assertRaisesRegex(ValueError, "Missing value for --benchmark"):
             _extract_benchmark_argument(["script/evaluate.py", "--benchmark"])

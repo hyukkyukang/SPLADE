@@ -70,6 +70,11 @@ class DummyDataset:
         return {"d0": 0}
 
 
+class DummyInlineDataset(DummyDataset):
+    provides_query_texts_inline: bool = True
+    provides_doc_texts_inline: bool = True
+
+
 class PDModuleLoadingPolicyTest(unittest.TestCase):
     def test_base_prepare_data_only_prepares_meta_dataset(self) -> None:
         module = PDModule(
@@ -101,6 +106,23 @@ class PDModuleLoadingPolicyTest(unittest.TestCase):
         self.assertIn("query_dataset_id_to_idx", dataset.events)
         self.assertIn("corpus_dataset_id_to_idx", dataset.events)
 
+    def test_training_setup_skips_query_corpus_for_inline_text_dataset(self) -> None:
+        module = TrainingPDModule(
+            cfg=build_dataset_cfg(),
+            tokenizer=DummyTokenizer(),
+            seed=123,
+        )
+        dataset = DummyInlineDataset()
+        module._dataset = dataset
+
+        module.setup()
+
+        self.assertIn("meta_dataset", dataset.events)
+        self.assertNotIn("query_dataset", dataset.events)
+        self.assertNotIn("corpus_dataset", dataset.events)
+        self.assertNotIn("query_dataset_id_to_idx", dataset.events)
+        self.assertNotIn("corpus_dataset_id_to_idx", dataset.events)
+
     def test_reranking_setup_warms_query_corpus_and_id_maps(self) -> None:
         module = RerankingPDModule(
             cfg=build_dataset_cfg(),
@@ -121,6 +143,12 @@ class PDModuleLoadingPolicyTest(unittest.TestCase):
     def test_encode_prepare_data_is_noop_and_setup_warms_only_corpus(self) -> None:
         module = EncodePDModule(
             cfg=build_dataset_cfg(),
+            encoding_cfg=OmegaConf.create(
+                {
+                    "long_doc_strategy": "truncate",
+                    "sliding_window_overlap_tokens": 0,
+                }
+            ),
             tokenizer=DummyTokenizer(),
             seed=123,
         )
