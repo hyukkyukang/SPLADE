@@ -379,11 +379,24 @@ class OpenSearchPatentSource:
         index_name: str,
         timeout_seconds: int,
         source_fields: Sequence[str] | None = None,
+        field_prefix: str = "US",
     ) -> None:
         self.base_url = str(base_url).rstrip("/")
         self.index_name = str(index_name)
         self.timeout_seconds = int(timeout_seconds)
-        self.source_fields = list(source_fields or ["doc_id", "US_title", "US_abstract", "US_claims"])
+        self.field_prefix = str(field_prefix)
+        self.title_field = f"{self.field_prefix}_title"
+        self.abstract_field = f"{self.field_prefix}_abstract"
+        self.claims_field = f"{self.field_prefix}_claims"
+        self.source_fields = list(
+            source_fields
+            or [
+                "doc_id",
+                self.title_field,
+                self.abstract_field,
+                self.claims_field,
+            ]
+        )
 
     def fetch_documents(
         self,
@@ -429,9 +442,9 @@ class OpenSearchPatentSource:
                     continue
                 results[doc_id] = PatentDocument(
                     doc_id=doc_id,
-                    title=normalize_patent_text(source.get("US_title")),
-                    abstract=normalize_patent_text(source.get("US_abstract")),
-                    claims=normalize_patent_text(source.get("US_claims")),
+                    title=normalize_patent_text(source.get(self.title_field)),
+                    abstract=normalize_patent_text(source.get(self.abstract_field)),
+                    claims=normalize_patent_text(source.get(self.claims_field)),
                 )
         return results
 
@@ -1117,6 +1130,7 @@ def build_patent_source(
     opensearch_url: str,
     opensearch_index: str,
     timeout_seconds: int,
+    opensearch_field_prefix: str = "US",
 ) -> Any:
     normalized_patent_source: str = str(patent_source).strip().lower()
     if normalized_patent_source in {"huggingface", "hf", "parquet"}:
@@ -1128,6 +1142,7 @@ def build_patent_source(
             base_url=opensearch_url,
             index_name=opensearch_index,
             timeout_seconds=timeout_seconds,
+            field_prefix=opensearch_field_prefix,
         )
     raise ValueError(
         "patent_source must be one of: huggingface, parquet, hf, opensearch."
@@ -1415,6 +1430,7 @@ def export_patent_splade_terms(
     opensearch_url: str,
     opensearch_index: str,
     opensearch_batch_size: int,
+    opensearch_field_prefix: str = "US",
     document_batch_size: int,
     encode_batch_size: int,
     dataloader_num_workers: int,
@@ -1472,6 +1488,7 @@ def export_patent_splade_terms(
         opensearch_url=opensearch_url,
         opensearch_index=opensearch_index,
         timeout_seconds=timeout_seconds,
+        opensearch_field_prefix=opensearch_field_prefix,
     )
     documents_by_id: dict[str, PatentDocument] = source.fetch_documents(
         patent_ids,

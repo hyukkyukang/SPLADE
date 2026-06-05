@@ -72,6 +72,14 @@ def _parse_args() -> argparse.Namespace:
         help="Document batch size for OpenSearch _mget requests.",
     )
     parser.add_argument(
+        "--opensearch-field-prefix",
+        default="US",
+        help=(
+            "Country prefix for OpenSearch title/abstract/claims fields "
+            "(e.g., US -> US_title/US_abstract/US_claims; EP for EP_* fields)."
+        ),
+    )
+    parser.add_argument(
         "--document-batch-size",
         type=int,
         default=256,
@@ -197,6 +205,7 @@ def main() -> None:
         opensearch_url=str(args.opensearch_url),
         opensearch_index=str(args.opensearch_index),
         opensearch_batch_size=int(args.opensearch_batch_size),
+        opensearch_field_prefix=str(args.opensearch_field_prefix),
         document_batch_size=int(args.document_batch_size),
         encode_batch_size=int(args.encode_batch_size),
         dataloader_num_workers=int(args.dataloader_num_workers),
